@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import threading
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from .config import Settings, dia_operacional, load_settings
 
 _VISTOS: set[str] = set()
+_DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
+_NOME_USUARIO = "sagtrack"
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -28,8 +31,7 @@ def _norm(texto: str) -> str:
     return re.sub(r"\s+", " ", sem).strip().upper()
 
 
-def comando_grupo(texto: str) -> tuple[str, str] | None:
-    cmd = _norm(texto)
+def _comando_simples(cmd: str) -> tuple[str, str] | None:
     if cmd in {"MENU", "AJUDA", "COMANDOS", "OI", "OLA", "INICIO"}:
         return "menu", ""
     if cmd in {"FROTA", "RELATORIO", "RELATORIO FROTA", "RELATORIO DA FROTA"}:
@@ -45,6 +47,51 @@ def comando_grupo(texto: str) -> tuple[str, str] | None:
     if re.fullmatch(r"[A-Z]{3}-?\d[A-Z0-9]\d{2}", cmd):
         return "placa", cmd
     return None
+
+
+def _extrair_data(cmd: str, hoje: date) -> tuple[date | None, str]:
+    marcado = re.fullmatch(
+        r"DIA\s+(\d{1,2})(?:[/-](\d{1,2})(?:[/-](\d{4}))?)?(?:\s+(.*))?",
+        cmd,
+    )
+    livre = None if marcado else re.fullmatch(
+        r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?(?:\s+(.*))?",
+        cmd,
+    )
+    alvo = marcado or livre
+    if alvo is None:
+        return None, cmd
+    dia_n = int(alvo.group(1))
+    mes_n = int(alvo.group(2) or hoje.month)
+    ano_n = int(alvo.group(3) or hoje.year)
+    try:
+        escolhida = date(ano_n, mes_n, dia_n)
+    except ValueError as exc:
+        raise ValueError("data") from exc
+    return escolhida, (alvo.group(4) or "").strip()
+
+
+def comando_grupo(texto: str, hoje: date | None = None) -> tuple[str, str, date | None] | None:
+    """Lê o pedido do grupo. A data, quando vem, é o dia em que o turno começa às 06:00."""
+    hoje = hoje or date.today()
+    cmd = _norm(texto)
+    try:
+        dia, resto = _extrair_data(cmd, hoje)
+    except ValueError:
+        return "erro", "Essa data não existe. Use *dia 26* ou *26/09*.", None
+    if dia is not None and not resto:
+        return "dia", "", dia
+    pedido = _comando_simples(resto or cmd)
+    if pedido is None:
+        if dia is not None:
+            return "erro", "Depois da data, peça *frota*, a rota ou a placa.", dia
+        return None
+    return pedido[0], pedido[1], dia
+
+
+def _rotulo_turno(dia: date) -> str:
+    fim = dia + timedelta(days=1)
+    return f"{dia.strftime('%d/%m/%Y')} das 06:00 até {fim.strftime('%d/%m/%Y')} 05:59"
 
 
 def _config_arquivo() -> dict[str, Any]:
@@ -122,29 +169,93 @@ def _pedido(
     return _json(pedido, timeout)
 
 
-def preparar(settings: Settings | None = None) -> str:
+def _limpar(valor: Any) -> Any:
+    if isinstance(valor, dict):
+        return {
+            chave: _limpar(item)
+            for chave, item in valor.items()
+            if "token" not in chave.lower() and chave.lower() not in {"publickey", "hmac_key"}
+        }
+    if isinstance(valor, list):
+        return [_limpar(item) for item in valor]
+    return valor
+
+
+def _usuarios(settings: Settings) -> list[dict[str, Any]]:
+    lista = _pedido(settings, "/admin/users", admin=True)
+    dados = (lista or {}).get("data") if isinstance(lista, dict) else lista
+    return [item for item in dados or [] if isinstance(item, dict)]
+
+
+def _por_nome(usuarios: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in usuarios:
+        nome = str(item.get("name") or item.get("Name") or "").strip().lower()
+        if nome == _NOME_USUARIO:
+            return item
+    return None
+
+
+def _gravar_token(token: str) -> None:
+    atual = _config_arquivo()
+    atual["wuzapi_token"] = token
+    _caminho_config().parent.mkdir(parents=True, exist_ok=True)
+    _caminho_config().write_text(json.dumps(atual, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def garantir_token(settings: Settings) -> Settings:
+    """Usa o usuário sagtrack já existente. Só cria token novo quando esse usuário não existe."""
+    from dataclasses import replace
+
+    if not settings.wuzapi_admin_token:
+        return settings
+    try:
+        usuarios = _usuarios(settings)
+    except Exception:
+        return settings
+    achado = _por_nome(usuarios)
+    if achado is not None:
+        token = str(achado.get("token") or achado.get("Token") or "").strip()
+        if token and token != settings.wuzapi_admin_token:
+            return replace(settings, wuzapi_token=token)
+        return settings
+    token = "sagtrack_" + secrets.token_hex(8)
+    try:
+        _pedido(
+            settings,
+            "/admin/users",
+            {
+                "name": _NOME_USUARIO,
+                "token": token,
+                "webhook": settings.webhook_url,
+                "events": "Message",
+            },
+            admin=True,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            return settings
+    try:
+        de_novo = _usuarios(settings)
+    except Exception:
+        return replace(settings, wuzapi_token=token)
+    criado = _por_nome(de_novo)
+    real = str((criado or {}).get("token") or (criado or {}).get("Token") or token).strip() or token
+    _gravar_token(real)
+    return replace(settings, wuzapi_token=real)
+
+
+def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
     settings = settings or load_settings()
     try:
-        lista = _pedido(settings, "/admin/users", admin=True)
+        settings = garantir_token(settings)
     except Exception as exc:
-        return f"Wuzapi indisponível: {exc}"
-    usuarios = (lista or {}).get("data") or []
-    if not any(str(item.get("token") or "") == settings.wuzapi_token for item in usuarios):
-        try:
-            _pedido(
-                settings,
-                "/admin/users",
-                {
-                    "name": "sagtrack",
-                    "token": settings.wuzapi_token,
-                    "webhook": settings.webhook_url,
-                    "events": "Message",
-                },
-                admin=True,
-            )
-        except urllib.error.HTTPError as exc:
-            if exc.code != 409:
-                return f"Não criei o usuário da Sagtrack na Wuzapi: {exc}"
+        return settings, f"Wuzapi indisponível: {exc}"
+    if not settings.wuzapi_token:
+        return settings, "A sessão da Sagtrack ainda não tem token na Wuzapi."
+    try:
+        _usuarios(settings)
+    except Exception as exc:
+        return settings, f"Wuzapi indisponível: {exc}"
     for corpo in (
         {"webhookURL": settings.webhook_url, "events": ["Message"]},
         {"webhook": settings.webhook_url, "events": "Message"},
@@ -154,12 +265,12 @@ def preparar(settings: Settings | None = None) -> str:
             break
         except Exception:
             continue
-    return ""
+    return settings, ""
 
 
 def status(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
-    aviso = preparar(settings)
+    settings, aviso = preparar(settings)
     if aviso:
         return {"configurado": False, "erro": aviso, "grupo": grupo_configurado(settings)}
     try:
@@ -175,7 +286,7 @@ def status(settings: Settings | None = None) -> dict[str, Any]:
     return {
         "configurado": True,
         "conectado": logado and socket,
-        "sessao": dados,
+        "sessao": _limpar(dados),
         "grupo": grupo,
         "grupo_nome": grupo_nome(),
         "travado": bool(grupo),
@@ -184,7 +295,7 @@ def status(settings: Settings | None = None) -> dict[str, Any]:
 
 def conectar(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
-    aviso = preparar(settings)
+    settings, aviso = preparar(settings)
     if aviso:
         return {"erro": aviso}
     atual = status(settings)
@@ -199,7 +310,7 @@ def conectar(settings: Settings | None = None) -> dict[str, Any]:
 
 def desconectar(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
-    aviso = preparar(settings)
+    settings, aviso = preparar(settings)
     if aviso:
         return {"erro": aviso}
     try:
@@ -211,6 +322,9 @@ def desconectar(settings: Settings | None = None) -> dict[str, Any]:
 
 def qr(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
+    settings, aviso = preparar(settings)
+    if aviso:
+        return {"erro": aviso}
     atual = status(settings)
     if atual.get("erro"):
         return atual
@@ -233,12 +347,16 @@ def qr(settings: Settings | None = None) -> dict[str, Any]:
     except Exception as exc:
         return {"erro": str(exc)}
     dados = corpo.get("data") if isinstance(corpo, dict) else corpo
-    return dados if isinstance(dados, dict) else {"qr": dados}
+    if not isinstance(dados, dict):
+        return {"qr": dados}
+    return _limpar(dados)
 
 
 def grupos(settings: Settings | None = None) -> list[dict[str, Any]]:
     settings = settings or load_settings()
-    preparar(settings)
+    settings, aviso = preparar(settings)
+    if aviso:
+        raise RuntimeError(aviso)
     corpo = _pedido(settings, "/group/list")
     dados = corpo.get("data") if isinstance(corpo, dict) else {}
     lista = []
@@ -292,10 +410,12 @@ def enviar_pdf(settings: Settings, destino: str, arquivo: bytes, nome: str) -> N
 def _menu() -> str:
     return (
         "*Relatórios Sagtrack*\n"
-        "O turno é sempre das *06:00* até *05:59* do dia seguinte.\n\n"
-        "*frota* — PDF da frota, com o mapa completo, todas as rotas e como cada uma foi feita\n"
-        "*04AD* ou *rota 04AD* — como está a rota, se foi feita e qual caminhão coletou\n"
-        "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão e os polígonos das rotas em que ele coletou\n\n"
+        "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
+        "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
+        "*dia 26* — marca o turno; depois peça o relatório\n"
+        "*dia 26 frota* ou *26/09 frota* — PDF da frota nesse turno\n"
+        "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
+        "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -339,9 +459,19 @@ def mapear_mensagem(body: Any) -> dict[str, str] | None:
     }
 
 
+def _garantir_coleta(settings: Settings, dia: date) -> None:
+    if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+        return
+    from .config import aplicar_periodo
+    from .motor import executar
+
+    executar(aplicar_periodo(settings, dia))
+
+
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
+    _garantir_coleta(settings, dia)
     if tipo == "frota":
         return pdf_frota(settings.output_dir, dia)
     if tipo == "rota":
@@ -351,6 +481,10 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
 
 def processar(body: Any, settings: Settings | None = None) -> None:
     settings = settings or load_settings()
+    settings, aviso = preparar(settings)
+    if aviso:
+        print(f"WhatsApp: {aviso}", flush=True)
+        return
     mensagem = mapear_mensagem(body)
     if mensagem is None:
         return
@@ -371,14 +505,32 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             if len(_VISTOS) > 400:
                 _VISTOS.clear()
                 _VISTOS.add(mensagem["id"])
-    tipo, consulta = pedido
+    tipo, consulta, dia_pedido = pedido
     print(f"WhatsApp: {tipo} {consulta}".strip(), flush=True)
     try:
         if tipo == "menu":
             enviar_texto(settings, mensagem["grupo"], _menu())
             return
-        dia = dia_operacional()
-        enviar_texto(settings, mensagem["grupo"], "Montando o PDF do turno. Já envio neste grupo.")
+        if tipo == "erro":
+            enviar_texto(settings, mensagem["grupo"], consulta)
+            return
+        chave = (mensagem["grupo"], mensagem["participante"])
+        if tipo == "dia" and dia_pedido is not None:
+            _DIAS[chave] = dia_pedido
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                f"Turno de {_rotulo_turno(dia_pedido)}. Agora peça *frota*, a rota ou a placa.",
+            )
+            return
+        dia = dia_pedido or _DIAS.get(chave) or dia_operacional()
+        if dia_pedido is not None:
+            _DIAS[chave] = dia_pedido
+        enviar_texto(
+            settings,
+            mensagem["grupo"],
+            f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+        )
         arquivo, nome = _gerar(settings, tipo, consulta, dia)
         enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
     except Exception as exc:

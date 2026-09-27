@@ -283,7 +283,7 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     def preparar_whatsapp() -> None:
         from .whatsapp import preparar
 
-        aviso = preparar(settings)
+        _, aviso = preparar(settings)
         if aviso:
             print(f"WhatsApp: {aviso}", flush=True)
         else:

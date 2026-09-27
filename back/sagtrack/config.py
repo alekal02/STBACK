@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -157,6 +158,19 @@ class Settings:
     fulltrack_secret_key: str
 
 
+def _token_whatsapp() -> str:
+    arquivo = pasta_dados() / "whatsapp.json"
+    if arquivo.is_file():
+        try:
+            dado = json.loads(arquivo.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            dado = {}
+        salvo = str((dado or {}).get("wuzapi_token") or "").strip() if isinstance(dado, dict) else ""
+        if salvo:
+            return salvo
+    return os.getenv("WUZAPI_TOKEN", "").strip()
+
+
 def load_settings() -> Settings:
     load_dotenv(ROOT / ".env", override=True)
     if not os.getenv("FULLTRACK_API_KEY") and (ROOT / "envsag").is_file():
@@ -192,7 +206,7 @@ def load_settings() -> Settings:
         porta=_as_int(os.getenv("PORT") or os.getenv("PORTA"), 6480),
         veiculos=veiculos,
         wuzapi_url=os.getenv("WUZAPI_URL", "http://127.0.0.1:8081").strip(),
-        wuzapi_token=os.getenv("WUZAPI_TOKEN", "").strip(),
+        wuzapi_token=_token_whatsapp(),
         wuzapi_admin_token=os.getenv("WUZAPI_ADMIN_TOKEN", "").strip(),
         webhook_url=webhook,
         whatsapp_group_jid=os.getenv("WHATSAPP_GROUP_JID", "").strip(),

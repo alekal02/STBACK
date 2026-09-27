@@ -226,7 +226,7 @@ def garantir_token(settings: Settings) -> Settings:
             {
                 "name": _NOME_USUARIO,
                 "token": token,
-                "webhook": settings.webhook_url,
+                "webhook": _webhook_para(settings),
                 "events": "Message",
             },
             admin=True,
@@ -244,6 +244,16 @@ def garantir_token(settings: Settings) -> Settings:
     return replace(settings, wuzapi_token=real)
 
 
+def _webhook_para(settings: Settings) -> str:
+    """A Wuzapi pública não pode receber o endereço local desta máquina."""
+    url = settings.webhook_url.strip()
+    wuzapi_local = any(item in settings.wuzapi_url for item in ("127.0.0.1", "localhost"))
+    webhook_local = any(item in url for item in ("127.0.0.1", "localhost", "host.docker.internal"))
+    if not wuzapi_local and webhook_local:
+        return "https://sagtrack-backend.onrender.com/api/webhooks/whatsapp"
+    return url
+
+
 def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
     settings = settings or load_settings()
     try:
@@ -256,9 +266,10 @@ def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
         _usuarios(settings)
     except Exception as exc:
         return settings, f"Wuzapi indisponível: {exc}"
+    webhook = _webhook_para(settings)
     for corpo in (
-        {"webhookURL": settings.webhook_url, "events": ["Message"]},
-        {"webhook": settings.webhook_url, "events": "Message"},
+        {"webhookURL": webhook, "events": ["Message"]},
+        {"webhook": webhook, "events": "Message"},
     ):
         try:
             _pedido(settings, "/webhook", corpo)

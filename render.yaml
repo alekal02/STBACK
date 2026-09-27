@@ -1,0 +1,49 @@
+# Blueprint Render — mesmo modelo do pneusistemma-backend.
+# Plano starter: o disco guarda as coletas entre um deploy e outro.
+
+services:
+  - type: web
+    name: sagtrack-backend
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r back/requirements.txt
+    startCommand: PYTHONPATH=back python -m sagtrack servir
+    healthCheckPath: /api/health
+    disk:
+      name: sagtrack-dados
+      mountPath: /var/sagtrack
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: OUTPUT_DIR
+        value: /var/sagtrack/output
+      - key: SAGTRACK_DATA_DIR
+        value: /var/sagtrack/data
+      - key: HORA_INICIO
+        value: "06:00"
+      - key: HORA_FIM
+        value: "05:59"
+      - key: WUZAPI_URL
+        value: http://24.199.86.195:8080
+      - key: ALLOW_VERCEL_PREVIEWS
+        value: "true"
+      - key: FULLTRACK_BASE_URL
+        value: https://web-service2.ftdata.com.br
+      - key: FULLTRACK_USERNAME
+        sync: false
+      - key: FULLTRACK_PASSWORD
+        sync: false
+      - key: FULLTRACK_CLIENT_ID
+        sync: false
+      - key: FULLTRACK_API_KEY
+        sync: false
+      - key: FULLTRACK_SECRET_KEY
+        sync: false
+      - key: WUZAPI_TOKEN
+        sync: false
+      - key: WUZAPI_ADMIN_TOKEN
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false

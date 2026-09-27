@@ -1,0 +1,8 @@
+.env
+envsag
+output/
+__pycache__/
+*.pyc
+.venv/
+data/whatsapp.json
+front/dist/

@@ -624,15 +624,91 @@ def _garantir_coleta(settings: Settings, dia: date) -> None:
     executar(aplicar_periodo(settings, dia))
 
 
+def _fontes_do_dia(pasta: Path) -> list[Path]:
+    return [pasta / "frota.json", pasta / "resumo.json", pasta / "setores.json"]
+
+
+def _cache_pdf(pasta: Path, chave: str) -> Path | None:
+    destino = pasta / "cache" / chave
+    if not destino.is_file():
+        return None
+    selo = destino.stat().st_mtime
+    fontes = [item for item in _fontes_do_dia(pasta) if item.is_file()]
+    if not fontes or any(item.stat().st_mtime > selo for item in fontes):
+        return None
+    return destino
+
+
+def _guardar_cache(pasta: Path, chave: str, arquivo: bytes) -> None:
+    destino = pasta / "cache" / chave
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_bytes(arquivo)
+
+
+def _texto_frota(settings: Settings, dia: date) -> str:
+    from .pdfmapa import _ler, _rotulo_andamento
+    from .relatorios import _fmt_pct, balanco_frota
+
+    pasta = settings.output_dir / dia.isoformat()
+    if not (pasta / "resumo.json").is_file():
+        return ""
+    balanco = balanco_frota(_ler(pasta, "setores.json") or [], _ler(pasta, "frota.json") or [])
+    feitas = sum(1 for row in balanco if row["situacao"] == "Feita")
+    parciais = sum(1 for row in balanco if row["situacao"] == "Parcial")
+    nao = sum(1 for row in balanco if row["situacao"] == "Não feita")
+    linhas = [
+        f"*Frota {dia.strftime('%d/%m/%Y')}*",
+        f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · {nao} não feitas.",
+        "Feita só a partir de 90%. De 45% a 89% é parcial.",
+        "",
+    ]
+    for row in balanco:
+        if int(row.get("paradas") or 0) <= 0:
+            continue
+        linhas.append(
+            f"{row['codigo']} {row['nome']} · {_fmt_pct(row['percentual'])} · {_rotulo_andamento(row)}"
+        )
+    vazias = [str(row["codigo"]) for row in balanco if int(row.get("paradas") or 0) <= 0]
+    if vazias:
+        linhas.append("")
+        linhas.append("Sem coleta: " + ", ".join(vazias))
+    linhas.append("")
+    linhas.append("O PDF com os mapas segue agora.")
+    return "\n".join(linhas)[:3900]
+
+
+def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> str:
+    from .relatorios import montar
+
+    if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+        return ""
+    rel = montar(settings.output_dir, dia, tipo, consulta)
+    linhas = [str(item) for item in (rel.get("texto") or []) if str(item).strip()]
+    if not linhas:
+        return ""
+    linhas.append("O PDF segue agora.")
+    return "\n".join(linhas[:12])[:3900]
+
+
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
     _garantir_coleta(settings, dia)
+    pasta = settings.output_dir / dia.isoformat()
+    chave = f"{tipo}-{(consulta or '').strip().upper()}.pdf"
+    guardado = _cache_pdf(pasta, chave)
+    if guardado is not None:
+        if tipo == "frota":
+            return guardado.read_bytes(), f"frota-{dia.isoformat()}.pdf"
+        return guardado.read_bytes(), f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
     if tipo == "frota":
-        return pdf_frota(settings.output_dir, dia)
-    if tipo == "rota":
-        return pdf_rota(settings.output_dir, dia, consulta)
-    return pdf_placa(settings.output_dir, dia, consulta)
+        arquivo, nome = pdf_frota(settings.output_dir, dia)
+    elif tipo == "rota":
+        arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
+    else:
+        arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
+    _guardar_cache(pasta, chave, arquivo)
+    return arquivo, nome
 
 
 def processar(body: Any, settings: Settings | None = None) -> None:
@@ -690,15 +766,23 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             enviar_texto(
                 settings,
                 mensagem["grupo"],
-                "Ainda estou montando o PDF anterior. Ele chega neste grupo assim que terminar.",
+                "Ainda estou montando o PDF anterior. O resumo dele já foi enviado neste grupo.",
             )
             return
         try:
-            enviar_texto(
-                settings,
-                mensagem["grupo"],
-                f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+            resumo = (
+                _texto_frota(settings, dia)
+                if tipo == "frota"
+                else _texto_consulta(settings, tipo, consulta, dia)
             )
+            if resumo:
+                enviar_texto(settings, mensagem["grupo"], resumo)
+            else:
+                enviar_texto(
+                    settings,
+                    mensagem["grupo"],
+                    f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+                )
             arquivo, nome = _gerar(settings, tipo, consulta, dia)
             print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
             enviar_pdf(settings, mensagem["grupo"], arquivo, nome)

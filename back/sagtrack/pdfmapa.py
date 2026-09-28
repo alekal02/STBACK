@@ -567,7 +567,7 @@ def _dentro_da_rota(pontos: list[dict[str, Any]], aneis: list) -> list[dict[str,
         if not poly.is_valid:
             poly = poly.buffer(0)
         if not poly.is_empty:
-            zonas.append(poly.buffer(0.00018))
+            zonas.append(poly.buffer(0.00022))
     if not zonas:
         return list(pontos or [])
     saida = []

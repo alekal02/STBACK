@@ -648,6 +648,20 @@ def _achar_caminhao(frota: list[dict[str, Any]], consulta: str) -> dict[str, Any
     return None
 
 
+def _gps_na_rota(
+    dia: date,
+    codigo: str,
+    aneis: list,
+    placa: str,
+    pontos_por_placa: dict[str, list],
+) -> list[list[list[float]]]:
+    from .gps import trajetoria_uniforme
+    from .pdfmapa import _dentro_da_rota, _vias_oficiais
+
+    brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
+    return trajetoria_uniforme(brutos, _vias_oficiais(dia, codigo), dia=dia)
+
+
 def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]:
     pasta = _pasta(output_dir, dia)
     setores = _ler(pasta, "setores.json") or []
@@ -679,6 +693,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
             "setores": [],
         }
     codigo = str(setor.get("codigo") or "")
+    pontos_salvos = _ler(pasta, "pontos.json") or {}
     presentes = []
     feitos_rota: list = []
     faltando_rota: list = []
@@ -712,7 +727,12 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
                 "feitos": feitos,
                 "faltando": faltando,
                 "paradas_pontos": cob.get("paradas_pontos") or [],
-                "gps": _linhas_leves(bruto.get("trechos_gps"), 800),
+                "gps": (
+                    _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
+                    if papel in {"ATUANDO", "APOIO"}
+                    else []
+                )
+                or _linhas_leves(bruto.get("trechos_gps"), 800),
             }
         )
     if not faltando_rota:

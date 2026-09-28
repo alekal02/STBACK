@@ -313,6 +313,171 @@ def _fatia_via(via: list[list[float]], inicio_m: float, fim_m: float) -> list[Po
     return saida
 
 
+def _no_via(ponto: Ponto) -> tuple[int, int]:
+    return (int(round(float(ponto[0]) * 1_000_000)), int(round(float(ponto[1]) * 1_000_000)))
+
+
+def _alongar(destino: list[Ponto], extra: list[Ponto]) -> None:
+    if not extra:
+        return
+    if destino and haversine_m(destino[-1], extra[0]) < 4:
+        destino.extend(extra[1:])
+    else:
+        destino.extend(extra)
+
+
+_REDE_CACHE: dict[tuple, list[list[list[float]]]] = {}
+
+
+def _rede_viaria(ruas: list[list[list[float]]]) -> list[list[list[float]]]:
+    """Une as ruas oficiais nos cruzamentos para o trajeto não quebrar no meio da quadra."""
+    from shapely.geometry import LineString
+    from shapely.ops import linemerge, snap, unary_union
+
+    if not ruas:
+        return []
+    chave = (
+        len(ruas),
+        round(float(ruas[0][0][0]), 5),
+        round(float(ruas[0][0][1]), 5),
+        round(float(ruas[-1][-1][0]), 5),
+        round(float(ruas[-1][-1][1]), 5),
+    )
+    pronta = _REDE_CACHE.get(chave)
+    if pronta is not None:
+        return pronta
+    geoms = []
+    for via in ruas:
+        coords = [(float(p[1]), float(p[0])) for p in via if len(p) >= 2]
+        if len(coords) < 2 or coords[0] == coords[-1]:
+            continue
+        try:
+            linha = LineString(coords)
+        except (TypeError, ValueError):
+            continue
+        if not linha.is_empty and linha.length > 0:
+            geoms.append(linha)
+    if not geoms:
+        return []
+    base = unary_union(geoms)
+    grudado = unary_union([snap(geom, base, 0.0002) for geom in geoms])
+    if grudado.geom_type == "MultiLineString":
+        try:
+            fundido = linemerge(grudado)
+        except ValueError:
+            fundido = grudado
+    else:
+        fundido = grudado
+    partes = [fundido] if fundido.geom_type == "LineString" else list(getattr(fundido, "geoms", []) or [])
+    saida: list[list[list[float]]] = []
+    for geom in partes:
+        linhas = [geom] if geom.geom_type == "LineString" else list(getattr(geom, "geoms", []) or [])
+        for linha in linhas:
+            if linha.geom_type != "LineString" or len(linha.coords) < 2:
+                continue
+            saida.append([[lat, lon] for lon, lat in linha.coords])
+    _REDE_CACHE[chave] = saida
+    return saida
+
+
+def _ligar_na_rede(
+    ruas: list[list[list[float]]],
+    comps: list[float],
+    adj: dict[tuple[int, int], list[tuple[tuple[int, int], int, bool]]],
+    a_idx: int,
+    a_along: float,
+    b_idx: int,
+    b_along: float,
+    limite: float,
+) -> list[Ponto] | None:
+    """Caminho pela rua oficial entre dois pulsos, se a distância cabe no tempo."""
+    import heapq
+
+    if limite < 8:
+        return None
+    if a_idx == b_idx:
+        if abs(b_along - a_along) > limite:
+            return None
+        fatia = _fatia_via(ruas[a_idx], a_along, b_along)
+        return fatia if len(fatia) >= 2 else None
+
+    via_a = ruas[a_idx]
+    via_b = ruas[b_idx]
+    comp_a = comps[a_idx]
+    comp_b = comps[b_idx]
+    no_a0, no_a1 = _no_via((via_a[0][0], via_a[0][1])), _no_via((via_a[-1][0], via_a[-1][1]))
+    no_b0, no_b1 = _no_via((via_b[0][0], via_b[0][1])), _no_via((via_b[-1][0], via_b[-1][1]))
+    inicio: dict[tuple[int, int], list[Ponto]] = {}
+    pai: dict[tuple[int, int], tuple[tuple[int, int], int, bool]] = {}
+    melhor: dict[tuple[int, int], float] = {}
+    heap: list[tuple[float, tuple[int, int]]] = []
+
+    def sair(custo: float, no: tuple[int, int], geom: list[Ponto]) -> None:
+        if custo > limite or custo >= melhor.get(no, limite + 1):
+            return
+        melhor[no] = custo
+        inicio[no] = geom
+        heapq.heappush(heap, (custo, no))
+
+    sair(a_along, no_a0, _fatia_via(via_a, a_along, 0))
+    sair(max(0.0, comp_a - a_along), no_a1, _fatia_via(via_a, a_along, comp_a))
+
+    def geometria_ate(no: tuple[int, int]) -> list[Ponto] | None:
+        passos: list[tuple[int, bool]] = []
+        atual = no
+        vistos: set[tuple[int, int]] = set()
+        while atual not in inicio and atual in pai and atual not in vistos:
+            vistos.add(atual)
+            prev, edge, forward = pai[atual]
+            passos.append((edge, forward))
+            atual = prev
+        if atual not in inicio:
+            return None
+        geom = list(inicio[atual])
+        for edge, forward in reversed(passos):
+            via = ruas[edge] if forward else list(reversed(ruas[edge]))
+            _alongar(geom, [(float(p[0]), float(p[1])) for p in via])
+        return geom
+
+    melhor_geom: list[Ponto] | None = None
+    melhor_total = limite + 1
+    assentados: set[tuple[int, int]] = set()
+    while heap:
+        custo, no = heapq.heappop(heap)
+        if no in assentados or custo > melhor.get(no, custo):
+            continue
+        assentados.add(no)
+        if custo >= melhor_total:
+            continue
+        geom = geometria_ate(no)
+        if geom is None:
+            continue
+        chegadas = []
+        if no == no_b0:
+            chegadas.append((b_along, _fatia_via(via_b, 0, b_along)))
+        if no == no_b1:
+            chegadas.append((max(0.0, comp_b - b_along), _fatia_via(via_b, comp_b, b_along)))
+        for extra, fatia in chegadas:
+            total = custo + extra
+            if total <= limite and total < melhor_total and len(fatia) >= 1:
+                copia = list(geom)
+                _alongar(copia, fatia)
+                if len(copia) >= 2:
+                    melhor_total = total
+                    melhor_geom = copia
+        for outro, edge, forward in adj.get(no, []):
+            if edge in {a_idx, b_idx}:
+                continue
+            custo2 = custo + comps[edge]
+            if custo2 > limite or custo2 >= melhor_total or custo2 >= melhor.get(outro, limite + 1):
+                continue
+            melhor[outro] = custo2
+            pai[outro] = (no, edge, forward)
+            inicio.pop(outro, None)
+            heapq.heappush(heap, (custo2, outro))
+    return melhor_geom
+
+
 def trajetoria_uniforme(
     pontos: list[dict[str, Any]] | None,
     vias: list[list[list[float]]] | None = None,
@@ -320,7 +485,7 @@ def trajetoria_uniforme(
     dia: date | None = None,
     salto_max_m: float = 120.0,
     cola_m: float = 12.0,
-    rua_m: float = 35.0,
+    rua_m: float = 40.0,
 ) -> list[list[list[float]]]:
     """Liga os pulsos pela hora e, quando o pulso está na via oficial, segue o meio da rua."""
     marcas: list[tuple[datetime, Ponto]] = []
@@ -342,15 +507,50 @@ def trajetoria_uniforme(
         return []
 
     ruas = [via for via in (vias or []) if via and len(via) >= 2]
+    if not ruas:
+        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
+
+    ruas = _rede_viaria(ruas) or ruas
     caixas = []
+    comps: list[float] = []
+    adj: dict[tuple[int, int], list[tuple[tuple[int, int], int, bool]]] = {}
     for via in ruas:
         lats = [float(p[0]) for p in via]
         lons = [float(p[1]) for p in via]
-        caixas.append((min(lats) - 0.0004, max(lats) + 0.0004, min(lons) - 0.0004, max(lons) + 0.0004))
+        caixas.append((min(lats) - 0.0005, max(lats) + 0.0005, min(lons) - 0.0005, max(lons) + 0.0005))
+        comp = 0.0
+        for i in range(len(via) - 1):
+            comp += haversine_m((float(via[i][0]), float(via[i][1])), (float(via[i + 1][0]), float(via[i + 1][1])))
+        comps.append(comp)
+        if comp < 1:
+            continue
+        no0 = _no_via((float(via[0][0]), float(via[0][1])))
+        no1 = _no_via((float(via[-1][0]), float(via[-1][1])))
+        indice = len(comps) - 1
+        adj.setdefault(no0, []).append((no1, indice, True))
+        adj.setdefault(no1, []).append((no0, indice, False))
 
-    def projetar(coord: Ponto, preferida: int | None) -> tuple[int, float, Ponto] | None:
-        melhor: tuple[float, int, float, Ponto] | None = None
-        for indice, via in enumerate(ruas):
+    grade: dict[tuple[int, int], list[int]] = {}
+    for indice, via in enumerate(ruas):
+        vistos = set()
+        for ponto in via:
+            celula = (int(float(ponto[0]) * 900), int(float(ponto[1]) * 900))
+            if celula in vistos:
+                continue
+            vistos.add(celula)
+            grade.setdefault(celula, []).append(indice)
+
+    def projetar_rede(coord: Ponto, preferida: int | None) -> tuple[int, float, Ponto] | None:
+        celula = (int(coord[0] * 900), int(coord[1] * 900))
+        perto: list[int] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                perto.extend(grade.get((celula[0] + dx, celula[1] + dy), ()))
+        if preferida is not None:
+            perto.append(preferida)
+        melhor_local: tuple[float, int, float, Ponto] | None = None
+        for indice in dict.fromkeys(perto):
+            via = ruas[indice]
             sul, norte, oeste, leste = caixas[indice]
             if not (sul <= coord[0] <= norte and oeste <= coord[1] <= leste):
                 continue
@@ -358,89 +558,61 @@ def trajetoria_uniforme(
             if achado is None or achado[0] > rua_m:
                 continue
             dist, along, proj = achado
-            if melhor is None or dist < melhor[0]:
-                melhor = (dist, indice, along, proj)
-        if melhor is None:
+            if melhor_local is None or dist < melhor_local[0]:
+                melhor_local = (dist, indice, along, proj)
+        if melhor_local is None:
             return None
-        if preferida is not None and preferida != melhor[1]:
+        if preferida is not None and preferida != melhor_local[1]:
             achado = _proximo_na_via(coord, ruas[preferida])
-            if achado is not None and achado[0] <= rua_m and achado[0] <= melhor[0] + 12:
+            if achado is not None and achado[0] <= rua_m and achado[0] <= melhor_local[0] + 12:
                 return preferida, achado[1], achado[2]
-        return melhor[1], melhor[2], melhor[3]
-
-    if not ruas:
-        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
+        return melhor_local[1], melhor_local[2], melhor_local[3]
 
     trechos: list[list[Ponto]] = []
     atual: list[Ponto] = []
-    via_atual: int | None = None
-    along_lo: float | None = None
-    along_hi: float | None = None
+    anterior: tuple[int, float, Ponto, datetime] | None = None
 
-    def fechar(juntar: bool = True) -> None:
-        nonlocal atual, via_atual, along_lo, along_hi
-        if via_atual is None or along_lo is None or along_hi is None or along_hi - along_lo < 8:
-            via_atual = None
-            along_lo = None
-            along_hi = None
-            return
-        fatia = _fatia_via(ruas[via_atual], along_lo, along_hi)
-        via_atual = None
-        along_lo = None
-        along_hi = None
-        if len(fatia) < 2:
-            return
-        if atual and juntar:
-            if haversine_m(atual[-1], fatia[-1]) < haversine_m(atual[-1], fatia[0]):
-                fatia = list(reversed(fatia))
-            if haversine_m(atual[-1], fatia[0]) <= salto_max_m:
-                atual.extend(fatia[1:])
-                return
+    def quebrar() -> None:
+        nonlocal atual
         if len(atual) >= 2:
             trechos.append(atual)
-        atual = list(fatia)
+        atual = []
 
-    def rapido(antes: datetime, agora: datetime, metros: float) -> bool:
-        dt = abs((agora - antes).total_seconds())
-        if dt <= 0:
-            return metros > 40
-        return metros / dt > (60 / 3.6)
-
-    ultimo_m: datetime | None = None
-    ultimo_along = 0.0
     for momento, coord in seguidos:
-        proj = projetar(coord, via_atual)
+        proj = projetar_rede(coord, anterior[0] if anterior else None)
         if proj is None:
-            fechar()
-            ultimo_m = None
+            quebrar()
+            anterior = None
             continue
-        indice, along, _ponto = proj
-        if via_atual is None:
-            via_atual = indice
-            along_lo = along
-            along_hi = along
-            ultimo_m = momento
-            ultimo_along = along
+        indice, along, ponto = proj
+        if anterior is None:
+            anterior = (indice, along, ponto, momento)
             continue
-        salto = abs(along - ultimo_along) if indice == via_atual else haversine_m(atual[-1], coord) if atual else 0.0
-        if indice != via_atual or (ultimo_m is not None and rapido(ultimo_m, momento, salto)):
-            fechar(juntar=not (ultimo_m is not None and rapido(ultimo_m, momento, salto)))
-            via_atual = indice
-            along_lo = along
-            along_hi = along
-            ultimo_m = momento
-            ultimo_along = along
-            continue
-        along_lo = min(float(along_lo), along)
-        along_hi = max(float(along_hi), along)
-        ultimo_m = momento
-        ultimo_along = along
-    fechar()
-    if len(atual) >= 2:
-        trechos.append(atual)
+        reta = haversine_m(anterior[2], ponto)
+        dt = abs((momento - anterior[3]).total_seconds())
+        pela_forma = max(reta * 2.4, reta + 140.0)
+        pela_hora = (42 / 3.6) * dt + 50 if dt > 0 else 80.0
+        limite = min(1200.0, pela_forma, pela_hora)
+        fatia = _ligar_na_rede(ruas, comps, adj, anterior[0], anterior[1], indice, along, limite)
+        if fatia is None and reta <= 40:
+            fatia = [anterior[2], ponto]
+        if fatia and len(fatia) >= 2:
+            if atual:
+                _alongar(atual, fatia)
+            else:
+                atual = list(fatia)
+        else:
+            quebrar()
+        anterior = (indice, along, ponto, momento)
+    quebrar()
     if not trechos:
         return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
-    return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(_rdp(trecho, 8)) >= 2]
+    saida = []
+    for trecho in trechos:
+        fino = _rdp(trecho, 6)
+        if len(fino) >= 2:
+            saida.append([[lat, lon] for lat, lon in fino])
+    return saida
 
 
 def _quebrar_salto(pontos: list[Ponto], salto_max_m: float) -> list[list[list[float]]]:

@@ -78,15 +78,22 @@ def _cor_situacao(situacao: str) -> tuple[int, int, int]:
 
 
 def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
-    feitos: list = []
-    faltando: list = []
+    """Usa a cobertura que mais marcou via feita. O restante fica só nessa mesma cobertura."""
+    melhor: tuple[int, float, list, list] | None = None
     for item in frota:
         for cob in item.get("coberturas_inlog") or []:
             if str(cob.get("codigo_rota") or "") != codigo:
                 continue
-            feitos.extend(t for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2)
-            faltando.extend(t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2)
-    return feitos, faltando
+            feitos = [t for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2]
+            faltando = [t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2]
+            if not feitos and not faltando:
+                continue
+            nota = (len(feitos), float(cob.get("percentual") or 0), feitos, faltando)
+            if melhor is None or nota[0] > melhor[0] or (nota[0] == melhor[0] and nota[1] > melhor[1]):
+                melhor = nota
+    if melhor is None:
+        return [], []
+    return melhor[2], melhor[3]
 
 
 _MALHA: dict[str, list[dict[str, Any]]] = {}
@@ -266,11 +273,11 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    zoom = 14
-    for candidato in range(15, 12, -1):
+    zoom = 16
+    for candidato in range(17, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
+        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 6:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -307,40 +314,28 @@ def renderizar_mapa(
             if len(coords) >= 4:
                 aneis_px.append(coords)
     if aneis_px:
-        fora = Image.new("L", imagem.size, 130)
+        fora = Image.new("L", imagem.size, 70)
         desenho_fora = ImageDraw.Draw(fora)
         for coords in aneis_px:
             desenho_fora.polygon(coords, fill=0)
         velo = Image.new("RGBA", imagem.size, (246, 242, 234, 255))
         velo.putalpha(fora)
         imagem.alpha_composite(velo)
-        dentro = Image.new("L", imagem.size, 0)
-        desenho_dentro = ImageDraw.Draw(dentro)
-        for coords in aneis_px:
-            desenho_dentro.polygon(coords, fill=176)
-        papel = Image.new("RGBA", imagem.size, (255, 252, 246, 255))
-        papel.putalpha(dentro)
-        imagem.alpha_composite(papel)
     desenho = ImageDraw.Draw(imagem, "RGBA")
-    for traco in tracos:
-        coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
-        if len(coords) < 2:
-            continue
-        desenho.line(coords, fill=(255, 255, 255, 230), width=max(5, int(3.2 * escala)), joint="curve")
-        desenho.line(coords, fill=(*cor_traco, 255), width=max(2, int(1.6 * escala)), joint="curve")
+    via_px = max(2, int(2.2 * escala))
     for item in poligonos:
         grupos = []
         if vias in {"ambas", "abertas"}:
-            grupos.append((item.get("faltando") or [], (176, 28, 18), max(9, int(6.2 * escala))))
+            grupos.append((item.get("faltando") or [], (176, 28, 18)))
         if vias in {"ambas", "feitas"}:
-            grupos.append((item.get("feitos") or [], (15, 122, 68), max(9, int(6.2 * escala))))
-        for grupo, cor_via, grossura in grupos:
+            grupos.append((item.get("feitos") or [], (15, 122, 68)))
+        for grupo, cor_via in grupos:
             for trilha in grupo:
                 coords = [px(float(p[0]), float(p[1])) for p in trilha if len(p) >= 2]
                 if len(coords) < 2:
                     continue
-                desenho.line(coords, fill=(255, 255, 255, 255), width=grossura + 5, joint="curve")
-                desenho.line(coords, fill=(*cor_via, 255), width=grossura, joint="curve")
+                desenho.line(coords, fill=(255, 255, 255, 220), width=via_px + 2, joint="curve")
+                desenho.line(coords, fill=(*cor_via, 255), width=via_px, joint="curve")
         rotulo = str(item.get("rotulo") or "")
         aneis = item.get("aneis") or []
         if rotulo and aneis:
@@ -355,9 +350,16 @@ def renderizar_mapa(
                     fill=(255, 253, 248, 230),
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
+    traco_px = max(2, int(1.8 * escala))
+    for traco in tracos:
+        coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
+        if len(coords) < 2:
+            continue
+        desenho.line(coords, fill=(255, 255, 255, 230), width=traco_px + 2, joint="curve")
+        desenho.line(coords, fill=(*cor_traco, 255), width=traco_px, joint="curve")
     for coords in aneis_px:
-        desenho.line(coords + [coords[0]], fill=(90, 68, 12, 255), width=max(4, int(2.8 * escala)))
-    raio = max(8, int(6 * escala))
+        desenho.line(coords + [coords[0]], fill=(90, 68, 12, 255), width=max(2, int(1.6 * escala)))
+    raio = max(4, int(3.2 * escala))
     for ponto in pontos:
         try:
             centro = px(float(ponto["latitude"]), float(ponto["longitude"]))
@@ -377,11 +379,11 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 1800:
-        altura = int(imagem.height * (1800 / imagem.width))
-        imagem = imagem.resize((1800, max(1, altura)), Image.Resampling.LANCZOS)
+    if imagem.width > 2400:
+        altura = int(imagem.height * (2400 / imagem.width))
+        imagem = imagem.resize((2400, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=78, optimize=False)
+    imagem.save(saida, format="JPEG", quality=86, optimize=True)
     return saida.getvalue()
 
 
@@ -513,7 +515,7 @@ def _mapa_da_rota(
     return (
         titulo,
         renderizar_mapa([base], tracos, pontos, aneis, vias="ambas"),
-        "Verde: via feita. Vermelho: via em aberto. Azul: trajeto. Ponto: parada.",
+        "Verde: via feita. Vermelho: via em aberto. Azul: por onde o caminhão passou. Ponto: parada.",
     )
 
 
@@ -526,20 +528,8 @@ def _folhas_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
 ) -> list[tuple[str, bytes, str]]:
-    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
-    return [
-        (
-            f"{titulo} · realizado",
-            renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
-            "Realizado. A linha verde é a via oficial feita dentro do polígono. Azul: trajeto. Ponto: parada.",
-        ),
-        (
-            f"{titulo} · em aberto",
-            renderizar_mapa([base], tracos, [], aneis, vias="abertas", cor_traco=(109, 40, 217)),
-            "Em aberto. A linha vermelha é a via oficial que não foi feita. Roxo: o mesmo trajeto.",
-        ),
-    ]
+    folha_titulo, png, legenda = _mapa_da_rota(titulo, codigo, aneis, tracos, pontos, dia, frota)
+    return [(folha_titulo, png, legenda)]
 
 
 _COR_SITUACAO = {

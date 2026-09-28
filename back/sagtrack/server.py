@@ -53,6 +53,9 @@ def _rodar(settings: Settings) -> None:
         with JOB["lock"]:
             JOB["erro"] = str(exc)
             JOB["mensagens"].append(f"Falhou: {exc}")
+        from .whatsapp import avisar_coleta_pronta
+
+        avisar_coleta_pronta(settings, falha=str(exc))
     finally:
         with JOB["lock"]:
             JOB["rodando"] = False

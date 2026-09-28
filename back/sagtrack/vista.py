@@ -125,10 +125,10 @@ def _afinar(linha: list, max_pts: int = 40) -> list[list[float]]:
     return saida
 
 
-def _malha(linhas: list, limite: int = 180) -> list[list[list[float]]]:
+def _malha(linhas: list, limite: int = 180, max_pts: int = 40) -> list[list[list[float]]]:
     saida = []
     for linha in linhas or []:
-        fina = _afinar(linha)
+        fina = _afinar(linha, max_pts)
         if len(fina) >= 2:
             saida.append(fina)
         if len(saida) >= limite:
@@ -219,7 +219,7 @@ def mapa(settings: Settings, claims: dict[str, Any], codigo: str) -> dict[str, A
         "situacao": (row or {}).get("situacao") or "",
         "percentual": (row or {}).get("percentual"),
         "poligonos": _malha((setor or {}).get("poligonos") or [], 8),
-        "feitos": _malha(feitos),
+        "feitos": _malha(feitos, 400, 90),
         "abertas": _malha(faltando) if mostrar_aberto else [],
         "paradas": paradas[:80],
     }

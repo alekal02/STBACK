@@ -218,7 +218,7 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
         )
         pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
-            with urllib.request.urlopen(pedido, timeout=3) as resp:
+            with urllib.request.urlopen(pedido, timeout=5) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
             _TILE_RUIM.add(chave)
@@ -284,11 +284,11 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    zoom = 15
-    for candidato in range(16, 14, -1):
+    zoom = 16
+    for candidato in range(17, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
+        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 6:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -303,8 +303,8 @@ def renderizar_mapa(
         comeco = max(0, meio - limite // 2)
         return comeco, comeco + limite - 1
 
-    tx0, tx1 = limitar(tx0, tx1, 5)
-    ty0, ty1 = limitar(ty0, ty1, 4)
+    tx0, tx1 = limitar(tx0, tx1, 8)
+    ty0, ty1 = limitar(ty0, ty1, 6)
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
     coords = [
@@ -343,7 +343,7 @@ def renderizar_mapa(
         velo.putalpha(fora)
         imagem.alpha_composite(velo)
     desenho = ImageDraw.Draw(imagem, "RGBA")
-    via_px = max(2, int(2.2 * escala))
+    via_px = max(3, int(2.8 * escala))
     for item in poligonos:
         grupos = []
         if vias in {"ambas", "abertas"}:
@@ -371,7 +371,7 @@ def renderizar_mapa(
                     fill=(255, 253, 248, 230),
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
-    traco_px = max(2, int(1.8 * escala))
+    traco_px = max(4, int(3.4 * escala))
     for traco in tracos:
         coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
         if len(coords) < 2:
@@ -400,11 +400,11 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 1600:
-        altura = int(imagem.height * (1600 / imagem.width))
-        imagem = imagem.resize((1600, max(1, altura)), Image.Resampling.LANCZOS)
+    if imagem.width > 2200:
+        altura = int(imagem.height * (2200 / imagem.width))
+        imagem = imagem.resize((2200, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=80, optimize=True)
+    imagem.save(saida, format="JPEG", quality=92, optimize=True)
     return saida.getvalue()
 
 
@@ -846,7 +846,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         for caminhao in (resumo.get("caminhoes") or [])
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(40)
+    _abrir_prazo_mapa(100)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue

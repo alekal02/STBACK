@@ -528,8 +528,24 @@ def _folhas_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
 ) -> list[tuple[str, bytes, str]]:
-    folha_titulo, png, legenda = _mapa_da_rota(titulo, codigo, aneis, tracos, pontos, dia, frota)
-    return [(folha_titulo, png, legenda)]
+    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
+    if faltando:
+        legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
+    else:
+        legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
+    return [
+        (
+            f"{titulo} · realizado",
+            renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
+            "Realizado. A linha verde é a via feita. Azul: por onde o caminhão passou. Ponto: parada.",
+        ),
+        (
+            f"{titulo} · em aberto",
+            renderizar_mapa([base], [], [], aneis, vias="abertas"),
+            legenda_aberta,
+        ),
+    ]
 
 
 _COR_SITUACAO = {

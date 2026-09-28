@@ -18,6 +18,7 @@ from .config import Settings, dia_operacional, load_settings
 _VISTOS: set[str] = set()
 _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
+_GERANDO = threading.Lock()
 _NOME_USUARIO = "sagtrack"
 def _caminho_config() -> Path:
     from .config import pasta_dados
@@ -392,8 +393,8 @@ def grupos(settings: Settings | None = None) -> list[dict[str, Any]]:
     return saida
 
 
-def _enviar(settings: Settings, caminho: str, payload: dict[str, Any]) -> None:
-    _pedido(settings, caminho, payload, timeout=90)
+def _enviar(settings: Settings, caminho: str, payload: dict[str, Any], timeout: int = 90) -> None:
+    _pedido(settings, caminho, payload, timeout=timeout)
 
 
 def enviar_texto(settings: Settings, destino: str, texto: str) -> None:
@@ -415,6 +416,7 @@ def enviar_pdf(settings: Settings, destino: str, arquivo: bytes, nome: str) -> N
             "Document": "data:application/pdf;base64," + base64.b64encode(arquivo).decode("ascii"),
             "FileName": nome,
         },
+        timeout=180,
     )
 
 
@@ -537,13 +539,23 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         dia = dia_pedido or _DIAS.get(chave) or dia_operacional()
         if dia_pedido is not None:
             _DIAS[chave] = dia_pedido
-        enviar_texto(
-            settings,
-            mensagem["grupo"],
-            f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
-        )
-        arquivo, nome = _gerar(settings, tipo, consulta, dia)
-        enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+        if not _GERANDO.acquire(blocking=False):
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                "Ainda estou montando o PDF anterior. Ele chega neste grupo assim que terminar.",
+            )
+            return
+        try:
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+            )
+            arquivo, nome = _gerar(settings, tipo, consulta, dia)
+            enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+        finally:
+            _GERANDO.release()
     except Exception as exc:
         try:
             enviar_texto(settings, mensagem["grupo"], f"Não consegui enviar o relatório: {exc}")

@@ -6,6 +6,7 @@ import io
 import json
 import math
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -271,9 +272,18 @@ def renderizar_mapa(
     ty0, ty1 = math.floor(min(y0, y1)), math.floor(max(y0, y1))
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
-    for ix, tile_x in enumerate(range(tx0, tx1 + 1)):
-        for iy, tile_y in enumerate(range(ty0, ty1 + 1)):
-            tile = _baixar_tile(zoom, tile_x, tile_y)
+    coords = [
+        (ix, iy, tile_x, tile_y)
+        for ix, tile_x in enumerate(range(tx0, tx1 + 1))
+        for iy, tile_y in enumerate(range(ty0, ty1 + 1))
+    ]
+
+    def baixar(item: tuple[int, int, int, int]) -> tuple[int, int, Image.Image | None]:
+        ix, iy, tile_x, tile_y = item
+        return ix, iy, _baixar_tile(zoom, tile_x, tile_y)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for ix, iy, tile in pool.map(baixar, coords):
             if tile is not None:
                 base.paste(tile, (ix * 256, iy * 256))
     imagem = base.convert("RGBA")
@@ -360,11 +370,11 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 3600:
-        altura = int(imagem.height * (3600 / imagem.width))
-        imagem = imagem.resize((3600, max(1, altura)), Image.Resampling.LANCZOS)
+    if imagem.width > 1800:
+        altura = int(imagem.height * (1800 / imagem.width))
+        imagem = imagem.resize((1800, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=94, optimize=True, subsampling=0)
+    imagem.save(saida, format="JPEG", quality=78, optimize=False)
     return saida.getvalue()
 
 
@@ -476,10 +486,10 @@ def _preparar_vias(
     tracos: list[list[list[float]]],
     frota: list[dict[str, Any]],
 ) -> tuple[list, list]:
-    feitos, faltando = _vias_no_poligono(dia, codigo, tracos)
+    feitos, faltando = _ruas(frota, codigo)
     if feitos or faltando:
         return feitos, faltando
-    return _ruas(frota, codigo)
+    return _vias_no_poligono(dia, codigo, tracos)
 
 
 def _folhas_da_rota(

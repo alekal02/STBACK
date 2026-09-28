@@ -183,7 +183,13 @@ def _tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]:
     return x, y
 
 
+_TILE_RUIM: set[tuple[int, int, int]] = set()
+
+
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
+    chave = (zoom, x, y)
+    if chave in _TILE_RUIM:
+        return None
     pasta = ROOT / "output" / "tiles" / str(zoom)
     pasta.mkdir(parents=True, exist_ok=True)
     arquivo = pasta / f"{x}_{y}.jpg"
@@ -194,9 +200,10 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
         )
         pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
-            with urllib.request.urlopen(pedido, timeout=8) as resp:
+            with urllib.request.urlopen(pedido, timeout=4) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
+            _TILE_RUIM.add(chave)
             return None
     try:
         return Image.open(arquivo).convert("RGB")
@@ -259,11 +266,11 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    zoom = 15
-    for candidato in range(18, 13, -1):
+    zoom = 14
+    for candidato in range(15, 12, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 16 and math.floor(y1) - math.floor(y0) <= 11:
+        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -490,6 +497,24 @@ def _preparar_vias(
     if feitos or faltando:
         return feitos, faltando
     return _vias_no_poligono(dia, codigo, tracos)
+
+
+def _mapa_da_rota(
+    titulo: str,
+    codigo: str,
+    aneis: list,
+    tracos: list,
+    pontos: list,
+    dia: date,
+    frota: list[dict[str, Any]],
+) -> tuple[str, bytes, str]:
+    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
+    return (
+        titulo,
+        renderizar_mapa([base], tracos, pontos, aneis, vias="ambas"),
+        "Verde: via feita. Vermelho: via em aberto. Azul: trajeto. Ponto: parada.",
+    )
 
 
 def _folhas_da_rota(
@@ -751,7 +776,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             f"{row['codigo']} {row['nome']} · {row['situacao']} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
         )
         cor = _COR_SITUACAO[row["situacao"]]
-        for folha_titulo, png, legenda in _folhas_da_rota(
+        folha_titulo, png, legenda = _mapa_da_rota(
             titulo,
             row["codigo"],
             _aneis(row),
@@ -759,8 +784,8 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             row.get("pontos") or [],
             dia,
             frota,
-        ):
-            mapas.append((folha_titulo, png, legenda, cor))
+        )
+        mapas.append((folha_titulo, png, legenda, cor))
     periodo = resumo.get("periodo") or _turno(dia)
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 

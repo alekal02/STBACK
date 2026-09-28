@@ -553,7 +553,9 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
             )
             arquivo, nome = _gerar(settings, tipo, consulta, dia)
+            print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
             enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+            print(f"WhatsApp: {nome} enviado", flush=True)
         finally:
             _GERANDO.release()
     except Exception as exc:

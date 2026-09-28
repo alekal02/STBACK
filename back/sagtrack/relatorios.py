@@ -23,6 +23,11 @@ PARADA_COLETA_MAX_S = 15 * 60
 VEL_PARADA = 6.0
 FEITA_MIN = 90.0
 PARCIAL_MIN = 45.0
+# Apoio é outro caminhão dentro da rota, com pulsos suficientes.
+# Cruzar o polígono em poucos minutos não entra.
+APOIO_PULSOS_MIN = 30
+APOIO_MINUTOS_MIN = 6.0
+APOIO_PULSOS_SEM_TEMPO = 80
 # O mapa marca diurno e noturno. A coleta do dia acaba às 16:00; o noturno segue até 05:59.
 MINUTO_DIURNO_INI = 6 * 60
 MINUTO_DIURNO_FIM = 16 * 60
@@ -202,7 +207,12 @@ def medir_presenca(rotas: list[dict[str, Any]], setores: list[dict[str, Any]], d
             cob["permanencias"] = len(permanencia)
             cob["minutos_permanencia"] = round(sum(p["segundos"] for p in permanencia) / 60.0, 1)
             cob["paradas_pontos"] = coleta[:80]
+            geom = (por_codigo.get(codigo) or {}).get("geom")
+            pulsos, minutos = _pulsos_dentro(pontos, geom, dia)
+            cob["pulsos"] = pulsos
+            cob["minutos_dentro"] = minutos
         _definir_papeis(item)
+    _aplicar_apoio(rotas)
 
 
 def _parada_no_turno(inicio: str, turno: str) -> bool:
@@ -222,13 +232,96 @@ def _e_coleta(cob: dict[str, Any]) -> bool:
     return int(cob.get("paradas") or 0) >= 3
 
 
-def _e_apoio(cob: dict[str, Any]) -> bool:
-    """Segunda rota só é apoio se houve coleta: ruas cobertas e tempo parado de serviço."""
-    return (
-        _e_coleta(cob)
-        and float(cob.get("percentual") or 0) >= PARCIAL_MIN
-        and float(cob.get("minutos_parado") or 0) >= 15
-    )
+def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date) -> tuple[int, float]:
+    """Pulsos com o caminhão dentro do polígono, e o tempo entre o primeiro e o último."""
+    if geom is None or geom.is_empty or not pontos:
+        return 0, 0.0
+    minx, miny, maxx, maxy = geom.bounds
+    marcas: list[datetime] = []
+    total = 0
+    for ponto in pontos:
+        try:
+            lon = float(ponto["longitude"])
+            lat = float(ponto["latitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        x, y = TO_UTM.transform(lon, lat)
+        if x < minx or x > maxx or y < miny or y > maxy:
+            continue
+        if not geom.covers(Point(x, y)):
+            continue
+        total += 1
+        marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
+        if marca is not None:
+            marcas.append(marca)
+    if len(marcas) < 2:
+        return total, 0.0
+    minutos = (max(marcas) - min(marcas)).total_seconds() / 60.0
+    return total, round(minutos, 1)
+
+
+def _pulsos_registrados(cob: dict[str, Any]) -> int:
+    if cob.get("pulsos") is not None:
+        return int(cob.get("pulsos") or 0)
+    return int(cob.get("pontos_no_setor") or 0)
+
+
+def _conta_como_apoio(cob: dict[str, Any]) -> bool:
+    """Entrou na rota e deixou pulsos bastante. Passagem rápida fica de fora."""
+    pulsos = _pulsos_registrados(cob)
+    if cob.get("pulsos") is not None and cob.get("minutos_dentro") is not None:
+        return pulsos >= APOIO_PULSOS_MIN and float(cob.get("minutos_dentro") or 0) >= APOIO_MINUTOS_MIN
+    return pulsos >= APOIO_PULSOS_SEM_TEMPO
+
+
+def _aplicar_apoio(frota: list[dict[str, Any]]) -> None:
+    """Em cada rota, um caminhão atuou. Os outros com pulsos suficientes são apoio."""
+    por_rota: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for item in frota:
+        for cob in item.get("coberturas_inlog") or []:
+            codigo = str(cob.get("codigo_rota") or "")
+            if codigo:
+                por_rota.setdefault(codigo, []).append((item, cob))
+    for pares in por_rota.values():
+        fortes = [
+            (item, cob)
+            for item, cob in pares
+            if _conta_como_apoio(cob) or int(cob.get("paradas") or 0) >= 3
+        ]
+        if not fortes:
+            continue
+        fortes.sort(
+            key=lambda par: (
+                int(par[1].get("paradas") or 0),
+                _pulsos_registrados(par[1]),
+                float(par[1].get("percentual") or 0),
+            ),
+            reverse=True,
+        )
+        principal = fortes[0][1]
+        for _item, cob in pares:
+            if cob is principal:
+                cob["papel"] = "ATUANDO"
+            elif _conta_como_apoio(cob):
+                cob["papel"] = "APOIO"
+            elif str(cob.get("papel") or "") in {"ATUANDO", "APOIO"}:
+                cob["papel"] = "PASSAGEM"
+    for item in frota:
+        cobs = list(item.get("coberturas_inlog") or [])
+        atuando = [cob for cob in cobs if cob.get("papel") == "ATUANDO"]
+        apoios = [cob for cob in cobs if cob.get("papel") == "APOIO"]
+        if atuando:
+            melhor = max(atuando, key=lambda cob: (int(cob.get("paradas") or 0), _pulsos_registrados(cob)))
+            item["papel"] = "ATUANDO"
+            item["codigo_rota"] = melhor.get("codigo_rota")
+            item["setor"] = melhor.get("setor") or item.get("setor")
+            item["percentual_concluido"] = melhor.get("percentual") or 0
+        elif apoios:
+            melhor = max(apoios, key=_pulsos_registrados)
+            item["papel"] = "APOIO"
+            item["codigo_rota"] = melhor.get("codigo_rota")
+            item["setor"] = melhor.get("setor") or item.get("setor")
+            item["percentual_concluido"] = melhor.get("percentual") or 0
 
 
 def _definir_papeis(item: dict[str, Any]) -> None:
@@ -255,7 +348,7 @@ def _definir_papeis(item: dict[str, Any]) -> None:
         for indice, cob in enumerate(grupo):
             if indice == 0:
                 cob["papel"] = "ATUANDO"
-            elif _e_apoio(cob):
+            elif _conta_como_apoio(cob):
                 cob["papel"] = "APOIO"
             else:
                 cob["papel"] = "PASSAGEM"
@@ -385,6 +478,8 @@ def _tocados(item: dict[str, Any], *, oficiais: dict[str, list] | None = None) -
                 "papel": cob.get("papel") or "PASSAGEM",
                 "percentual": cob.get("percentual") or 0,
                 "paradas": cob.get("paradas") or 0,
+                "pulsos": cob.get("pulsos") if cob.get("pulsos") is not None else cob.get("pontos_no_setor") or 0,
+                "minutos_dentro": cob.get("minutos_dentro") or 0,
                 "minutos_parado": cob.get("minutos_parado") or 0,
                 "minutos_permanencia": cob.get("minutos_permanencia") or 0,
                 "km_coleta": cob.get("km_coleta"),
@@ -409,8 +504,10 @@ def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) ->
             codigo = str(cob.get("codigo_rota") or "")
             if not codigo or str(cob.get("papel") or "") not in {"ATUANDO", "APOIO"}:
                 continue
+            if str(cob.get("papel") or "") == "APOIO" and not _conta_como_apoio(cob):
+                continue
             paradas = int(cob.get("paradas") or 0)
-            if paradas <= 0:
+            if paradas <= 0 and not _conta_como_apoio(cob):
                 continue
             linha = por_codigo.setdefault(
                 codigo,
@@ -536,6 +633,7 @@ def relatorio_frota(output_dir: Path, dia: date) -> dict[str, Any]:
     resumo = _ler(pasta, "resumo.json") or {}
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
+    _aplicar_apoio(frota)
     por_placa = {str(item.get("placa") or ""): item for item in frota}
     oficiais = _oficiais(setores)
     caminhoes = []
@@ -557,7 +655,7 @@ def relatorio_frota(output_dir: Path, dia: date) -> dict[str, Any]:
     texto = _texto_decisao(dia, balanco)
     texto.append(
         f"{len(caminhoes)} caminhão(ões) com pulso na cidade. "
-        "Apoio só entra se a segunda rota teve coleta: pelo menos 45% das ruas e 15 minutos parado. Cruzar o polígono não é apoio."
+        "Apoio é outro caminhão que entrou na rota e deixou pulsos suficientes. Só passar pelo polígono não conta."
     )
     codigos_coleta = {
         str(linha.get("codigo") or "")
@@ -666,6 +764,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
     pasta = _pasta(output_dir, dia)
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
+    _aplicar_apoio(frota)
     setor, candidatos = _escolher_setor(setores, consulta)
     if candidatos:
         return {
@@ -720,6 +819,8 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
                 "papel": papel,
                 "percentual": cob.get("percentual") or 0,
                 "paradas": cob.get("paradas") or 0,
+                "pulsos": cob.get("pulsos") if cob.get("pulsos") is not None else cob.get("pontos_no_setor") or 0,
+                "minutos_dentro": cob.get("minutos_dentro") or 0,
                 "minutos_parado": cob.get("minutos_parado") or 0,
                 "km_coleta": cob.get("km_coleta"),
                 "km_total": cob.get("km_total"),
@@ -758,9 +859,14 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
     if not presentes:
         linhas.append("Nenhum caminhão da Segtrack entrou neste polígono no dia.")
     elif coletando:
+        apoios = [c for c in coletando if c["papel"] == "APOIO"]
         linhas.append(
-            f"{len(coletando)} caminhão(ões) com parada de coleta. "
-            + ("Há sobreposição: mais de um fez coleta nesta rota." if sobreposicao else "Sem sobreposição de coleta.")
+            f"{len(coletando)} caminhão(ões) trabalharam nesta rota. "
+            + (
+                "Apoio: " + ", ".join(_nome(c) for c in apoios) + "."
+                if apoios
+                else "Sem caminhão de apoio."
+            )
         )
     elif any(c["papel"] == "PERMANENCIA" for c in presentes):
         linhas.append("Houve permanência neste polígono, sem coleta da rota. Isso não conta como rota feita.")
@@ -771,14 +877,17 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
     for caminhao in sorted(presentes, key=lambda c: ({"ATUANDO": 0, "APOIO": 1, "PASSAGEM": 2}.get(c["papel"], 9), -float(c["percentual"] or 0))):
         papel = {
             "ATUANDO": "atuando na rota",
-            "APOIO": "apoio com parada de coleta",
+            "APOIO": "apoio nesta rota",
             "PERMANENCIA": "permaneceu sem coletar",
             "PASSAGEM": "só passagem",
         }.get(caminhao["papel"], caminhao["papel"])
         if caminhao["papel"] in {"ATUANDO", "APOIO"}:
+            extra = ""
+            if caminhao["papel"] == "APOIO":
+                extra = f" · {int(caminhao.get('pulsos') or 0)} pulsos dentro da rota"
             linhas.append(
                 f"{_nome(caminhao)} · {papel} · {_fmt_pct(caminhao['percentual'])} · "
-                f"{caminhao['paradas']} paradas · {caminhao['minutos_parado']} min parado"
+                f"{caminhao['paradas']} paradas · {caminhao['minutos_parado']} min parado{extra}"
             )
         else:
             linhas.append(
@@ -814,6 +923,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
 def relatorio_placa(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]:
     pasta = _pasta(output_dir, dia)
     frota = _ler(pasta, "frota.json") or []
+    _aplicar_apoio(frota)
     resumo = _ler(pasta, "resumo.json") or {}
     item = _achar_caminhao(frota, consulta)
     if item is None:

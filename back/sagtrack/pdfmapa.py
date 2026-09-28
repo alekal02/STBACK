@@ -609,7 +609,6 @@ def _camadas_da_rota(
                 for linha in (item.get("coberturas_inlog") or [])
                 if str(linha.get("codigo_rota") or "") == codigo
                 and str(linha.get("papel") or "") in {"ATUANDO", "APOIO"}
-                and int(linha.get("paradas") or 0) > 0
             ),
             None,
         )
@@ -962,6 +961,9 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     resumo = _ler(pasta, "resumo.json")
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
+    from .relatorios import _aplicar_apoio
+
+    _aplicar_apoio(frota)
     if not resumo:
         return _sem_dia(dia), f"frota-{dia.isoformat()}.pdf"
     balanco = balanco_frota(setores, frota)
@@ -1149,6 +1151,10 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao} · {_fmt_pct(rel.get('percentual'))}"
     nome = f"rota-{codigo}-{dia.isoformat()}.pdf"
     pasta = output_dir / dia.isoformat()
+    from .relatorios import _aplicar_apoio
+
+    frota_mapa = _ler(pasta, "frota.json") or []
+    _aplicar_apoio(frota_mapa)
     mapas = [
         (folha_titulo, png, legenda, cor)
         for folha_titulo, png, legenda in _folhas_da_rota(
@@ -1158,7 +1164,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             tracos,
             pontos,
             dia,
-            _ler(pasta, "frota.json") or [],
+            frota_mapa,
             _ler(pasta, "pontos.json") or {},
         )
     ]
@@ -1166,7 +1172,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
 
 
 def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
-    from .relatorios import _conclusao, _fmt_pct, _nome_conclusao, montar
+    from .relatorios import _aplicar_apoio, _conclusao, _fmt_pct, _nome_conclusao, montar
 
     rel = montar(output_dir, dia, "placa", consulta)
     caminhoes = rel.get("caminhoes") or []
@@ -1174,6 +1180,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
         return _pdf("Segtrack · placa", list(rel.get("texto") or []), [], b""), "placa.pdf"
     caminhao = caminhoes[0]
     frota = _ler(output_dir / dia.isoformat(), "frota.json") or []
+    _aplicar_apoio(frota)
     tracos = caminhao.get("gps") or []
     titulo = f"Segtrack · {rel.get('titulo') or caminhao.get('placa') or consulta}"
     tabela = [["Rota", "Situação", "Papel", "Paradas", "Minutos", "%"]]

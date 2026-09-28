@@ -25,6 +25,8 @@ _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
 _MANTER = True
+_GRUPO_PADRAO = "120363429863984066@g.us"
+_NOME_PADRAO = "Eu"
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -110,9 +112,53 @@ def _config_arquivo() -> dict[str, Any]:
     return dado if isinstance(dado, dict) else {}
 
 
+def _caminho_grupo() -> Path:
+    return _caminho_config().with_name("grupo.json")
+
+
+def _ler_backup() -> tuple[str, str]:
+    caminho = _caminho_grupo()
+    if not caminho.is_file():
+        return "", ""
+    try:
+        dado = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(dado, dict):
+        return "", ""
+    return str(dado.get("group_jid") or "").strip(), str(dado.get("group_nome") or "").strip()
+
+
+def _escrever_backup(jid: str, nome: str) -> None:
+    if not jid.endswith("@g.us"):
+        return
+    caminho = _caminho_grupo()
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_text(
+        json.dumps({"group_jid": jid, "group_nome": nome}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _jid_gravado() -> tuple[str, str]:
+    atual = _config_arquivo()
+    jid = str(atual.get("group_jid") or "").strip()
+    nome = str(atual.get("group_nome") or "").strip()
+    if jid:
+        return jid, nome
+    return _ler_backup()
+
+
 def grupo_configurado(settings: Settings | None = None) -> str:
     settings = settings or load_settings()
-    return str(_config_arquivo().get("group_jid") or settings.whatsapp_group_jid or "").strip()
+    jid, nome = _jid_gravado()
+    if not jid:
+        jid = str(settings.whatsapp_group_jid or "").strip()
+    if not jid:
+        jid, nome = _GRUPO_PADRAO, nome or _NOME_PADRAO
+    if jid and not str(_config_arquivo().get("group_jid") or "").strip():
+        salvar_configuracao(jid, group_nome=nome or None)
+    return jid
 
 
 def permitidos(settings: Settings | None = None) -> list[str]:
@@ -124,13 +170,28 @@ def permitidos(settings: Settings | None = None) -> list[str]:
 
 
 def grupo_nome() -> str:
-    return str(_config_arquivo().get("group_nome") or "").strip()
+    nome = str(_config_arquivo().get("group_nome") or "").strip()
+    if nome:
+        return nome
+    _, backup = _ler_backup()
+    return backup
 
 
 def _gravar(atual: dict[str, Any]) -> None:
+    jid = str(atual.get("group_jid") or "").strip()
+    if not jid:
+        jid, nome_backup = _ler_backup()
+        if jid:
+            atual["group_jid"] = jid
+            atual["travado"] = True
+            if not str(atual.get("group_nome") or "").strip() and nome_backup:
+                atual["group_nome"] = nome_backup
     caminho = _caminho_config()
     caminho.parent.mkdir(parents=True, exist_ok=True)
     caminho.write_text(json.dumps(atual, ensure_ascii=False, indent=2), encoding="utf-8")
+    gravado = str(atual.get("group_jid") or "").strip()
+    if gravado:
+        _escrever_backup(gravado, str(atual.get("group_nome") or "").strip())
 
 
 def salvar_configuracao(
@@ -426,7 +487,7 @@ def manter() -> None:
         if aviso:
             print(f"WhatsApp: {aviso}", flush=True)
         else:
-            print("WhatsApp pronto. Sessão e grupo permanecem gravados.", flush=True)
+            print(f"WhatsApp pronto. Grupo travado {grupo_configurado(settings)}.", flush=True)
     except Exception as exc:
         print(f"WhatsApp: {exc}", flush=True)
     while True:
@@ -585,6 +646,10 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         return
     grupo = grupo_configurado(settings)
     if not grupo or mensagem["grupo"] != grupo:
+        print(
+            f"WhatsApp: pedido ignorado. travado={grupo or 'nenhum'} origem={mensagem['grupo']}",
+            flush=True,
+        )
         return
     liberados = permitidos(settings)
     if liberados and mensagem["participante"] not in liberados:

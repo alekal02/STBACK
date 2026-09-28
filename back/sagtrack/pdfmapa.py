@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -197,7 +198,8 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
     chave = (zoom, x, y)
     if chave in _TILE_RUIM:
         return None
-    pasta = ROOT / "output" / "tiles" / str(zoom)
+    bruto = os.getenv("OUTPUT_DIR", "").strip()
+    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / str(zoom)
     pasta.mkdir(parents=True, exist_ok=True)
     arquivo = pasta / f"{x}_{y}.jpg"
     if not arquivo.is_file():
@@ -273,7 +275,7 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    zoom = 16
+    zoom = 15
     for candidato in range(17, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
@@ -284,6 +286,16 @@ def renderizar_mapa(
     x1, y0 = _tile_xy(norte, leste, zoom)
     tx0, tx1 = math.floor(min(x0, x1)), math.floor(max(x0, x1))
     ty0, ty1 = math.floor(min(y0, y1)), math.floor(max(y0, y1))
+
+    def limitar(inicio: int, fim: int, limite: int) -> tuple[int, int]:
+        if fim - inicio + 1 <= limite:
+            return inicio, fim
+        meio = (inicio + fim) // 2
+        comeco = max(0, meio - limite // 2)
+        return comeco, comeco + limite - 1
+
+    tx0, tx1 = limitar(tx0, tx1, 8)
+    ty0, ty1 = limitar(ty0, ty1, 6)
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
     coords = [

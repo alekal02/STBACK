@@ -128,14 +128,14 @@
       let seguir = false;
       try {
         const r = await fetch(api + "/pdf");
-        if (r.status === 202) {
-          aviso.textContent = "O PDF desta hora ainda está sendo montado. A conta da página já está pronta. Nova tentativa em alguns segundos.";
-          if (tentativa < 8) {
+        if (r.status === 202 || r.status === 502 || r.status === 503) {
+          aviso.textContent = "O PDF está sendo montado ao lado do site, sem derrubar o servidor. Nova tentativa em alguns segundos.";
+          if (tentativa < 40) {
             seguir = true;
-            setTimeout(() => baixarPdf(tentativa + 1), 8000);
+            setTimeout(() => baixarPdf(tentativa + 1), 6000);
             return;
           }
-          aviso.textContent = "O PDF ainda está sendo montado. Toque de novo em um minuto.";
+          aviso.textContent = "O mapa da frota ainda está sendo desenhado. Toque de novo em um minuto.";
           return;
         }
         if (r.status === 410) {

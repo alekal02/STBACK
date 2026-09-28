@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import re
 import secrets
 import threading
@@ -689,19 +690,44 @@ def _montar_pdf(settings: Settings, dia: date, tipo: str, consulta: str, *, forc
     _guardar_cache(pasta, chave, arquivo)
 
 
+def _pdf_em_processo(output_dir: str, dia_iso: str, tipo: str, consulta: str, forcar: bool) -> None:
+    """Monta o PDF fora do processo do site, para o download não derrubar o servidor."""
+    from dataclasses import replace
+
+    from .config import load_settings
+
+    try:
+        settings = load_settings()
+        if output_dir:
+            settings = replace(settings, output_dir=Path(output_dir))
+        _montar_pdf(settings, date.fromisoformat(dia_iso), tipo, consulta, forcar=forcar)
+        print(f"PDF {tipo} {consulta} gravado.", flush=True)
+    except Exception as exc:
+        print(f"PDF {tipo} {consulta}: {exc}", flush=True)
+        raise
+
+
 def agendar_pdf(settings: Settings, dia: date, tipo: str = "frota", consulta: str = "", *, forcar: bool = False) -> None:
-    def trabalho() -> None:
-        if not _GERANDO.acquire(blocking=False):
-            return
+    if not _GERANDO.acquire(blocking=False):
+        return
+
+    def vigia() -> None:
+        time.sleep(0.4)
         try:
-            _montar_pdf(settings, dia, tipo, consulta, forcar=forcar)
-            print(f"PDF {tipo} {consulta} gravado para o próximo download.", flush=True)
+            proc = multiprocessing.get_context("spawn").Process(
+                target=_pdf_em_processo,
+                args=(str(settings.output_dir), dia.isoformat(), tipo, consulta, bool(forcar)),
+            )
+            proc.start()
+            proc.join()
+            if proc.exitcode not in (0, None):
+                print(f"PDF {tipo} {consulta} encerrou com código {proc.exitcode}.", flush=True)
         except Exception as exc:
             print(f"PDF {tipo}: {exc}", flush=True)
         finally:
             _GERANDO.release()
 
-    threading.Thread(target=trabalho, daemon=True).start()
+    threading.Thread(target=vigia, daemon=True).start()
 
 
 def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[int, bytes, str]:
@@ -729,11 +755,7 @@ def relogio_pdf(settings: Settings) -> None:
             chave = _chave_pdf("frota", "")
             if (pasta / "resumo.json").is_file() and _pdf_atrasado(pasta, chave):
                 print("PDF horário: montando a frota do turno.", flush=True)
-                if _GERANDO.acquire(blocking=False):
-                    try:
-                        _montar_pdf(settings, dia, "frota", "", forcar=True)
-                    finally:
-                        _GERANDO.release()
+                agendar_pdf(settings, dia, "frota", "", forcar=True)
         except Exception as exc:
             print(f"PDF horário: {exc}", flush=True)
         time.sleep(3600)

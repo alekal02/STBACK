@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import math
@@ -993,6 +994,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
             continue
         mapas.append((folha_titulo, png, legenda, cor))
+        gc.collect()
     periodo = resumo.get("periodo") or _turno(dia)
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:

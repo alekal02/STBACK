@@ -6,6 +6,7 @@ import json
 import re
 import secrets
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -19,7 +20,11 @@ _VISTOS: set[str] = set()
 _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
+_CONFIG_LOCK = threading.Lock()
 _NOME_USUARIO = "sagtrack"
+_WEBHOOK_URL = ""
+_ULTIMO_CONNECT = 0.0
+_MANTER = True
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -122,21 +127,28 @@ def grupo_nome() -> str:
     return str(_config_arquivo().get("group_nome") or "").strip()
 
 
+def _gravar(atual: dict[str, Any]) -> None:
+    caminho = _caminho_config()
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_text(json.dumps(atual, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def salvar_configuracao(
     group_jid: str,
     allowed_jids: list[str] | None = None,
     group_nome: str | None = None,
 ) -> dict[str, Any]:
-    atual = _config_arquivo()
-    atual["group_jid"] = group_jid.strip()
-    atual["travado"] = bool(atual["group_jid"])
-    if group_nome is not None:
-        atual["group_nome"] = group_nome.strip()
-    if allowed_jids is not None:
-        atual["allowed_jids"] = [item.strip() for item in allowed_jids if item.strip()]
-    _caminho_config().parent.mkdir(parents=True, exist_ok=True)
-    _caminho_config().write_text(json.dumps(atual, ensure_ascii=False, indent=2), encoding="utf-8")
-    return atual
+    with _CONFIG_LOCK:
+        atual = _config_arquivo()
+        novo = (group_jid or "").strip() or str(atual.get("group_jid") or "").strip()
+        atual["group_jid"] = novo
+        atual["travado"] = bool(novo)
+        if group_nome is not None and group_nome.strip():
+            atual["group_nome"] = group_nome.strip()
+        if allowed_jids is not None:
+            atual["allowed_jids"] = [item.strip() for item in allowed_jids if item.strip()]
+        _gravar(atual)
+        return dict(atual)
 
 
 def _url(settings: Settings, caminho: str) -> str:
@@ -197,10 +209,10 @@ def _por_nome(usuarios: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _gravar_token(token: str) -> None:
-    atual = _config_arquivo()
-    atual["wuzapi_token"] = token
-    _caminho_config().parent.mkdir(parents=True, exist_ok=True)
-    _caminho_config().write_text(json.dumps(atual, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _CONFIG_LOCK:
+        atual = _config_arquivo()
+        atual["wuzapi_token"] = token
+        _gravar(atual)
 
 
 def garantir_token(settings: Settings) -> Settings:
@@ -255,7 +267,24 @@ def _webhook_para(settings: Settings) -> str:
     return url
 
 
-def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
+def _aplicar_webhook(settings: Settings) -> None:
+    global _WEBHOOK_URL
+    webhook = _webhook_para(settings)
+    if not webhook or webhook == _WEBHOOK_URL:
+        return
+    for corpo in (
+        {"webhookURL": webhook, "events": ["Message"]},
+        {"webhook": webhook, "events": "Message"},
+    ):
+        try:
+            _pedido(settings, "/webhook", corpo)
+            _WEBHOOK_URL = webhook
+            return
+        except Exception:
+            continue
+
+
+def preparar(settings: Settings | None = None, *, webhook: bool = False) -> tuple[Settings, str]:
     settings = settings or load_settings()
     try:
         settings = garantir_token(settings)
@@ -263,56 +292,81 @@ def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
         return settings, f"Wuzapi indisponível: {exc}"
     if not settings.wuzapi_token:
         return settings, "A sessão da Segtrack ainda não tem token na Wuzapi."
-    try:
-        _usuarios(settings)
-    except Exception as exc:
-        return settings, f"Wuzapi indisponível: {exc}"
-    webhook = _webhook_para(settings)
-    for corpo in (
-        {"webhookURL": webhook, "events": ["Message"]},
-        {"webhook": webhook, "events": "Message"},
-    ):
-        try:
-            _pedido(settings, "/webhook", corpo)
-            break
-        except Exception:
-            continue
+    if webhook:
+        _aplicar_webhook(settings)
     return settings, ""
 
 
-def status(settings: Settings | None = None) -> dict[str, Any]:
-    settings = settings or load_settings()
-    settings, aviso = preparar(settings)
-    if aviso:
-        return {"configurado": False, "erro": aviso, "grupo": grupo_configurado(settings)}
+def _ler_sessao(settings: Settings) -> tuple[dict[str, Any], str]:
     try:
         corpo = _pedido(settings, "/session/status")
     except Exception as exc:
-        return {"configurado": True, "erro": str(exc), "grupo": grupo_configurado(settings)}
+        return {}, str(exc)
     dados = corpo.get("data") if isinstance(corpo, dict) else corpo
-    if not isinstance(dados, dict):
-        dados = {}
-    logado = bool(dados.get("loggedIn") or dados.get("LoggedIn"))
-    socket = bool(dados.get("connected") or dados.get("Connected"))
+    return dados if isinstance(dados, dict) else {}, ""
+
+
+def _logado(dados: dict[str, Any]) -> bool:
+    return bool(dados.get("loggedIn") or dados.get("LoggedIn"))
+
+
+def _socket(dados: dict[str, Any]) -> bool:
+    return bool(dados.get("connected") or dados.get("Connected"))
+
+
+def _religar_socket(settings: Settings, *, forcar: bool = False) -> None:
+    """Religa o celular já pareado. Não gera QR e não repete a tentativa o tempo todo."""
+    global _ULTIMO_CONNECT
+    agora = time.monotonic()
+    if not forcar and agora - _ULTIMO_CONNECT < 180:
+        return
+    _ULTIMO_CONNECT = agora
+    _pedido(settings, "/session/connect", {"Subscribe": ["Message"], "Immediate": False})
+
+
+def _resposta(settings: Settings, dados: dict[str, Any], erro: str = "") -> dict[str, Any]:
+    logado = _logado(dados)
     grupo = grupo_configurado(settings)
-    return {
-        "configurado": True,
-        "conectado": logado and socket,
+    corpo: dict[str, Any] = {
+        "configurado": bool(settings.wuzapi_token),
+        "pareado": logado,
+        "conectado": logado and _MANTER,
+        "socket": _socket(dados),
         "sessao": _limpar(dados),
         "grupo": grupo,
         "grupo_nome": grupo_nome(),
         "travado": bool(grupo),
     }
+    if erro and not logado:
+        corpo["erro"] = erro
+    return corpo
+
+
+def status(settings: Settings | None = None) -> dict[str, Any]:
+    settings = settings or load_settings()
+    settings, aviso = preparar(settings)
+    if aviso and not settings.wuzapi_token:
+        grupo = grupo_configurado(settings)
+        return {"configurado": False, "erro": aviso, "grupo": grupo, "grupo_nome": grupo_nome(), "travado": bool(grupo)}
+    dados, erro = _ler_sessao(settings)
+    return _resposta(settings, dados, aviso or erro)
 
 
 def conectar(settings: Settings | None = None) -> dict[str, Any]:
+    global _MANTER
     settings = settings or load_settings()
-    settings, aviso = preparar(settings)
-    if aviso:
+    settings, aviso = preparar(settings, webhook=True)
+    if aviso and not settings.wuzapi_token:
         return {"erro": aviso}
-    atual = status(settings)
-    if atual.get("conectado"):
-        return atual
+    _MANTER = True
+    dados, erro = _ler_sessao(settings)
+    if _logado(dados):
+        if not _socket(dados):
+            try:
+                _religar_socket(settings, forcar=True)
+            except Exception as exc:
+                return {"erro": str(exc), **_resposta(settings, dados)}
+        return status(settings)
     try:
         _pedido(settings, "/session/connect", {"Subscribe": ["Message"], "Immediate": False})
     except Exception as exc:
@@ -321,10 +375,12 @@ def conectar(settings: Settings | None = None) -> dict[str, Any]:
 
 
 def desconectar(settings: Settings | None = None) -> dict[str, Any]:
+    global _MANTER
     settings = settings or load_settings()
     settings, aviso = preparar(settings)
-    if aviso:
+    if aviso and not settings.wuzapi_token:
         return {"erro": aviso}
+    _MANTER = False
     try:
         _pedido(settings, "/session/disconnect", {})
     except Exception as exc:
@@ -335,33 +391,59 @@ def desconectar(settings: Settings | None = None) -> dict[str, Any]:
 def qr(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or load_settings()
     settings, aviso = preparar(settings)
-    if aviso:
+    if aviso and not settings.wuzapi_token:
         return {"erro": aviso}
-    atual = status(settings)
-    if atual.get("erro"):
-        return atual
-    if atual.get("conectado"):
-        return {"conectado": True, "grupo": atual.get("grupo") or ""}
-    sessao = atual.get("sessao") if isinstance(atual.get("sessao"), dict) else {}
-    imagem = str(sessao.get("qrcode") or sessao.get("QRCode") or "")
+    dados, erro = _ler_sessao(settings)
+    if _logado(dados):
+        return _resposta(settings, dados)
+    if erro:
+        return {"erro": erro, "conectado": False, "pareado": False, "grupo": grupo_configurado(settings)}
+    imagem = str(dados.get("qrcode") or dados.get("QRCode") or "")
     if imagem.startswith("data:image"):
-        return {"QRCode": imagem, "conectado": False}
+        return {"QRCode": imagem, "conectado": False, "pareado": False}
     try:
         corpo = _pedido(settings, "/session/qr")
     except urllib.error.HTTPError as exc:
         if exc.code not in {400, 404, 500}:
             return {"erro": str(exc)}
-        conectar(settings)
         try:
+            _pedido(settings, "/session/connect", {"Subscribe": ["Message"], "Immediate": False})
             corpo = _pedido(settings, "/session/qr")
-        except Exception as erro:
-            return {"erro": str(erro)}
+        except Exception as falha:
+            return {"erro": str(falha)}
     except Exception as exc:
         return {"erro": str(exc)}
     dados = corpo.get("data") if isinstance(corpo, dict) else corpo
     if not isinstance(dados, dict):
         return {"qr": dados}
     return _limpar(dados)
+
+
+def manter() -> None:
+    """Mantém o celular já pareado. Não pede QR de novo e não troca o grupo."""
+    try:
+        settings, aviso = preparar(load_settings(), webhook=True)
+        if aviso:
+            print(f"WhatsApp: {aviso}", flush=True)
+        else:
+            print("WhatsApp pronto. Sessão e grupo permanecem gravados.", flush=True)
+    except Exception as exc:
+        print(f"WhatsApp: {exc}", flush=True)
+    while True:
+        time.sleep(60)
+        if not _MANTER:
+            continue
+        try:
+            settings, aviso = preparar(load_settings())
+            if aviso or not settings.wuzapi_token:
+                continue
+            dados, erro = _ler_sessao(settings)
+            if erro or not _logado(dados) or _socket(dados):
+                continue
+            _religar_socket(settings)
+            print("WhatsApp: religando o celular já pareado", flush=True)
+        except Exception as exc:
+            print(f"WhatsApp: {exc}", flush=True)
 
 
 def grupos(settings: Settings | None = None) -> list[dict[str, Any]]:

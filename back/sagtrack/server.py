@@ -281,13 +281,9 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     porta = porta or settings.porta
 
     def preparar_whatsapp() -> None:
-        from .whatsapp import preparar
+        from .whatsapp import manter
 
-        _, aviso = preparar(settings)
-        if aviso:
-            print(f"WhatsApp: {aviso}", flush=True)
-        else:
-            print(f"WhatsApp pronto. Webhook {settings.webhook_url}", flush=True)
+        manter()
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()
     servidor = ThreadingHTTPServer((host, porta), Handler)

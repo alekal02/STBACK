@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -162,7 +162,7 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
     pasta.mkdir(parents=True, exist_ok=True)
 
     inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
-    agora = datetime.now().replace(microsecond=0)
+    agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
     if agora < inicio:
         congelado = inicio
     elif agora > fim:
@@ -173,7 +173,16 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         f"Horário congelado às {congelado.strftime('%H:%M:%S')}. "
         "A coleta usa os pulsos até esse instante."
     )
-    rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado)
+    anteriores: dict[str, list] = {}
+    arquivo_pontos = pasta / "pontos.json"
+    if arquivo_pontos.is_file():
+        try:
+            bruto = json.loads(arquivo_pontos.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            bruto = {}
+        if isinstance(bruto, dict):
+            anteriores = {str(placa): pontos for placa, pontos in bruto.items() if isinstance(pontos, list)}
+    rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado, anteriores=anteriores)
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 

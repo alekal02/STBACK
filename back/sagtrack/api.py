@@ -181,11 +181,38 @@ def _ate_o_corte(ponto: dict[str, Any], ate: datetime, dia: date) -> bool:
     return marca <= ate
 
 
+def _juntar_pontos(salvos: list[dict[str, Any]], novos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    vistos: set[tuple[str, float, float]] = set()
+    saida: list[dict[str, Any]] = []
+    for ponto in list(salvos) + list(novos):
+        try:
+            chave = (
+                str(ponto.get("timestamp") or ""),
+                round(float(ponto["latitude"]), 5),
+                round(float(ponto["longitude"]), 5),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        saida.append(ponto)
+    saida.sort(key=lambda item: str(item.get("timestamp") or ""))
+    return saida
+
+
+def _ultimo_pulso(pontos: list[dict[str, Any]], dia: date) -> datetime | None:
+    marcas = [_datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia) for ponto in pontos]
+    validas = [marca for marca in marcas if marca is not None]
+    return max(validas) if validas else None
+
+
 def coletar_percursos(
     settings: Settings,
     dia: date | None = None,
     on_progress: Any | None = None,
     ate: datetime | None = None,
+    anteriores: dict[str, list] | None = None,
 ) -> list[dict[str, Any]]:
     dia = dia or settings.data_rota
     inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
@@ -193,6 +220,7 @@ def coletar_percursos(
         corte = ate.replace(microsecond=0)
         if inicio <= corte < fim:
             fim = corte
+    guardados = anteriores or {}
     token = login(settings)
     veiculos = listar_veiculos(settings, token)
     try:
@@ -208,22 +236,37 @@ def coletar_percursos(
     def um(item: dict[str, Any]) -> dict[str, Any]:
         placa = fmt_placa(str(item.get("ras_vei_placa") or ""))
         vid = str(item.get("ras_vei_id") or "")
-        try:
-            eventos_hist = historico_veiculo(settings, vid, inicio, fim, token) if vid else []
-        except Exception as exc:
-            eventos_hist = []
-            erro = str(exc)
-        else:
-            erro = ""
-        pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
-        pontos = filtrar_pontos_periodo(
-            pontos_brutos,
+        salvos = [ponto for ponto in (guardados.get(placa) or []) if isinstance(ponto, dict)]
+        ultimo = _ultimo_pulso(salvos, dia)
+        evento = item.get("_evento") or {}
+        atual = _datetime_do_timestamp(
+            para_horario_brasilia(str(evento.get("ras_eve_data_gps") or evento.get("ras_eve_data_enviado") or "")),
             dia,
-            settings.hora_inicio,
-            settings.hora_fim,
-            data_fim=settings.data_fim,
         )
-        pontos = [p for p in pontos if "latitude" in p]
+        erro = ""
+        if salvos and atual is not None and ultimo is not None and atual <= ultimo:
+            pontos = list(salvos)
+            origem = "salvo"
+        else:
+            inicio_busca = inicio
+            if ultimo is not None:
+                inicio_busca = max(inicio, ultimo - timedelta(minutes=2))
+            try:
+                eventos_hist = historico_veiculo(settings, vid, inicio_busca, fim, token) if vid else []
+            except Exception as exc:
+                eventos_hist = []
+                erro = str(exc)
+            pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
+            novos = filtrar_pontos_periodo(
+                pontos_brutos,
+                dia,
+                settings.hora_inicio,
+                settings.hora_fim,
+                data_fim=settings.data_fim,
+            )
+            novos = [p for p in novos if "latitude" in p]
+            pontos = _juntar_pontos(salvos, novos) if salvos else novos
+            origem = "novo" if not salvos else "parcial"
         if ate is not None:
             pontos = [p for p in pontos if _ate_o_corte(p, ate, dia)]
         pontos.sort(key=lambda p: str(p.get("timestamp") or ""))
@@ -237,6 +280,7 @@ def coletar_percursos(
             "rota": "",
             "fonte": "sagtrack",
             "erro": erro,
+            "origem_pulso": origem,
             "total_pontos": len(pontos),
             "pontos_na_cidade": na_cidade,
             "pontos": pontos,
@@ -254,7 +298,13 @@ def coletar_percursos(
             rotas.append(rota)
             feitos += 1
             if on_progress:
-                on_progress(f"Pulsos {feitos}/{len(alvos)} · {rota.get('placa')}: {rota.get('total_pontos')} pontos")
+                nota = {"salvo": "sem pulso novo", "parcial": "só o trecho novo", "novo": "turno inteiro"}.get(
+                    str(rota.get("origem_pulso") or ""), ""
+                )
+                on_progress(
+                    f"Pulsos {feitos}/{len(alvos)} · {rota.get('placa')}: {rota.get('total_pontos')} pontos"
+                    + (f" · {nota}" if nota else "")
+                )
     rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0]
     rotas.sort(key=lambda item: str(item.get("prefixo") or item.get("placa") or ""))
     if on_progress:

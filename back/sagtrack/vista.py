@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from .config import Settings, pasta_dados
 
-_HORAS = 12
+_HORAS = 6
 _TIPOS = {"frota", "rota", "placa"}
 
 

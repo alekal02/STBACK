@@ -510,6 +510,8 @@ def _preparar_vias(
     feitos, faltando = _ruas(frota, codigo)
     if feitos or faltando:
         return feitos, faltando
+    if not tracos:
+        return [], []
     return _vias_no_poligono(dia, codigo, tracos)
 
 
@@ -522,12 +524,16 @@ def _mapa_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
 ) -> tuple[str, bytes, str]:
-    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
+    feitos, _faltando = _preparar_vias(dia, codigo, tracos, frota)
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": []}
+    if feitos or tracos or pontos:
+        legenda = "Somente o executado. Verde: via feita. Azul: trajeto do caminhão. Ponto: parada."
+    else:
+        legenda = "Programada para o dia. Nenhuma via foi executada neste turno."
     return (
         titulo,
-        renderizar_mapa([base], tracos, pontos, aneis, vias="ambas"),
-        "Verde: via feita. Vermelho: via em aberto. Azul: por onde o caminhão passou. Ponto: parada.",
+        renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
+        legenda,
     )
 
 
@@ -558,6 +564,34 @@ def _folhas_da_rota(
             legenda_aberta,
         ),
     ]
+
+
+def _falta_pct(pct: float) -> int:
+    return max(0, round(100 - float(pct or 0)))
+
+
+def _rotulo_andamento(row: dict[str, Any]) -> str:
+    pct = float(row.get("percentual") or 0)
+    falta = _falta_pct(pct)
+    if int(row.get("paradas") or 0) <= 0:
+        return "Não executada"
+    if row.get("situacao") == "Feita":
+        return "Feita"
+    if row.get("situacao") == "Parcial":
+        return f"Parcial · falta {falta}%"
+    if pct > 0:
+        return f"Não feita · falta {falta}%"
+    return "Não feita"
+
+
+def _barra_execucao(pdf: canvas.Canvas, x: float, y: float, largura: float, altura: float, pct: float) -> None:
+    pct = max(0.0, min(100.0, float(pct or 0)))
+    pdf.setFillColorRGB(0.78, 0.22, 0.16)
+    pdf.rect(x, y, largura, altura, fill=1, stroke=0)
+    feito = largura * (pct / 100.0)
+    if feito > 0.4:
+        pdf.setFillColorRGB(*_COR_SITUACAO["Feita"])
+        pdf.rect(x, y, feito, altura, fill=1, stroke=0)
 
 
 _COR_SITUACAO = {
@@ -619,8 +653,14 @@ def _pdf_frota_fiscal(
     y = cabecalho(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(fonte, 10)
-    pdf.drawString(16, y, f"Período {periodo}. Feita = 90% ou mais das ruas oficiais, com parada no turno da rota.")
-    y -= 28
+    abertura = (
+        f"Período {periodo}. A barra verde é o executado e a vermelha é o que faltou. "
+        "Feita só a partir de 90%. De 45% a 89% é parcial."
+    )
+    for linha in _quebrar(abertura, fonte, 10, largura - 32):
+        pdf.drawString(16, y, linha)
+        y -= 13
+    y -= 10
     cartoes = [
         (str(len(balanco)), "programadas", (0.16, 0.20, 0.27)),
         (str(len(feitas)), "feitas", _COR_SITUACAO["Feita"]),
@@ -654,7 +694,7 @@ def _pdf_frota_fiscal(
             pdf.setFont(fonte, 9)
         quem = ", ".join(row.get("caminhoes") or []) or "—"
         texto = (
-            f"{row['situacao']} · {row['codigo']} {row['nome']} · {_faixa_agenda(row)} · "
+            f"{_rotulo_andamento(row)} · {row['codigo']} {row['nome']} · {_faixa_agenda(row)} · "
             f"{_fmt_pct(row['percentual'])} · {row['paradas']} paradas · {quem}"
         )
         for linha in _quebrar(texto, fonte, 9, largura - 32):
@@ -701,49 +741,61 @@ def _pdf_frota_fiscal(
                 y -= 11
         y -= 6
 
-    colunas = [78, 210, 78, 58, 62, largura - 32 - 486]
-    cab = ["Rota", "Setor", "Situação", "%", "Paradas", "Caminhão"]
+    colunas = [64, 150, 128, 124, 52, largura - 32 - 518]
+    cab = ["Rota", "Setor", "Situação", "Executado", "Paradas", "Caminhão"]
+
+    def cabeca_faixa(titulo_pagina: str) -> float:
+        yy = nova(titulo_pagina)
+        pdf.setFillColorRGB(0.35, 0.40, 0.46)
+        pdf.setFont(fonte, 8)
+        pdf.drawString(
+            16,
+            yy,
+            "Verde: executado. Vermelho: o que faltou. Feita a partir de 90%. De 45% a 89% é parcial.",
+        )
+        yy -= 14
+        pdf.setFillColorRGB(0.11, 0.14, 0.19)
+        pdf.setFont(negrito, 8)
+        xx = 16
+        for texto, coluna in zip(cab, colunas):
+            pdf.drawString(xx, yy, texto)
+            xx += coluna
+        return yy - 16
+
     for faixa in ("Diurno", "Noturno", "Noturno diário", "Sem turno"):
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
         if not grupo:
             continue
-        y = nova(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
-        pdf.setFillColorRGB(0.11, 0.14, 0.19)
-        pdf.setFont(negrito, 8)
-        x = 16
-        for texto, coluna in zip(cab, colunas):
-            pdf.drawString(x, y, texto)
-            x += coluna
-        y -= 14
+        y = cabeca_faixa(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
         for row in grupo:
-            if y < 32:
-                y = nova(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
-                pdf.setFont(negrito, 8)
-                pdf.setFillColorRGB(0.11, 0.14, 0.19)
-                x = 16
-                for texto, coluna in zip(cab, colunas):
-                    pdf.drawString(x, y, texto)
-                    x += coluna
-                y -= 14
+            if y < 36:
+                y = cabeca_faixa(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
             cor = _COR_SITUACAO[row["situacao"]]
+            rotulo = _rotulo_andamento(row)
             if row["situacao"] == "Não feita":
                 pdf.setFillColorRGB(0.98, 0.94, 0.93)
-                pdf.rect(12, y - 3, largura - 24, 13, fill=1, stroke=0)
+                pdf.rect(12, y - 4, largura - 24, 16, fill=1, stroke=0)
             valores = [
                 row["codigo"],
                 str(row["nome"] or ""),
-                row["situacao"],
-                _fmt_pct(row["percentual"]),
+                rotulo,
+                None,
                 str(row["paradas"] or 0) if row["paradas"] else "—",
                 ", ".join(row.get("caminhoes") or []) or "—",
             ]
             x = 16
-            for texto, coluna in zip(valores, colunas):
-                pdf.setFillColorRGB(*cor if texto == row["situacao"] else (0.11, 0.14, 0.19))
-                pdf.setFont(negrito if texto == row["situacao"] else fonte, 8)
-                pdf.drawString(x, y, str(texto)[: int(coluna / 4.2)])
+            for indice, (texto, coluna) in enumerate(zip(valores, colunas)):
+                if indice == 3:
+                    _barra_execucao(pdf, x, y - 1, 74, 8, float(row["percentual"] or 0))
+                    pdf.setFillColorRGB(0.11, 0.14, 0.19)
+                    pdf.setFont(fonte, 8)
+                    pdf.drawString(x + 78, y, _fmt_pct(row["percentual"]))
+                else:
+                    pdf.setFillColorRGB(*cor if indice == 2 else (0.11, 0.14, 0.19))
+                    pdf.setFont(negrito if indice == 2 else fonte, 8)
+                    pdf.drawString(x, y, str(texto)[: int(coluna / 4.2)])
                 x += coluna
-            y -= 13
+            y -= 18
 
     for titulo, blob, legenda, cor in mapas:
         pdf.showPage()
@@ -786,12 +838,11 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
     for row in balanco:
-        if int(row.get("paradas") or 0) <= 0:
-            continue
         placas = set(row.get("placas") or [])
         tracos = [traco for placa in placas for traco in (gps_por_placa.get(placa) or [])]
+        estado = _rotulo_andamento(row)
         titulo = (
-            f"{row['codigo']} {row['nome']} · {row['situacao']} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
+            f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
         )
         cor = _COR_SITUACAO[row["situacao"]]
         folha_titulo, png, legenda = _mapa_da_rota(

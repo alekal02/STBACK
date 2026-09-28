@@ -23,6 +23,7 @@ _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
 _CONFIG_LOCK = threading.Lock()
 _AVISO: dict[str, Any] | None = None
+_PENDENTES: list[dict[str, Any]] = []
 _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
@@ -576,7 +577,7 @@ def _menu() -> str:
         "*dia 26 frota* ou *26/09 frota* — link do relatório da frota nesse turno\n"
         "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n"
-        "O pedido manda a última conta pronta e já fecha a próxima.\n\n"
+        "frota, a rota ou a placa fecham a conta e mandam o link neste grupo.\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -779,7 +780,7 @@ def _reservar_coleta(data_iso: str, aviso: str) -> bool:
 
 
 def relogio_frota(settings: Settings) -> None:
-    """Atualiza a frota a cada 5 minutos. Sem pulso novo, não refaz rua nem PDF."""
+    """A cada 15 minutos guarda só os pulsos novos. O relatório sai quando pedem no grupo."""
     from .config import aplicar_periodo, dia_operacional
     from .server import JOB, _rodar
 
@@ -795,7 +796,7 @@ def relogio_frota(settings: Settings) -> None:
             print(f"Frota automática: {exc}", flush=True)
             with JOB["lock"]:
                 JOB["rodando"] = False
-        time.sleep(5 * 60)
+        time.sleep(15 * 60)
 
 
 def _texto_frota(settings: Settings, dia: date) -> str:
@@ -876,36 +877,69 @@ def _enviar_relatorio(
     return url
 
 
-def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
-    """Manda o link pedido no grupo assim que a atualização grava os pulsos."""
+def _retirar_pedidos() -> list[dict[str, Any]]:
     global _AVISO
-    pedido = _AVISO
-    _AVISO = None
-    if not pedido:
+    with _LOCK:
+        pedidos = list(_PENDENTES)
+        _PENDENTES.clear()
+        _AVISO = None
+    return pedidos
+
+
+def _guardar_pedido(grupo: str, tipo: str, consulta: str, dia: date) -> None:
+    global _AVISO
+    chave = (grupo, tipo, consulta, dia.isoformat())
+    pedido = {"grupo": grupo, "tipo": tipo, "consulta": consulta, "dia": dia.isoformat()}
+    with _LOCK:
+        _PENDENTES[:] = [
+            item
+            for item in _PENDENTES
+            if (item["grupo"], item["tipo"], item["consulta"], item["dia"]) != chave
+        ]
+        _PENDENTES.append(pedido)
+        _AVISO = pedido
+
+
+def _nome_pedido(tipo: str, consulta: str) -> str:
+    if tipo == "frota":
+        return "a frota"
+    if tipo == "placa":
+        return f"a placa {consulta}"
+    return f"a rota {consulta}"
+
+
+def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
+    """Manda o link de cada pedido do grupo assim que a conta fica gravada."""
+    pedidos = _retirar_pedidos()
+    if not pedidos:
         return
-    grupo = str(pedido["grupo"])
-    try:
-        if falha:
-            enviar_texto(settings, grupo, f"Não consegui fechar a conta agora: {falha}")
-            _ULTIMO_ENVIO.update({"fase": "erro", "erro": falha})
-            return
-        dia = date.fromisoformat(str(pedido["dia"]))
-        if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
-            enviar_texto(
-                settings,
-                grupo,
-                "Não consegui gravar os pulsos deste turno. Peça *frota* de novo neste grupo.",
-            )
-            return
-        url = _enviar_relatorio(settings, grupo, str(pedido["tipo"]), str(pedido["consulta"]), dia)
-        _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "tipo": pedido["tipo"], "consulta": pedido["consulta"]})
-        print("WhatsApp: link enviado ao fim da coleta", flush=True)
-    except Exception as exc:
-        print(f"WhatsApp: {exc}", flush=True)
+    for pedido in pedidos:
+        grupo = str(pedido["grupo"])
         try:
-            enviar_texto(settings, grupo, f"Não consegui enviar o relatório: {exc}")
-        except Exception:
-            pass
+            if falha:
+                enviar_texto(settings, grupo, f"Não consegui fechar a conta agora: {falha}")
+                _ULTIMO_ENVIO.update({"fase": "erro", "erro": falha})
+                continue
+            dia = date.fromisoformat(str(pedido["dia"]))
+            if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+                enviar_texto(
+                    settings,
+                    grupo,
+                    "Não consegui gravar os pulsos deste turno. Peça de novo neste grupo.",
+                )
+                continue
+            url = _enviar_relatorio(settings, grupo, str(pedido["tipo"]), str(pedido["consulta"]), dia)
+            _ULTIMO_ENVIO.update(
+                {"fase": "enviado", "link": url, "tipo": pedido["tipo"], "consulta": pedido["consulta"]}
+            )
+            print(f"WhatsApp: link enviado · {pedido['tipo']} {pedido['consulta']}".strip(), flush=True)
+            agendar_pdf(settings, dia, str(pedido["tipo"]), str(pedido["consulta"]), forcar=False)
+        except Exception as exc:
+            print(f"WhatsApp: {exc}", flush=True)
+            try:
+                enviar_texto(settings, grupo, f"Não consegui enviar o relatório: {exc}")
+            except Exception:
+                pass
 
 
 def _disparar_coleta(settings: Settings, dia: date) -> None:
@@ -916,7 +950,7 @@ def _disparar_coleta(settings: Settings, dia: date) -> None:
     ajustado = aplicar_periodo(settings, data=dia.isoformat())
     if not _reservar_coleta(dia.isoformat(), f"Pedido do grupo · {dia.isoformat()}"):
         return
-    threading.Thread(target=_rodar, args=(ajustado,), daemon=True).start()
+    threading.Thread(target=_rodar, args=(ajustado,), kwargs={"com_pdf": False}, daemon=True).start()
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
@@ -1017,41 +1051,20 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
-        resumo_arq = settings.output_dir / dia.isoformat() / "resumo.json"
-        if resumo_arq.is_file():
-            url = _enviar_relatorio(settings, mensagem["grupo"], tipo, consulta, dia, proxima=True)
-            agendar_pdf(settings, dia, tipo, consulta, forcar=False)
-            from .server import JOB
-
-            with JOB["lock"]:
-                rodando = bool(JOB["rodando"])
-            if not rodando:
-                _disparar_coleta(settings, dia)
-            total_s = round(time.perf_counter() - inicio, 1)
-            _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s, "resumo_s": total_s})
-            print(f"WhatsApp: última conta enviada em {total_s}s", flush=True)
-            return
-        global _AVISO
-        _AVISO = {
-            "grupo": mensagem["grupo"],
-            "tipo": tipo,
-            "consulta": consulta,
-            "dia": dia.isoformat(),
-        }
+        _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
         from .server import JOB
 
         with JOB["lock"]:
             desde = float(JOB.get("desde") or 0)
             rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
+        nome = _nome_pedido(tipo, consulta)
         if rodando:
             texto = (
-                "Recebi o pedido. A conta da frota já está fechando. "
-                "Mando o link da conclusão neste grupo assim que terminar."
+                f"Recebi {nome}. A conta já está fechando. "
+                "O link chega neste grupo assim que terminar."
             )
         else:
-            texto = (
-                "Recebi o pedido. Estou fechando os pulsos até agora e mando o link da conclusão neste grupo."
-            )
+            texto = f"Recebi {nome}. Fechando os pulsos até agora. O link chega neste grupo."
         enviar_texto(settings, mensagem["grupo"], texto)
         if not rodando:
             _disparar_coleta(settings, dia)

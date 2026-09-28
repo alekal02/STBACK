@@ -10,7 +10,7 @@ from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
 from .gps import _datetime_do_timestamp, haversine_m, tracos_realistas
 from .mapa import aplicar_setores_oficiais, carregar_setores
-from .relatorios import medir_presenca, pontos_leves, setores_leves
+from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
 
 Progresso = Callable[[str], None]
@@ -151,6 +151,61 @@ def _sem_pontos(item: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in item.items() if k != "pontos"}
 
 
+_CAMPOS_CONTA = (
+    "coberturas_inlog",
+    "percentual_concluido",
+    "veredicto",
+    "confianca",
+    "setor",
+    "rota",
+    "codigo_rota",
+    "km_coleta",
+    "km_total",
+    "km_faltando",
+    "qtd_pacmans",
+    "trechos_feitos",
+    "trechos_faltando",
+    "trechos_planejados",
+    "trechos_gps",
+    "poligonos",
+    "vias",
+    "rota_planejada",
+    "paradas_dia",
+    "saida",
+    "papel",
+    "paradas",
+    "minutos_parado",
+    "paradas_pontos",
+)
+
+
+def _contas_salvas(pasta: Path) -> dict[str, dict[str, Any]]:
+    arquivo = pasta / "frota.json"
+    if not arquivo.is_file():
+        return {}
+    try:
+        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(bruto, list):
+        return {}
+    return {
+        str(item.get("placa") or ""): item
+        for item in bruto
+        if isinstance(item, dict) and item.get("placa") and item.get("coberturas_inlog")
+    }
+
+
+def _reaproveitar_conta(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
+    """Mantém a rua já cruzada quando o caminhão não teve pulso novo."""
+    if not anterior or not anterior.get("coberturas_inlog"):
+        return False
+    for campo in _CAMPOS_CONTA:
+        if campo in anterior:
+            item[campo] = anterior[campo]
+    return True
+
+
 def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[str, Any]:
     def progress(msg: str) -> None:
         print(msg, flush=True)
@@ -194,12 +249,25 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 
+    contas = _contas_salvas(pasta)
+    refazer = []
+    for item in rotas:
+        placa = str(item.get("placa") or "")
+        if str(item.get("origem_pulso") or "") == "salvo" and _reaproveitar_conta(item, contas.get(placa)):
+            continue
+        refazer.append(item)
+
     progress("Lendo o mapa oficial de Aparecida...")
     setores = carregar_setores(dia)
-    progress(f"Setores do dia: {len(setores)}. Cruzando ruas com o trajeto...")
-    aplicar_setores_oficiais(rotas, setores, dia, on_progress=progress)
-    progress("Medindo paradas de coleta...")
-    medir_presenca(rotas, setores, dia)
+    if refazer:
+        progress(
+            f"Setores do dia: {len(setores)}. "
+            f"Cruzando ruas de {len(refazer)} caminhão(ões) com pulso novo."
+        )
+        aplicar_setores_oficiais(refazer, setores, dia, on_progress=progress)
+        progress("Medindo paradas de coleta...")
+        medir_presenca(refazer, setores, dia)
+    _aplicar_apoio(rotas)
 
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)

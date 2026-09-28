@@ -253,6 +253,211 @@ def _rdp(pontos: list[Ponto], tolerancia_m: float) -> list[Ponto]:
     return [inicio, fim]
 
 
+def _proximo_na_via(ponto: Ponto, via: list[list[float]]) -> tuple[float, float, Ponto] | None:
+    """Distância em metros, posição ao longo da via e o ponto projetado."""
+    if len(via) < 2:
+        return None
+    melhor: tuple[float, float, Ponto] | None = None
+    percorrido = 0.0
+    for indice in range(len(via) - 1):
+        a = (float(via[indice][0]), float(via[indice][1]))
+        b = (float(via[indice + 1][0]), float(via[indice + 1][1]))
+        comp = haversine_m(a, b)
+        if comp < 0.5:
+            continue
+        ax, ay = _xy(a, a)
+        bx, by = _xy(b, a)
+        px, py = _xy(ponto, a)
+        abx, aby = bx - ax, by - ay
+        denom = abx * abx + aby * aby
+        t = 0.0 if denom <= 0 else max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / denom))
+        proj = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        dist = haversine_m(ponto, proj)
+        along = percorrido + comp * t
+        if melhor is None or dist < melhor[0]:
+            melhor = (dist, along, proj)
+        percorrido += comp
+    return melhor
+
+
+def _fatia_via(via: list[list[float]], inicio_m: float, fim_m: float) -> list[Ponto]:
+    if fim_m < inicio_m:
+        inicio_m, fim_m = fim_m, inicio_m
+        inverter = True
+    else:
+        inverter = False
+    saida: list[Ponto] = []
+    percorrido = 0.0
+    for indice in range(len(via) - 1):
+        a = (float(via[indice][0]), float(via[indice][1]))
+        b = (float(via[indice + 1][0]), float(via[indice + 1][1]))
+        comp = haversine_m(a, b)
+        if comp < 0.5:
+            continue
+        prox = percorrido + comp
+        if prox < inicio_m:
+            percorrido = prox
+            continue
+        if not saida:
+            t = 0.0 if comp <= 0 else max(0.0, min(1.0, (inicio_m - percorrido) / comp))
+            saida.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+        if prox <= fim_m:
+            saida.append(b)
+        else:
+            t = 0.0 if comp <= 0 else max(0.0, min(1.0, (fim_m - percorrido) / comp))
+            saida.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+            break
+        percorrido = prox
+    if inverter:
+        saida.reverse()
+    return saida
+
+
+def trajetoria_uniforme(
+    pontos: list[dict[str, Any]] | None,
+    vias: list[list[list[float]]] | None = None,
+    *,
+    dia: date | None = None,
+    salto_max_m: float = 120.0,
+    cola_m: float = 12.0,
+    rua_m: float = 35.0,
+) -> list[list[list[float]]]:
+    """Liga os pulsos pela hora e, quando o pulso está na via oficial, segue o meio da rua."""
+    marcas: list[tuple[datetime, Ponto]] = []
+    referencia = dia or date.today()
+    for ponto in pontos or []:
+        try:
+            coord = (float(ponto["latitude"]), float(ponto["longitude"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        momento = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), referencia)
+        marcas.append((momento or datetime.min, coord))
+    marcas.sort(key=lambda item: item[0])
+    seguidos: list[tuple[datetime, Ponto]] = []
+    for momento, coord in marcas:
+        if seguidos and haversine_m(seguidos[-1][1], coord) < cola_m:
+            continue
+        seguidos.append((momento, coord))
+    if len(seguidos) < 2:
+        return []
+
+    ruas = [via for via in (vias or []) if via and len(via) >= 2]
+    caixas = []
+    for via in ruas:
+        lats = [float(p[0]) for p in via]
+        lons = [float(p[1]) for p in via]
+        caixas.append((min(lats) - 0.0004, max(lats) + 0.0004, min(lons) - 0.0004, max(lons) + 0.0004))
+
+    def projetar(coord: Ponto, preferida: int | None) -> tuple[int, float, Ponto] | None:
+        melhor: tuple[float, int, float, Ponto] | None = None
+        for indice, via in enumerate(ruas):
+            sul, norte, oeste, leste = caixas[indice]
+            if not (sul <= coord[0] <= norte and oeste <= coord[1] <= leste):
+                continue
+            achado = _proximo_na_via(coord, via)
+            if achado is None or achado[0] > rua_m:
+                continue
+            dist, along, proj = achado
+            if melhor is None or dist < melhor[0]:
+                melhor = (dist, indice, along, proj)
+        if melhor is None:
+            return None
+        if preferida is not None and preferida != melhor[1]:
+            achado = _proximo_na_via(coord, ruas[preferida])
+            if achado is not None and achado[0] <= rua_m and achado[0] <= melhor[0] + 12:
+                return preferida, achado[1], achado[2]
+        return melhor[1], melhor[2], melhor[3]
+
+    if not ruas:
+        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
+
+    trechos: list[list[Ponto]] = []
+    atual: list[Ponto] = []
+    via_atual: int | None = None
+    along_lo: float | None = None
+    along_hi: float | None = None
+
+    def fechar(juntar: bool = True) -> None:
+        nonlocal atual, via_atual, along_lo, along_hi
+        if via_atual is None or along_lo is None or along_hi is None or along_hi - along_lo < 8:
+            via_atual = None
+            along_lo = None
+            along_hi = None
+            return
+        fatia = _fatia_via(ruas[via_atual], along_lo, along_hi)
+        via_atual = None
+        along_lo = None
+        along_hi = None
+        if len(fatia) < 2:
+            return
+        if atual and juntar:
+            if haversine_m(atual[-1], fatia[-1]) < haversine_m(atual[-1], fatia[0]):
+                fatia = list(reversed(fatia))
+            if haversine_m(atual[-1], fatia[0]) <= salto_max_m:
+                atual.extend(fatia[1:])
+                return
+        if len(atual) >= 2:
+            trechos.append(atual)
+        atual = list(fatia)
+
+    def rapido(antes: datetime, agora: datetime, metros: float) -> bool:
+        dt = abs((agora - antes).total_seconds())
+        if dt <= 0:
+            return metros > 40
+        return metros / dt > (60 / 3.6)
+
+    ultimo_m: datetime | None = None
+    ultimo_along = 0.0
+    for momento, coord in seguidos:
+        proj = projetar(coord, via_atual)
+        if proj is None:
+            fechar()
+            ultimo_m = None
+            continue
+        indice, along, _ponto = proj
+        if via_atual is None:
+            via_atual = indice
+            along_lo = along
+            along_hi = along
+            ultimo_m = momento
+            ultimo_along = along
+            continue
+        salto = abs(along - ultimo_along) if indice == via_atual else haversine_m(atual[-1], coord) if atual else 0.0
+        if indice != via_atual or (ultimo_m is not None and rapido(ultimo_m, momento, salto)):
+            fechar(juntar=not (ultimo_m is not None and rapido(ultimo_m, momento, salto)))
+            via_atual = indice
+            along_lo = along
+            along_hi = along
+            ultimo_m = momento
+            ultimo_along = along
+            continue
+        along_lo = min(float(along_lo), along)
+        along_hi = max(float(along_hi), along)
+        ultimo_m = momento
+        ultimo_along = along
+    fechar()
+    if len(atual) >= 2:
+        trechos.append(atual)
+    if not trechos:
+        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
+    return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(_rdp(trecho, 8)) >= 2]
+
+
+def _quebrar_salto(pontos: list[Ponto], salto_max_m: float) -> list[list[list[float]]]:
+    trechos: list[list[Ponto]] = []
+    atual = [pontos[0]]
+    for coord in pontos[1:]:
+        if haversine_m(atual[-1], coord) > salto_max_m:
+            if len(atual) >= 2:
+                trechos.append(atual)
+            atual = [coord]
+            continue
+        atual.append(coord)
+    if len(atual) >= 2:
+        trechos.append(atual)
+    return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(trecho) >= 2]
+
+
 def tracos_realistas(
     pontos: list[dict[str, Any]],
     salto_max_m: float = 380,

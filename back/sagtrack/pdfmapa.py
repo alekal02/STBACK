@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -190,13 +191,29 @@ def _tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]:
     return x, y
 
 
+_TILE_RUIM: set[tuple[int, int, int]] = set()
+
+
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
+    chave = (zoom, x, y)
+    if chave in _TILE_RUIM:
+        return None
     bruto = os.getenv("OUTPUT_DIR", "").strip()
     pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / str(zoom)
     pasta.mkdir(parents=True, exist_ok=True)
     arquivo = pasta / f"{x}_{y}.jpg"
     if not arquivo.is_file():
-        return None
+        url = (
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
+        )
+        pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
+        try:
+            with urllib.request.urlopen(pedido, timeout=5) as resp:
+                arquivo.write_bytes(resp.read())
+        except Exception:
+            _TILE_RUIM.add(chave)
+            return None
     try:
         return Image.open(arquivo).convert("RGB")
     except Exception:
@@ -374,11 +391,11 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 1400:
-        altura = int(imagem.height * (1400 / imagem.width))
-        imagem = imagem.resize((1400, max(1, altura)), Image.Resampling.LANCZOS)
+    if imagem.width > 1600:
+        altura = int(imagem.height * (1600 / imagem.width))
+        imagem = imagem.resize((1600, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=72, optimize=True)
+    imagem.save(saida, format="JPEG", quality=80, optimize=True)
     return saida.getvalue()
 
 

@@ -697,7 +697,7 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
 
     _garantir_coleta(settings, dia)
     pasta = settings.output_dir / dia.isoformat()
-    chave = f"{tipo}-{(consulta or '').strip().upper()}.pdf"
+    chave = f"{tipo}-{(consulta or '').strip().upper()}-ruas.pdf"
     guardado = _cache_pdf(pasta, chave)
     if guardado is not None:
         if tipo == "frota":

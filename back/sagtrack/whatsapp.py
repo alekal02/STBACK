@@ -571,7 +571,7 @@ def _menu() -> str:
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
         "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
         "*dia 26* — marca o turno; depois peça o relatório\n"
-        "*dia 26 frota* ou *26/09 frota* — PDF da frota nesse turno\n"
+        "*dia 26 frota* ou *26/09 frota* — link do relatório da frota nesse turno\n"
         "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n\n"
         "_Digite o comando neste grupo._"
@@ -679,8 +679,7 @@ def _texto_frota(settings: Settings, dia: date) -> str:
         linhas.append("")
         linhas.append("Sem coleta: " + ", ".join(vazias))
     linhas.append("")
-    linhas.append("O PDF com os mapas segue agora.")
-    return "\n".join(linhas)[:3900]
+    return "\n".join(linhas)
 
 
 def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> str:
@@ -692,8 +691,16 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
     linhas = [str(item) for item in (rel.get("texto") or []) if str(item).strip()]
     if not linhas:
         return ""
-    linhas.append("O PDF segue agora.")
-    return "\n".join(linhas[:12])[:3900]
+    return "\n".join(linhas[:12])
+
+
+def _com_link(corpo: str, url: str) -> str:
+    rodape = (
+        f"\nAbra o relatório: {url}\n"
+        "A página abre na hora. O PDF baixa no botão da página."
+    )
+    base = (corpo or "Relatório do turno.").rstrip()
+    return (base[: 3900 - len(rodape)] + rodape).strip()
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
@@ -731,18 +738,18 @@ def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = 
         if _cache_pdf(pasta, chave) is not None:
             return
         if on_progress:
-            on_progress("Montando o PDF da frota com os pulsos já salvos...")
+            on_progress("Montando o PDF para o botão de download...")
         from .pdfmapa import pdf_frota
 
         arquivo, _nome = pdf_frota(settings.output_dir, dia)
         if _cache_pdf(pasta, chave) is None:
             _guardar_cache(pasta, chave, arquivo)
         if on_progress:
-            on_progress("PDF da frota pronto. No WhatsApp, peça frota para receber o arquivo.")
+            on_progress("PDF pronto. No grupo, o link abre a página e o arquivo baixa por lá.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
-            on_progress("A frota foi salva. O PDF sai quando pedirem frota no WhatsApp.")
+            on_progress("A frota foi salva. O PDF é montado quando baixarem na página.")
     finally:
         _GERANDO.release()
 
@@ -798,51 +805,33 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         dia = dia_pedido or _DIAS.get(chave) or dia_operacional()
         if dia_pedido is not None:
             _DIAS[chave] = dia_pedido
-        if not _GERANDO.acquire(blocking=False):
-            enviar_texto(
-                settings,
-                mensagem["grupo"],
-                "Ainda estou montando o PDF anterior. O resumo dele já foi enviado neste grupo.",
-            )
-            return
-        try:
-            inicio = time.perf_counter()
-            _ULTIMO_ENVIO.clear()
-            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "resumo"})
-            resumo = (
-                _texto_frota(settings, dia)
-                if tipo == "frota"
-                else _texto_consulta(settings, tipo, consulta, dia)
-            )
-            if resumo:
-                enviar_texto(settings, mensagem["grupo"], resumo)
-            else:
+        inicio = time.perf_counter()
+        _ULTIMO_ENVIO.clear()
+        _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
+        if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+            if not _GERANDO.acquire(blocking=False):
                 enviar_texto(
                     settings,
                     mensagem["grupo"],
-                    f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+                    "A coleta deste turno ainda está rodando. Peça o relatório de novo em instantes.",
                 )
-            resumo_s = round(time.perf_counter() - inicio, 1)
-            _ULTIMO_ENVIO["fase"] = "pdf"
-            _ULTIMO_ENVIO["resumo_s"] = resumo_s
-            arquivo, nome = _gerar(settings, tipo, consulta, dia)
-            pdf_s = round(time.perf_counter() - inicio, 1)
-            print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
-            enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
-            total_s = round(time.perf_counter() - inicio, 1)
-            _ULTIMO_ENVIO.update(
-                {
-                    "fase": "enviado",
-                    "nome": nome,
-                    "bytes": len(arquivo),
-                    "resumo_s": resumo_s,
-                    "pdf_s": pdf_s,
-                    "total_s": total_s,
-                }
-            )
-            print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)
-        finally:
-            _GERANDO.release()
+                return
+            try:
+                _garantir_coleta(settings, dia)
+            finally:
+                _GERANDO.release()
+        from .vista import emitir
+
+        url = emitir(settings, tipo, consulta, dia)
+        corpo = (
+            _texto_frota(settings, dia)
+            if tipo == "frota"
+            else _texto_consulta(settings, tipo, consulta, dia)
+        )
+        enviar_texto(settings, mensagem["grupo"], _com_link(corpo, url))
+        total_s = round(time.perf_counter() - inicio, 1)
+        _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s, "resumo_s": total_s})
+        print(f"WhatsApp: link enviado em {total_s}s", flush=True)
     except Exception as exc:
         _ULTIMO_ENVIO["fase"] = "erro"
         _ULTIMO_ENVIO["erro"] = str(exc)

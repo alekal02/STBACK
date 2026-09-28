@@ -37,7 +37,7 @@ def _aplicar(settings: Settings, corpo: dict[str, Any]) -> Settings:
     return Cls(**{**settings.__dict__, **novo.__dict__})
 
 
-def _rodar(settings: Settings) -> None:
+def _rodar(settings: Settings, com_pdf: bool = True) -> None:
     def progresso(msg: str) -> None:
         with JOB["lock"]:
             JOB["mensagens"].append(msg)
@@ -48,7 +48,8 @@ def _rodar(settings: Settings) -> None:
         from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
         avisar_coleta_pronta(settings)
-        preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
+        if com_pdf:
+            preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
     except Exception as exc:
         with JOB["lock"]:
             JOB["erro"] = str(exc)
@@ -346,6 +347,9 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
         from .whatsapp import manter, relogio_pdf
 
         threading.Thread(target=relogio_pdf, args=(settings,), daemon=True).start()
+        from .whatsapp import relogio_frota
+
+        threading.Thread(target=relogio_frota, args=(settings,), daemon=True).start()
         manter()
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()

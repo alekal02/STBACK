@@ -183,6 +183,14 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         if isinstance(bruto, dict):
             anteriores = {str(placa): pontos for placa, pontos in bruto.items() if isinstance(pontos, list)}
     rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado, anteriores=anteriores)
+    if (
+        (pasta / "resumo.json").is_file()
+        and rotas
+        and all(str(item.get("origem_pulso") or "") == "salvo" for item in rotas)
+    ):
+        (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
+        progress("Nenhum pulso novo. A conclusão já salva continua valendo.")
+        return json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 

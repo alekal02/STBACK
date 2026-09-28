@@ -739,6 +739,33 @@ def relogio_pdf(settings: Settings) -> None:
         time.sleep(3600)
 
 
+def relogio_frota(settings: Settings) -> None:
+    """Mantém a conclusão do turno pronta. Sem pulso novo, não refaz rua nem PDF."""
+    from .config import aplicar_periodo, dia_operacional
+    from .server import JOB, _rodar
+
+    time.sleep(40)
+    while True:
+        try:
+            dia = dia_operacional()
+            ajustado = aplicar_periodo(settings, data=dia.isoformat())
+            with JOB["lock"]:
+                ocupado = bool(JOB["rodando"])
+                if not ocupado:
+                    JOB["rodando"] = True
+                    JOB["erro"] = ""
+                    JOB["data"] = dia.isoformat()
+                    JOB["mensagens"] = [f"Atualização automática · {dia.isoformat()}"]
+            if not ocupado:
+                print("Frota automática: conferindo pulsos novos.", flush=True)
+                _rodar(ajustado, com_pdf=False)
+        except Exception as exc:
+            print(f"Frota automática: {exc}", flush=True)
+            with JOB["lock"]:
+                JOB["rodando"] = False
+        time.sleep(15 * 60)
+
+
 def _texto_frota(settings: Settings, dia: date) -> str:
     from .pdfmapa import _ler, _rotulo_andamento
     from .relatorios import _fmt_pct, balanco_frota
@@ -951,7 +978,12 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
         resumo_arq = settings.output_dir / dia.isoformat() / "resumo.json"
-        fresco = resumo_arq.is_file() and time.time() - resumo_arq.stat().st_mtime < 180
+        verificado = settings.output_dir / dia.isoformat() / "verificado.txt"
+        agora = time.time()
+        fresco = resumo_arq.is_file() and (
+            agora - resumo_arq.stat().st_mtime < 20 * 60
+            or (verificado.is_file() and agora - verificado.stat().st_mtime < 20 * 60)
+        )
         if fresco:
             url = _enviar_relatorio(settings, mensagem["grupo"], tipo, consulta, dia)
             total_s = round(time.perf_counter() - inicio, 1)

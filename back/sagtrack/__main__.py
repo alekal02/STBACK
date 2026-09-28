@@ -9,7 +9,7 @@ from .server import servir
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="sagtrack", description="Cobertura das rotas Sagtrack em Aparecida.")
+    parser = argparse.ArgumentParser(prog="sagtrack", description="Cobertura das rotas Segtrack em Aparecida.")
     sub = parser.add_subparsers(dest="comando", required=True)
 
     web = sub.add_parser("servir", help="Abre o painel da sala técnica")

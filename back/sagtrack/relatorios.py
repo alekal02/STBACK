@@ -1,4 +1,4 @@
-"""Três relatórios da Sagtrack: frota, rota e placa.
+"""Três relatórios da Segtrack: frota, rota e placa.
 
 A conta é a mesma em todos: ruas oficiais do GeoPackage e os pulsos do dia.
 Parada de coleta = o caminhão ficou num raio de 35 m por pelo menos 50 s, a até 6 km/h.
@@ -741,7 +741,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
     if nota_ao_vivo:
         linhas.insert(1, nota_ao_vivo)
     if not presentes:
-        linhas.append("Nenhum caminhão da Sagtrack entrou neste polígono no dia.")
+        linhas.append("Nenhum caminhão da Segtrack entrou neste polígono no dia.")
     elif coletando:
         linhas.append(
             f"{len(coletando)} caminhão(ões) com parada de coleta. "
@@ -806,7 +806,7 @@ def relatorio_placa(output_dir: Path, dia: date, consulta: str) -> dict[str, Any
             "tipo": "placa",
             "titulo": "Placa",
             "texto": [
-                f"A placa «{consulta}» não teve pulso da Sagtrack em Aparecida neste dia. "
+                f"A placa «{consulta}» não teve pulso da Segtrack em Aparecida neste dia. "
                 "Quando o rastreador for instalado e passar a pulsar na cidade, o relatório entra sozinho."
             ],
             "caminhoes": [],

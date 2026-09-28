@@ -1,1 +1,1 @@
-"""Painel Sagtrack: trajetória e cobertura das rotas de Aparecida."""
+"""Painel Segtrack: trajetória e cobertura das rotas de Aparecida."""

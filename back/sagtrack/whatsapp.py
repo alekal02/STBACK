@@ -261,7 +261,7 @@ def preparar(settings: Settings | None = None) -> tuple[Settings, str]:
     except Exception as exc:
         return settings, f"Wuzapi indisponível: {exc}"
     if not settings.wuzapi_token:
-        return settings, "A sessão da Sagtrack ainda não tem token na Wuzapi."
+        return settings, "A sessão da Segtrack ainda não tem token na Wuzapi."
     try:
         _usuarios(settings)
     except Exception as exc:
@@ -420,7 +420,7 @@ def enviar_pdf(settings: Settings, destino: str, arquivo: bytes, nome: str) -> N
 
 def _menu() -> str:
     return (
-        "*Relatórios Sagtrack*\n"
+        "*Relatórios Segtrack*\n"
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
         "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
         "*dia 26* — marca o turno; depois peça o relatório\n"

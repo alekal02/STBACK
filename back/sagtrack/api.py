@@ -23,9 +23,9 @@ def _req(method: str, url: str, headers: dict[str, str], data: bytes | None = No
             raw = resp.read()
     except HTTPError as exc:
         detalhe = exc.read()[:400].decode("utf-8", "replace")
-        raise RuntimeError(f"Sagtrack {exc.code}: {detalhe[:180]}") from exc
+        raise RuntimeError(f"Segtrack {exc.code}: {detalhe[:180]}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Sagtrack sem conexão: {exc.reason}") from exc
+        raise RuntimeError(f"Segtrack sem conexão: {exc.reason}") from exc
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8", "replace"))
@@ -75,7 +75,7 @@ def login(settings: Settings) -> str:
     )
     token = (corpo or {}).get("access_token")
     if not token:
-        raise RuntimeError("Login Sagtrack sem access_token")
+        raise RuntimeError("Login Segtrack sem access_token")
     return str(token)
 
 
@@ -149,7 +149,7 @@ def escolher_frota(
     eventos: list[dict[str, Any]],
     filtro: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    """Só placas da coleta que já têm cadastro na Sagtrack. Placa repetida fica com o pulso mais novo."""
+    """Só placas da coleta que já têm cadastro na Segtrack. Placa repetida fica com o pulso mais novo."""
     por_equip: dict[str, dict[str, Any]] = {}
     for ev in eventos:
         eid = str(ev.get("ras_ras_id") or "")
@@ -191,7 +191,7 @@ def coletar_percursos(
     for item in alvos:
         item["_prefixo"] = prefixo_da_placa(str(item.get("ras_vei_placa") or ""))
     if on_progress:
-        on_progress(f"Sagtrack em Aparecida: {len(alvos)} compactador(es) com rastreador.")
+        on_progress(f"Segtrack em Aparecida: {len(alvos)} compactador(es) com rastreador.")
 
     def um(item: dict[str, Any]) -> dict[str, Any]:
         placa = fmt_placa(str(item.get("ras_vei_placa") or ""))

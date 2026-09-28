@@ -125,7 +125,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         if url.path == "/api/health":
-            self._json(200, {"status": "ok", "servico": "sagtrack"})
+            self._json(200, {"status": "ok", "servico": "segtrack"})
             return
         if url.path == "/config.js":
             self._arquivo(FRONT / "config.js")
@@ -291,6 +291,6 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()
     servidor = ThreadingHTTPServer((host, porta), Handler)
-    print(f"Sala técnica Sagtrack em http://127.0.0.1:{porta}", flush=True)
+    print(f"Sala técnica Segtrack em http://127.0.0.1:{porta}", flush=True)
     print(f"Configuração do grupo em http://127.0.0.1:{porta}/whatsapp", flush=True)
     servidor.serve_forever()

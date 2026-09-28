@@ -191,7 +191,7 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
         )
-        pedido = urllib.request.Request(url, headers={"User-Agent": "Sagtrack/1.0"})
+        pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
             with urllib.request.urlopen(pedido, timeout=8) as resp:
                 arquivo.write_bytes(resp.read())
@@ -463,7 +463,7 @@ def _pdf(
 
 def _sem_dia(dia: date) -> bytes:
     return _pdf(
-        "Sagtrack · sem dados do turno",
+        "Segtrack · sem dados do turno",
         [f"Não há pulsos salvos para {_turno(dia)}.", "Atualize a frota no painel e peça o relatório de novo."],
         [],
         b"",
@@ -563,7 +563,7 @@ def _pdf_frota_fiscal(
     feitas = [r for r in balanco if r["situacao"] == "Feita"]
     parciais = [r for r in balanco if r["situacao"] == "Parcial"]
     nao = [r for r in balanco if r["situacao"] == "Não feita"]
-    y = cabecalho(f"Sagtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
+    y = cabecalho(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(fonte, 10)
     pdf.drawString(16, y, f"Período {periodo}. Feita = 90% ou mais das ruas oficiais, com parada no turno da rota.")
@@ -596,7 +596,7 @@ def _pdf_frota_fiscal(
         y -= 14
     for row in prontos:
         if y < 48:
-            y = nova(f"Sagtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
+            y = nova(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
             pdf.setFillColorRGB(0.11, 0.14, 0.19)
             pdf.setFont(fonte, 9)
         quem = ", ".join(row.get("caminhoes") or []) or "—"
@@ -611,7 +611,7 @@ def _pdf_frota_fiscal(
         y -= 2
     y -= 8
     if y < 80:
-        y = nova(f"Sagtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
+        y = nova(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(negrito, 11)
     pdf.drawString(16, y, "O que não foi feito")
@@ -632,7 +632,7 @@ def _pdf_frota_fiscal(
             blocos.append("Sem coleta: " + ", ".join(r["codigo"] for r in vazio) + ".")
         pdf.setFont(negrito, 9)
         if y < 48:
-            y = nova(f"Sagtrack · o que não foi feito · {dia.strftime('%d/%m/%Y')}")
+            y = nova(f"Segtrack · o que não foi feito · {dia.strftime('%d/%m/%Y')}")
         pdf.setFillColorRGB(*_COR_SITUACAO["Não feita"])
         pdf.drawString(16, y, f"{faixa} · {len(grupo)} não feitas")
         y -= 13
@@ -641,7 +641,7 @@ def _pdf_frota_fiscal(
         for bloco in blocos:
             for linha in _quebrar(bloco, fonte, 8, largura - 32):
                 if y < 36:
-                    y = nova(f"Sagtrack · o que não foi feito · {dia.strftime('%d/%m/%Y')}")
+                    y = nova(f"Segtrack · o que não foi feito · {dia.strftime('%d/%m/%Y')}")
                     pdf.setFillColorRGB(0.11, 0.14, 0.19)
                     pdf.setFont(fonte, 8)
                 pdf.drawString(16, y, linha)
@@ -654,7 +654,7 @@ def _pdf_frota_fiscal(
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
         if not grupo:
             continue
-        y = nova(f"Sagtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
+        y = nova(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
         pdf.setFillColorRGB(0.11, 0.14, 0.19)
         pdf.setFont(negrito, 8)
         x = 16
@@ -664,7 +664,7 @@ def _pdf_frota_fiscal(
         y -= 14
         for row in grupo:
             if y < 32:
-                y = nova(f"Sagtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
+                y = nova(f"Segtrack · {faixa} · {dia.strftime('%d/%m/%Y')}")
                 pdf.setFont(negrito, 8)
                 pdf.setFillColorRGB(0.11, 0.14, 0.19)
                 x = 16
@@ -874,7 +874,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
 
     rel = montar(output_dir, dia, "rota", consulta)
     if not rel.get("setores"):
-        return _pdf("Sagtrack · rota", rel.get("texto") or ["Rota não encontrada neste turno."], [], b""), "rota.pdf"
+        return _pdf("Segtrack · rota", rel.get("texto") or ["Rota não encontrada neste turno."], [], b""), "rota.pdf"
     setor = rel["setores"][0]
     codigo = str(setor.get("codigo") or consulta)
     conclusao = _nome_conclusao(str(rel.get("conclusao") or ""))
@@ -917,7 +917,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             _ler(output_dir / dia.isoformat(), "frota.json") or [],
         )
     ]
-    return _pdf_leitura(f"Sagtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
+    return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
 
 
 def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
@@ -926,11 +926,11 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     rel = montar(output_dir, dia, "placa", consulta)
     caminhoes = rel.get("caminhoes") or []
     if not caminhoes:
-        return _pdf("Sagtrack · placa", list(rel.get("texto") or []), [], b""), "placa.pdf"
+        return _pdf("Segtrack · placa", list(rel.get("texto") or []), [], b""), "placa.pdf"
     caminhao = caminhoes[0]
     frota = _ler(output_dir / dia.isoformat(), "frota.json") or []
     tracos = caminhao.get("gps") or []
-    titulo = f"Sagtrack · {rel.get('titulo') or caminhao.get('placa') or consulta}"
+    titulo = f"Segtrack · {rel.get('titulo') or caminhao.get('placa') or consulta}"
     tabela = [["Rota", "Situação", "Papel", "Paradas", "Minutos", "%"]]
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
     for linha in caminhao.get("tocados") or []:

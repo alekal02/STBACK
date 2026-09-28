@@ -311,7 +311,7 @@ def group_by_vehicle(pontos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def para_horario_brasilia(texto: str) -> str:
-    """A Sagtrack manda o pulso em UTC. O painel mostra o horário de Brasília."""
+    """A Segtrack manda o pulso em UTC. O painel mostra o horário de Brasília."""
     bruto = (texto or "").strip()
     if not bruto:
         return bruto

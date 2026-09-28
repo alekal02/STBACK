@@ -1,6 +1,6 @@
-# Sagtrack
+# Segtrack
 
-Cobertura da coleta em Aparecida a partir do mapa oficial e dos pulsos da Sagtrack.
+Cobertura da coleta em Aparecida a partir do mapa oficial e dos pulsos da Segtrack.
 
 **Backend:** [Render](https://render.com) · https://github.com/alekal02/STBACK  
 **Frontend:** [Vercel](https://vercel.com) · https://github.com/alekal02/STFfront

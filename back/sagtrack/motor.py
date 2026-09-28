@@ -161,7 +161,7 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
     pasta = settings.output_dir / dia.isoformat()
     pasta.mkdir(parents=True, exist_ok=True)
 
-    progress("Buscando pulsos na Sagtrack...")
+    progress("Buscando pulsos na Segtrack...")
     rotas = coletar_percursos(settings, dia, on_progress=progress)
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
@@ -218,7 +218,7 @@ def _dentro_dos_aneis(aneis: list, lat: float, lon: float) -> bool:
 
 
 def atualizar_rota_em_curso(output_dir: Path, dia: date, consulta: str) -> str | None:
-    """Se um caminhão da Sagtrack está dentro da rota agora, baixa o trajeto até este instante."""
+    """Se um caminhão da Segtrack está dentro da rota agora, baixa o trajeto até este instante."""
     from .api import escolher_frota, eventos_atuais, listar_veiculos, login
     from .config import aplicar_periodo, dia_operacional, janela_datetime, load_settings
     from .gps import para_horario_brasilia

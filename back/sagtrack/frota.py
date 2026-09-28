@@ -1,4 +1,4 @@
-"""Compactadores da coleta. Entram no painel só quando a placa já existe na Sagtrack."""
+"""Compactadores da coleta. Entram no painel só quando a placa já existe na Segtrack."""
 
 from __future__ import annotations
 

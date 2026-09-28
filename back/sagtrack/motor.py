@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .api import coletar_percursos
-from .config import Settings, rotulo_periodo
+from .config import Settings, janela_datetime, rotulo_periodo
 from .gps import _datetime_do_timestamp, haversine_m, tracos_realistas
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import medir_presenca, pontos_leves, setores_leves
@@ -161,8 +161,19 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
     pasta = settings.output_dir / dia.isoformat()
     pasta.mkdir(parents=True, exist_ok=True)
 
-    progress("Buscando pulsos na Segtrack...")
-    rotas = coletar_percursos(settings, dia, on_progress=progress)
+    inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
+    agora = datetime.now().replace(microsecond=0)
+    if agora < inicio:
+        congelado = inicio
+    elif agora > fim:
+        congelado = fim
+    else:
+        congelado = agora
+    progress(
+        f"Horário congelado às {congelado.strftime('%H:%M:%S')}. "
+        "A coleta usa os pulsos até esse instante."
+    )
+    rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado)
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 
@@ -175,6 +186,7 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
 
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
+    resumo["congelado_em"] = congelado.isoformat(timespec="seconds")
     (pasta / "resumo.json").write_text(json.dumps(resumo, ensure_ascii=False), encoding="utf-8")
     (pasta / "setores.json").write_text(json.dumps(setores_leves(setores), ensure_ascii=False), encoding="utf-8")
     (pasta / "pontos.json").write_text(json.dumps(pontos_leves(rotas), ensure_ascii=False), encoding="utf-8")

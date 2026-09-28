@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from .config import Settings, janela_datetime
 from .frota import placas_da_frota, prefixo_da_placa
-from .gps import filtrar_pontos_periodo, para_horario_brasilia
+from .gps import _datetime_do_timestamp, filtrar_pontos_periodo, para_horario_brasilia
 
 APARECIDA_LAT = (-16.98, -16.68)
 APARECIDA_LON = (-49.42, -49.05)
@@ -174,13 +174,25 @@ def escolher_frota(
     return escolhidos
 
 
+def _ate_o_corte(ponto: dict[str, Any], ate: datetime, dia: date) -> bool:
+    marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
+    if marca is None:
+        return True
+    return marca <= ate
+
+
 def coletar_percursos(
     settings: Settings,
     dia: date | None = None,
     on_progress: Any | None = None,
+    ate: datetime | None = None,
 ) -> list[dict[str, Any]]:
     dia = dia or settings.data_rota
     inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
+    if ate is not None:
+        corte = ate.replace(microsecond=0)
+        if inicio <= corte < fim:
+            fim = corte
     token = login(settings)
     veiculos = listar_veiculos(settings, token)
     try:
@@ -212,6 +224,8 @@ def coletar_percursos(
             data_fim=settings.data_fim,
         )
         pontos = [p for p in pontos if "latitude" in p]
+        if ate is not None:
+            pontos = [p for p in pontos if _ate_o_corte(p, ate, dia)]
         pontos.sort(key=lambda p: str(p.get("timestamp") or ""))
         na_cidade = sum(1 for p in pontos if em_aparecida(p.get("latitude"), p.get("longitude")))
         return {

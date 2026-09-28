@@ -658,12 +658,16 @@ def _texto_frota(settings: Settings, dia: date) -> str:
     feitas = sum(1 for row in balanco if row["situacao"] == "Feita")
     parciais = sum(1 for row in balanco if row["situacao"] == "Parcial")
     nao = sum(1 for row in balanco if row["situacao"] == "Não feita")
+    resumo_dia = _ler(pasta, "resumo.json") or {}
+    corte = str(resumo_dia.get("congelado_em") or "")
     linhas = [
         f"*Frota {dia.strftime('%d/%m/%Y')}*",
         f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · {nao} não feitas.",
         "Feita só a partir de 90%. De 45% a 89% é parcial.",
-        "",
     ]
+    if len(corte) >= 16:
+        linhas.append(f"Pulsos até {corte[11:16]}. Nenhum pulso depois desse horário entrou na conta.")
+    linhas.append("")
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
@@ -703,14 +707,44 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
         if tipo == "frota":
             return guardado.read_bytes(), f"frota-{dia.isoformat()}.pdf"
         return guardado.read_bytes(), f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
+    selos = {item: item.stat().st_mtime for item in _fontes_do_dia(pasta) if item.is_file()}
     if tipo == "frota":
         arquivo, nome = pdf_frota(settings.output_dir, dia)
     elif tipo == "rota":
         arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
     else:
         arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
-    _guardar_cache(pasta, chave, arquivo)
+    if selos and all(item.is_file() and item.stat().st_mtime == selo for item, selo in selos.items()):
+        _guardar_cache(pasta, chave, arquivo)
     return arquivo, nome
+
+
+def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = None) -> None:
+    """Monta o PDF da frota assim que a coleta grava os arquivos, para o WhatsApp só enviar."""
+    pasta = settings.output_dir / dia.isoformat()
+    if not (pasta / "resumo.json").is_file():
+        return
+    chave = "frota--ruas2.pdf"
+    if not _GERANDO.acquire(blocking=False):
+        return
+    try:
+        if _cache_pdf(pasta, chave) is not None:
+            return
+        if on_progress:
+            on_progress("Montando o PDF da frota com os pulsos já salvos...")
+        from .pdfmapa import pdf_frota
+
+        arquivo, _nome = pdf_frota(settings.output_dir, dia)
+        if _cache_pdf(pasta, chave) is None:
+            _guardar_cache(pasta, chave, arquivo)
+        if on_progress:
+            on_progress("PDF da frota pronto. No WhatsApp, peça frota para receber o arquivo.")
+    except Exception as exc:
+        print(f"PDF da frota: {exc}", flush=True)
+        if on_progress:
+            on_progress("A frota foi salva. O PDF sai quando pedirem frota no WhatsApp.")
+    finally:
+        _GERANDO.release()
 
 
 def processar(body: Any, settings: Settings | None = None) -> None:

@@ -872,6 +872,9 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             continue
         mapas.append((folha_titulo, png, legenda, cor))
     periodo = resumo.get("periodo") or _turno(dia)
+    corte = str(resumo.get("congelado_em") or "")
+    if len(corte) >= 16:
+        periodo = f"{periodo} · pulsos até {corte[11:16]}"
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

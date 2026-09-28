@@ -649,9 +649,6 @@ def _achar_caminhao(frota: list[dict[str, Any]], consulta: str) -> dict[str, Any
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]:
-    from .motor import atualizar_rota_em_curso
-
-    nota_ao_vivo = atualizar_rota_em_curso(output_dir, dia, consulta)
     pasta = _pasta(output_dir, dia)
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
@@ -738,8 +735,6 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
         f"Rota {titulo} · {dia.strftime('%d/%m/%Y')} · {setor.get('frequencia') or 'sem turno no mapa'}",
         f"Conclusão: {nome_conclusao} · {_fmt_pct(pct)} das ruas oficiais.",
     ]
-    if nota_ao_vivo:
-        linhas.insert(1, nota_ao_vivo)
     if not presentes:
         linhas.append("Nenhum caminhão da Segtrack entrou neste polígono no dia.")
     elif coletando:

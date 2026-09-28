@@ -21,6 +21,7 @@ _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
 _CONFIG_LOCK = threading.Lock()
+_AVISO: dict[str, Any] | None = None
 _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
@@ -703,6 +704,33 @@ def _com_link(corpo: str, url: str) -> str:
     return (base[: 3900 - len(rodape)] + rodape).strip()
 
 
+def _enviar_relatorio(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> str:
+    from .vista import emitir
+
+    url = emitir(settings, tipo, consulta, dia)
+    corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
+    enviar_texto(settings, grupo, _com_link(corpo, url))
+    return url
+
+
+def avisar_coleta_pronta(settings: Settings) -> None:
+    """Manda o link pedido no grupo assim que a atualização grava os pulsos."""
+    global _AVISO
+    pedido = _AVISO
+    _AVISO = None
+    if not pedido:
+        return
+    try:
+        dia = date.fromisoformat(str(pedido["dia"]))
+        if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+            return
+        url = _enviar_relatorio(settings, str(pedido["grupo"]), str(pedido["tipo"]), str(pedido["consulta"]), dia)
+        _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "tipo": pedido["tipo"], "consulta": pedido["consulta"]})
+        print("WhatsApp: link enviado ao fim da coleta", flush=True)
+    except Exception as exc:
+        print(f"WhatsApp: {exc}", flush=True)
+
+
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
@@ -808,30 +836,36 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
-        if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
-            if not _GERANDO.acquire(blocking=False):
-                enviar_texto(
-                    settings,
-                    mensagem["grupo"],
-                    "A coleta deste turno ainda está rodando. Peça o relatório de novo em instantes.",
-                )
-                return
-            try:
-                _garantir_coleta(settings, dia)
-            finally:
-                _GERANDO.release()
-        from .vista import emitir
+        if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+            url = _enviar_relatorio(settings, mensagem["grupo"], tipo, consulta, dia)
+            total_s = round(time.perf_counter() - inicio, 1)
+            _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s, "resumo_s": total_s})
+            print(f"WhatsApp: link enviado em {total_s}s", flush=True)
+            return
+        from .server import JOB
 
-        url = emitir(settings, tipo, consulta, dia)
-        corpo = (
-            _texto_frota(settings, dia)
-            if tipo == "frota"
-            else _texto_consulta(settings, tipo, consulta, dia)
-        )
-        enviar_texto(settings, mensagem["grupo"], _com_link(corpo, url))
-        total_s = round(time.perf_counter() - inicio, 1)
-        _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s, "resumo_s": total_s})
-        print(f"WhatsApp: link enviado em {total_s}s", flush=True)
+        with JOB["lock"]:
+            rodando = bool(JOB["rodando"])
+        global _AVISO
+        if rodando:
+            _AVISO = {
+                "grupo": mensagem["grupo"],
+                "tipo": tipo,
+                "consulta": consulta,
+                "dia": dia.isoformat(),
+            }
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                "Recebi o pedido. A frota ainda está gravando os pulsos. Mando o link neste grupo assim que a conta fechar.",
+            )
+        else:
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                "Ainda não há pulsos salvos deste turno. Clique em Atualizar frota no painel. Quando terminar, peça o relatório de novo.",
+            )
+        _ULTIMO_ENVIO.update({"fase": "enviado", "total_s": round(time.perf_counter() - inicio, 1)})
     except Exception as exc:
         _ULTIMO_ENVIO["fase"] = "erro"
         _ULTIMO_ENVIO["erro"] = str(exc)

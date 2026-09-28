@@ -45,8 +45,9 @@ def _rodar(settings: Settings) -> None:
 
     try:
         executar(settings, on_progress=progresso)
-        from .whatsapp import preparar_pdf_frota
+        from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
+        avisar_coleta_pronta(settings)
         preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
     except Exception as exc:
         with JOB["lock"]:

@@ -122,27 +122,46 @@
       setTimeout(() => mapa.invalidateSize(), 80);
     }
 
-    baixar.onclick = async () => {
+    async function baixarPdf(tentativa) {
       baixar.disabled = true;
-      const antigo = baixar.textContent;
-      baixar.textContent = "Montando o PDF…";
-      aviso.textContent = "O PDF usa o mapa de ruas e pode levar um pouco. A conta da página já está fechada.";
+      baixar.textContent = "Buscando o PDF pronto…";
+      let seguir = false;
       try {
         const r = await fetch(api + "/pdf");
-        if (!r.ok) throw new Error("Não foi possível montar o PDF.");
+        if (r.status === 202) {
+          aviso.textContent = "O PDF desta hora ainda está sendo montado. A conta da página já está pronta. Nova tentativa em alguns segundos.";
+          if (tentativa < 8) {
+            seguir = true;
+            setTimeout(() => baixarPdf(tentativa + 1), 8000);
+            return;
+          }
+          aviso.textContent = "O PDF ainda está sendo montado. Toque de novo em um minuto.";
+          return;
+        }
+        if (r.status === 410) {
+          aviso.textContent = "Este link caiu quando o servidor reiniciou. Peça frota de novo no grupo.";
+          return;
+        }
+        if (!r.ok) {
+          aviso.textContent = "Não consegui baixar agora. Toque de novo em instantes.";
+          return;
+        }
         const blob = await r.blob();
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = (rel && rel.tipo ? rel.tipo : "relatorio") + ".pdf";
         a.click();
-        aviso.textContent = "PDF baixado.";
+        aviso.textContent = "PDF baixado. Se a frota mudou, o próximo arquivo já está sendo preparado.";
       } catch (err) {
-        aviso.textContent = err.message || "Falha ao baixar o PDF.";
+        aviso.textContent = "Não consegui baixar agora. Toque de novo em instantes.";
       } finally {
-        baixar.disabled = false;
-        baixar.textContent = antigo;
+        if (!seguir) {
+          baixar.disabled = false;
+          baixar.textContent = "Baixar PDF";
+        }
       }
-    };
+    }
+    baixar.onclick = () => baixarPdf(0);
 
     fetch(api).then(async (r) => {
       if (!r.ok) {

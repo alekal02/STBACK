@@ -645,7 +645,98 @@ def _cache_pdf(pasta: Path, chave: str) -> Path | None:
 def _guardar_cache(pasta: Path, chave: str, arquivo: bytes) -> None:
     destino = pasta / "cache" / chave
     destino.parent.mkdir(parents=True, exist_ok=True)
-    destino.write_bytes(arquivo)
+    temporario = destino.with_name(destino.name + ".tmp")
+    temporario.write_bytes(arquivo)
+    temporario.replace(destino)
+
+
+def _ultimo_pdf(pasta: Path, chave: str) -> Path | None:
+    destino = pasta / "cache" / chave
+    if destino.is_file() and destino.stat().st_size > 800:
+        return destino
+    return None
+
+
+def _pdf_atrasado(pasta: Path, chave: str, segundos: int = 3600) -> bool:
+    destino = _ultimo_pdf(pasta, chave)
+    if destino is None:
+        return True
+    if time.time() - destino.stat().st_mtime >= segundos:
+        return True
+    fontes = [item for item in _fontes_do_dia(pasta) if item.is_file()]
+    return any(item.stat().st_mtime > destino.stat().st_mtime for item in fontes)
+
+
+def _chave_pdf(tipo: str, consulta: str) -> str:
+    return f"{tipo}-{(consulta or '').strip().upper()}-ruas2.pdf"
+
+
+def _montar_pdf(settings: Settings, dia: date, tipo: str, consulta: str, *, forcar: bool) -> None:
+    from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
+
+    pasta = settings.output_dir / dia.isoformat()
+    if not (pasta / "resumo.json").is_file():
+        return
+    chave = _chave_pdf(tipo, consulta)
+    if not forcar and _cache_pdf(pasta, chave) is not None:
+        return
+    if tipo == "frota":
+        arquivo, _nome = pdf_frota(settings.output_dir, dia)
+    elif tipo == "rota":
+        arquivo, _nome = pdf_rota(settings.output_dir, dia, consulta)
+    else:
+        arquivo, _nome = pdf_placa(settings.output_dir, dia, consulta)
+    _guardar_cache(pasta, chave, arquivo)
+
+
+def agendar_pdf(settings: Settings, dia: date, tipo: str = "frota", consulta: str = "", *, forcar: bool = False) -> None:
+    def trabalho() -> None:
+        if not _GERANDO.acquire(blocking=False):
+            return
+        try:
+            _montar_pdf(settings, dia, tipo, consulta, forcar=forcar)
+            print(f"PDF {tipo} {consulta} gravado para o próximo download.", flush=True)
+        except Exception as exc:
+            print(f"PDF {tipo}: {exc}", flush=True)
+        finally:
+            _GERANDO.release()
+
+    threading.Thread(target=trabalho, daemon=True).start()
+
+
+def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[int, bytes, str]:
+    """Devolve o último PDF pronto e deixa o próximo sendo montado fora da requisição."""
+    pasta = settings.output_dir / dia.isoformat()
+    chave = _chave_pdf(tipo, consulta)
+    nome = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
+    pronto = _ultimo_pdf(pasta, chave)
+    if pronto is None or _pdf_atrasado(pasta, chave):
+        agendar_pdf(settings, dia, tipo, consulta, forcar=pronto is not None)
+    if pronto is None:
+        return 202, b"", nome
+    return 200, pronto.read_bytes(), nome
+
+
+def relogio_pdf(settings: Settings) -> None:
+    """A cada hora grava de novo o PDF da frota do turno, sem esperar alguém baixar."""
+    from .config import dia_operacional
+
+    time.sleep(20)
+    while True:
+        try:
+            dia = dia_operacional()
+            pasta = settings.output_dir / dia.isoformat()
+            chave = _chave_pdf("frota", "")
+            if (pasta / "resumo.json").is_file() and _pdf_atrasado(pasta, chave):
+                print("PDF horário: montando a frota do turno.", flush=True)
+                if _GERANDO.acquire(blocking=False):
+                    try:
+                        _montar_pdf(settings, dia, "frota", "", forcar=True)
+                    finally:
+                        _GERANDO.release()
+        except Exception as exc:
+            print(f"PDF horário: {exc}", flush=True)
+        time.sleep(3600)
 
 
 def _texto_frota(settings: Settings, dia: date) -> str:
@@ -755,29 +846,22 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
 
 
 def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = None) -> None:
-    """Monta o PDF da frota assim que a coleta grava os arquivos, para o WhatsApp só enviar."""
+    """Monta o PDF da frota assim que a coleta grava os arquivos."""
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return
-    chave = "frota--ruas2.pdf"
     if not _GERANDO.acquire(blocking=False):
         return
     try:
-        if _cache_pdf(pasta, chave) is not None:
-            return
         if on_progress:
             on_progress("Montando o PDF para o botão de download...")
-        from .pdfmapa import pdf_frota
-
-        arquivo, _nome = pdf_frota(settings.output_dir, dia)
-        if _cache_pdf(pasta, chave) is None:
-            _guardar_cache(pasta, chave, arquivo)
+        _montar_pdf(settings, dia, "frota", "", forcar=_pdf_atrasado(pasta, _chave_pdf("frota", "")))
         if on_progress:
             on_progress("PDF pronto. No grupo, o link abre a página e o arquivo baixa por lá.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
-            on_progress("A frota foi salva. O PDF é montado quando baixarem na página.")
+            on_progress("A frota foi salva. O PDF segue sendo montado em segundo plano.")
     finally:
         _GERANDO.release()
 

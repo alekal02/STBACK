@@ -6,9 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from datetime import date
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,14 +20,40 @@ _HORAS = 12
 _TIPOS = {"frota", "rota", "placa"}
 
 
+def _destinos_chave() -> list[Path]:
+    destinos = [pasta_dados() / "link.key"]
+    output = os.getenv("OUTPUT_DIR", "").strip()
+    if output:
+        destinos.append(Path(output) / "link.key")
+    return destinos
+
+
 def _chave() -> bytes:
-    arquivo = pasta_dados() / "link.key"
-    if arquivo.is_file():
-        salvo = arquivo.read_bytes().strip()
-        if len(salvo) >= 16:
-            return salvo
-    chave = secrets.token_hex(32).encode()
-    arquivo.write_bytes(chave)
+    """A mesma chave em todo reinício. Um arquivo novo a cada deploy invalidava o link (410)."""
+    semente = (
+        os.getenv("SAGTRACK_LINK_SECRET", "").strip()
+        or os.getenv("FULLTRACK_SECRET_KEY", "").strip()
+        or os.getenv("WUZAPI_ADMIN_TOKEN", "").strip()
+    )
+    if semente:
+        chave = hashlib.sha256(b"segtrack-link-v1\n" + semente.encode()).hexdigest().encode()
+    else:
+        chave = b""
+        for arquivo in _destinos_chave():
+            if arquivo.is_file():
+                salvo = arquivo.read_bytes().strip()
+                if len(salvo) >= 16:
+                    chave = salvo
+                    break
+        if not chave:
+            chave = secrets.token_hex(32).encode()
+    for arquivo in _destinos_chave():
+        try:
+            if not arquivo.is_file() or arquivo.read_bytes().strip() != chave:
+                arquivo.parent.mkdir(parents=True, exist_ok=True)
+                arquivo.write_bytes(chave)
+        except OSError:
+            continue
     return chave
 
 
@@ -197,11 +225,11 @@ def mapa(settings: Settings, claims: dict[str, Any], codigo: str) -> dict[str, A
     }
 
 
-def pdf(settings: Settings, claims: dict[str, Any]) -> tuple[bytes, str]:
-    from .whatsapp import _gerar
+def pdf(settings: Settings, claims: dict[str, Any]) -> tuple[int, bytes, str]:
+    from .whatsapp import entrega_pdf
 
     dia = date.fromisoformat(str(claims["d"]))
-    return _gerar(settings, str(claims["t"]), str(claims.get("q") or ""), dia)
+    return entrega_pdf(settings, str(claims["t"]), str(claims.get("q") or ""), dia)
 
 
 def html_pagina() -> str:

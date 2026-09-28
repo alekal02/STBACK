@@ -145,9 +145,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, mapa(self.settings, claims, codigo))
             return
         try:
-            arquivo, nome = pdf(self.settings, claims)
+            codigo, arquivo, nome = pdf(self.settings, claims)
         except Exception as exc:
             self._json(500, {"erro": str(exc)})
+            return
+        if codigo == 202:
+            self._json(202, {"estado": "montando"})
             return
         self._bytes(200, arquivo, "application/pdf", nome)
 
@@ -337,8 +340,9 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     porta = porta or settings.porta
 
     def preparar_whatsapp() -> None:
-        from .whatsapp import manter
+        from .whatsapp import manter, relogio_pdf
 
+        threading.Thread(target=relogio_pdf, args=(settings,), daemon=True).start()
         manter()
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()

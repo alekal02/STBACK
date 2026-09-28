@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -192,6 +193,12 @@ def _tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]:
 
 
 _TILE_RUIM: set[tuple[int, int, int]] = set()
+_TILE_PRAZO = 0.0
+
+
+def _abrir_prazo_mapa(segundos: float) -> None:
+    global _TILE_PRAZO
+    _TILE_PRAZO = time.monotonic() + segundos
 
 
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
@@ -203,13 +210,15 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
     pasta.mkdir(parents=True, exist_ok=True)
     arquivo = pasta / f"{x}_{y}.jpg"
     if not arquivo.is_file():
+        if _TILE_PRAZO and time.monotonic() > _TILE_PRAZO:
+            return None
         url = (
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
         )
         pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
-            with urllib.request.urlopen(pedido, timeout=5) as resp:
+            with urllib.request.urlopen(pedido, timeout=3) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
             _TILE_RUIM.add(chave)
@@ -276,10 +285,10 @@ def renderizar_mapa(
         sul -= extra
         norte += extra
     zoom = 15
-    for candidato in range(17, 14, -1):
+    for candidato in range(16, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 6:
+        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -294,8 +303,8 @@ def renderizar_mapa(
         comeco = max(0, meio - limite // 2)
         return comeco, comeco + limite - 1
 
-    tx0, tx1 = limitar(tx0, tx1, 8)
-    ty0, ty1 = limitar(ty0, ty1, 6)
+    tx0, tx1 = limitar(tx0, tx1, 5)
+    ty0, ty1 = limitar(ty0, ty1, 4)
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
     coords = [
@@ -837,7 +846,10 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         for caminhao in (resumo.get("caminhoes") or [])
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
+    _abrir_prazo_mapa(40)
     for row in balanco:
+        if int(row.get("paradas") or 0) <= 0:
+            continue
         placas = set(row.get("placas") or [])
         tracos = [traco for placa in placas for traco in (gps_por_placa.get(placa) or [])]
         estado = _rotulo_andamento(row)
@@ -845,15 +857,19 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
         )
         cor = _COR_SITUACAO[row["situacao"]]
-        folha_titulo, png, legenda = _mapa_da_rota(
-            titulo,
-            row["codigo"],
-            _aneis(row),
-            tracos,
-            row.get("pontos") or [],
-            dia,
-            frota,
-        )
+        try:
+            folha_titulo, png, legenda = _mapa_da_rota(
+                titulo,
+                row["codigo"],
+                _aneis(row),
+                tracos,
+                row.get("pontos") or [],
+                dia,
+                frota,
+            )
+        except Exception as exc:
+            print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
+            continue
         mapas.append((folha_titulo, png, legenda, cor))
     periodo = resumo.get("periodo") or _turno(dia)
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"

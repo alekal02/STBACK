@@ -25,6 +25,7 @@ _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
 _MANTER = True
+_ULTIMO_ENVIO: dict[str, Any] = {}
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
 def _caminho_config() -> Path:
@@ -397,6 +398,7 @@ def _resposta(settings: Settings, dados: dict[str, Any], erro: str = "") -> dict
         "grupo": grupo,
         "grupo_nome": grupo_nome(),
         "travado": bool(grupo),
+        "ultimo_envio": dict(_ULTIMO_ENVIO),
     }
     if erro and not logado:
         corpo["erro"] = erro
@@ -770,6 +772,9 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             )
             return
         try:
+            inicio = time.perf_counter()
+            _ULTIMO_ENVIO.clear()
+            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "resumo"})
             resumo = (
                 _texto_frota(settings, dia)
                 if tipo == "frota"
@@ -783,13 +788,30 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                     mensagem["grupo"],
                     f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
                 )
+            resumo_s = round(time.perf_counter() - inicio, 1)
+            _ULTIMO_ENVIO["fase"] = "pdf"
+            _ULTIMO_ENVIO["resumo_s"] = resumo_s
             arquivo, nome = _gerar(settings, tipo, consulta, dia)
+            pdf_s = round(time.perf_counter() - inicio, 1)
             print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
             enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
-            print(f"WhatsApp: {nome} enviado", flush=True)
+            total_s = round(time.perf_counter() - inicio, 1)
+            _ULTIMO_ENVIO.update(
+                {
+                    "fase": "enviado",
+                    "nome": nome,
+                    "bytes": len(arquivo),
+                    "resumo_s": resumo_s,
+                    "pdf_s": pdf_s,
+                    "total_s": total_s,
+                }
+            )
+            print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)
         finally:
             _GERANDO.release()
     except Exception as exc:
+        _ULTIMO_ENVIO["fase"] = "erro"
+        _ULTIMO_ENVIO["erro"] = str(exc)
         try:
             enviar_texto(settings, mensagem["grupo"], f"Não consegui enviar o relatório: {exc}")
         except Exception:

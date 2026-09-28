@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import threading
+import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -331,6 +332,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             settings = _aplicar(self.settings, corpo)
             JOB["rodando"] = True
+            JOB["desde"] = time.time()
             JOB["erro"] = ""
             JOB["data"] = settings.data_rota.isoformat()
             JOB["mensagens"] = [f"Iniciando {JOB['data']}"]

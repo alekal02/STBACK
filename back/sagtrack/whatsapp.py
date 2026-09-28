@@ -575,7 +575,8 @@ def _menu() -> str:
         "*dia 26* — marca o turno; depois peça o relatório\n"
         "*dia 26 frota* ou *26/09 frota* — link do relatório da frota nesse turno\n"
         "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
-        "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n\n"
+        "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n"
+        "O pedido manda a última conta pronta e já fecha a próxima.\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -761,8 +762,24 @@ def relogio_pdf(settings: Settings) -> None:
         time.sleep(3600)
 
 
+def _reservar_coleta(data_iso: str, aviso: str) -> bool:
+    """Reserva a atualização da frota. Uma coleta parada há mais de 12 minutos não bloqueia a próxima."""
+    from .server import JOB
+
+    with JOB["lock"]:
+        desde = float(JOB.get("desde") or 0)
+        if JOB["rodando"] and (not desde or time.time() - desde < 12 * 60):
+            return False
+        JOB["rodando"] = True
+        JOB["desde"] = time.time()
+        JOB["erro"] = ""
+        JOB["data"] = data_iso
+        JOB["mensagens"] = [aviso]
+        return True
+
+
 def relogio_frota(settings: Settings) -> None:
-    """Mantém a conclusão do turno pronta. Sem pulso novo, não refaz rua nem PDF."""
+    """Atualiza a frota a cada 5 minutos. Sem pulso novo, não refaz rua nem PDF."""
     from .config import aplicar_periodo, dia_operacional
     from .server import JOB, _rodar
 
@@ -771,21 +788,14 @@ def relogio_frota(settings: Settings) -> None:
         try:
             dia = dia_operacional()
             ajustado = aplicar_periodo(settings, data=dia.isoformat())
-            with JOB["lock"]:
-                ocupado = bool(JOB["rodando"])
-                if not ocupado:
-                    JOB["rodando"] = True
-                    JOB["erro"] = ""
-                    JOB["data"] = dia.isoformat()
-                    JOB["mensagens"] = [f"Atualização automática · {dia.isoformat()}"]
-            if not ocupado:
+            if _reservar_coleta(dia.isoformat(), f"Atualização automática · {dia.isoformat()}"):
                 print("Frota automática: conferindo pulsos novos.", flush=True)
                 _rodar(ajustado, com_pdf=False)
         except Exception as exc:
             print(f"Frota automática: {exc}", flush=True)
             with JOB["lock"]:
                 JOB["rodando"] = False
-        time.sleep(15 * 60)
+        time.sleep(5 * 60)
 
 
 def _texto_frota(settings: Settings, dia: date) -> str:
@@ -828,7 +838,7 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
 
     if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
         return ""
-    rel = montar(settings.output_dir, dia, tipo, consulta)
+    rel = montar(settings.output_dir, dia, tipo, consulta, com_gps=False)
     linhas = [str(item) for item in (rel.get("texto") or []) if str(item).strip()]
     if not linhas:
         return ""
@@ -844,11 +854,24 @@ def _com_link(corpo: str, url: str) -> str:
     return (base[: 3900 - len(rodape)] + rodape).strip()
 
 
-def _enviar_relatorio(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> str:
+def _enviar_relatorio(
+    settings: Settings,
+    grupo: str,
+    tipo: str,
+    consulta: str,
+    dia: date,
+    *,
+    proxima: bool = False,
+) -> str:
     from .vista import emitir
 
     url = emitir(settings, tipo, consulta, dia)
     corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
+    if proxima:
+        corpo = (
+            (corpo or "Relatório do turno.").rstrip()
+            + "\n\nEsta é a última conta pronta. Uma nova já está sendo fechada para o próximo pedido."
+        )
     enviar_texto(settings, grupo, _com_link(corpo, url))
     return url
 
@@ -888,16 +911,11 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
 def _disparar_coleta(settings: Settings, dia: date) -> None:
     """A mesma atualização do botão, disparada pelo grupo."""
     from .config import aplicar_periodo
-    from .server import JOB, _rodar
+    from .server import _rodar
 
     ajustado = aplicar_periodo(settings, data=dia.isoformat())
-    with JOB["lock"]:
-        if JOB["rodando"]:
-            return
-        JOB["rodando"] = True
-        JOB["erro"] = ""
-        JOB["data"] = dia.isoformat()
-        JOB["mensagens"] = [f"Pedido do grupo · {dia.isoformat()}"]
+    if not _reservar_coleta(dia.isoformat(), f"Pedido do grupo · {dia.isoformat()}"):
+        return
     threading.Thread(target=_rodar, args=(ajustado,), daemon=True).start()
 
 
@@ -1000,17 +1018,18 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
         resumo_arq = settings.output_dir / dia.isoformat() / "resumo.json"
-        verificado = settings.output_dir / dia.isoformat() / "verificado.txt"
-        agora = time.time()
-        fresco = resumo_arq.is_file() and (
-            agora - resumo_arq.stat().st_mtime < 20 * 60
-            or (verificado.is_file() and agora - verificado.stat().st_mtime < 20 * 60)
-        )
-        if fresco:
-            url = _enviar_relatorio(settings, mensagem["grupo"], tipo, consulta, dia)
+        if resumo_arq.is_file():
+            url = _enviar_relatorio(settings, mensagem["grupo"], tipo, consulta, dia, proxima=True)
+            agendar_pdf(settings, dia, tipo, consulta, forcar=False)
+            from .server import JOB
+
+            with JOB["lock"]:
+                rodando = bool(JOB["rodando"])
+            if not rodando:
+                _disparar_coleta(settings, dia)
             total_s = round(time.perf_counter() - inicio, 1)
             _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s, "resumo_s": total_s})
-            print(f"WhatsApp: link enviado em {total_s}s", flush=True)
+            print(f"WhatsApp: última conta enviada em {total_s}s", flush=True)
             return
         global _AVISO
         _AVISO = {
@@ -1022,7 +1041,8 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         from .server import JOB
 
         with JOB["lock"]:
-            rodando = bool(JOB["rodando"])
+            desde = float(JOB.get("desde") or 0)
+            rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
         if rodando:
             texto = (
                 "Recebi o pedido. A conta da frota já está fechando. "

@@ -760,7 +760,7 @@ def _gps_na_rota(
     return trajetoria_uniforme(brutos, _vias_oficiais(dia, codigo), dia=dia)
 
 
-def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]:
+def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:
     pasta = _pasta(output_dir, dia)
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
@@ -830,7 +830,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
                 "paradas_pontos": cob.get("paradas_pontos") or [],
                 "gps": (
                     _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
-                    if papel in {"ATUANDO", "APOIO"}
+                    if com_gps and papel in {"ATUANDO", "APOIO"}
                     else []
                 )
                 or _linhas_leves(bruto.get("trechos_gps"), 800),
@@ -1030,10 +1030,10 @@ def interpretar(texto: str) -> tuple[str, str]:
     return "rota", bruto
 
 
-def montar(output_dir: Path, dia: date, tipo: str, consulta: str = "") -> dict[str, Any]:
+def montar(output_dir: Path, dia: date, tipo: str, consulta: str = "", *, com_gps: bool = True) -> dict[str, Any]:
     tipo = (tipo or "frota").lower()
     if tipo == "rota":
-        return relatorio_rota(output_dir, dia, consulta)
+        return relatorio_rota(output_dir, dia, consulta, com_gps=com_gps)
     if tipo == "placa":
         return relatorio_placa(output_dir, dia, consulta)
     return relatorio_frota(output_dir, dia)

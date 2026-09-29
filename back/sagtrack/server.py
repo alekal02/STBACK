@@ -45,12 +45,18 @@ def _rodar(settings: Settings, com_pdf: bool = True) -> None:
             del JOB["mensagens"][:-40]
 
     try:
-        executar(settings, on_progress=progresso)
+        resumo = executar(settings, on_progress=progresso)
         from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
-        avisar_coleta_pronta(settings)
-        if com_pdf:
-            preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
+        if isinstance(resumo, dict) and resumo.get("falha_historico"):
+            avisar_coleta_pronta(
+                settings,
+                falha="A Segtrack não devolveu o histórico dos caminhões. Peça de novo em alguns minutos.",
+            )
+        else:
+            avisar_coleta_pronta(settings)
+            if com_pdf:
+                preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
     except Exception as exc:
         with JOB["lock"]:
             JOB["erro"] = str(exc)
@@ -321,7 +327,23 @@ class Handler(BaseHTTPRequestHandler):
         if url.path != "/api/coletar":
             self.send_error(404)
             return
-        self._json(503, {"erro": "Consulta pausada. Nada está sendo pedido à Segtrack."})
+        try:
+            corpo = self._corpo()
+        except json.JSONDecodeError:
+            self._json(400, {"erro": "JSON inválido"})
+            return
+        with JOB["lock"]:
+            if JOB["rodando"]:
+                self._json(409, {"erro": "Já existe uma coleta em andamento."})
+                return
+            settings = _aplicar(self.settings, corpo)
+            JOB["rodando"] = True
+            JOB["desde"] = time.time()
+            JOB["erro"] = ""
+            JOB["data"] = settings.data_rota.isoformat()
+            JOB["mensagens"] = [f"Iniciando {JOB['data']}"]
+        threading.Thread(target=_rodar, args=(settings,), daemon=True).start()
+        self._json(202, {"ok": True, "data": settings.data_rota.isoformat()})
 
 
 def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:

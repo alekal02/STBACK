@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from .config import Settings, janela_datetime
 from .frota import placas_da_frota, prefixo_da_placa
-from .gps import _datetime_do_timestamp, filtrar_pontos_periodo, para_horario_brasilia
+from .gps import _datetime_do_timestamp, filtrar_pontos_periodo, ordem_do_pulso, para_horario_brasilia
 
 APARECIDA_LAT = (-16.98, -16.68)
 APARECIDA_LON = (-49.42, -49.05)
@@ -255,21 +255,25 @@ def coletar_percursos(
                 eventos_hist = historico_veiculo(settings, vid, inicio_busca, fim, token) if vid else []
             except Exception as exc:
                 eventos_hist = []
-                erro = str(exc)
-            pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
-            novos = filtrar_pontos_periodo(
-                pontos_brutos,
-                dia,
-                settings.hora_inicio,
-                settings.hora_fim,
-                data_fim=settings.data_fim,
-            )
-            novos = [p for p in novos if "latitude" in p]
-            pontos = _juntar_pontos(salvos, novos) if salvos else novos
-            origem = "novo" if not salvos else "parcial"
+                erro = str(exc).split("\n", 1)[0][:120]
+            if erro and salvos:
+                pontos = list(salvos)
+                origem = "falha"
+            else:
+                pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
+                novos = filtrar_pontos_periodo(
+                    pontos_brutos,
+                    dia,
+                    settings.hora_inicio,
+                    settings.hora_fim,
+                    data_fim=settings.data_fim,
+                )
+                novos = [p for p in novos if "latitude" in p]
+                pontos = _juntar_pontos(salvos, novos) if salvos else novos
+                origem = "falha" if erro else ("novo" if not salvos else "parcial")
         if ate is not None:
             pontos = [p for p in pontos if _ate_o_corte(p, ate, dia)]
-        pontos.sort(key=lambda p: str(p.get("timestamp") or ""))
+        pontos.sort(key=ordem_do_pulso)
         na_cidade = sum(1 for p in pontos if em_aparecida(p.get("latitude"), p.get("longitude")))
         return {
             "veiculo": item.get("ras_vei_veiculo") or placa,
@@ -298,15 +302,21 @@ def coletar_percursos(
             rotas.append(rota)
             feitos += 1
             if on_progress:
-                nota = {"salvo": "sem pulso novo", "parcial": "só o trecho novo", "novo": "turno inteiro"}.get(
-                    str(rota.get("origem_pulso") or ""), ""
-                )
+                nota = {
+                    "salvo": "sem pulso novo",
+                    "parcial": "só o trecho novo",
+                    "novo": "turno inteiro",
+                    "falha": "histórico indisponível",
+                }.get(str(rota.get("origem_pulso") or ""), "")
+                falha = f" · {rota.get('erro')}" if rota.get("erro") and not int(rota.get("total_pontos") or 0) else ""
                 on_progress(
                     f"Pulsos {feitos}/{len(alvos)} · {rota.get('placa')}: {rota.get('total_pontos')} pontos"
                     + (f" · {nota}" if nota else "")
+                    + falha
                 )
-    rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0]
+    rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0 or item.get("erro")]
     rotas.sort(key=lambda item: str(item.get("prefixo") or item.get("placa") or ""))
     if on_progress:
-        on_progress(f"Com pulso em Aparecida: {len(rotas)}.")
+        na_cidade = sum(1 for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0)
+        on_progress(f"Com pulso em Aparecida: {na_cidade}.")
     return rotas

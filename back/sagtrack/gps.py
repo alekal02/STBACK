@@ -630,9 +630,18 @@ def _quebrar_salto(pontos: list[Ponto], salto_max_m: float) -> list[list[list[fl
     return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(trecho) >= 2]
 
 
+def ordem_do_pulso(ponto: dict[str, Any]) -> tuple[int, datetime | str]:
+    """Ordena pelo instante do pulso. O texto DD/MM/AAAA inverte na virada do mês."""
+    texto = str(ponto.get("timestamp") or "")
+    marca = _datetime_do_timestamp(texto, date(2000, 1, 1))
+    if marca is None:
+        return (1, texto)
+    return (0, marca)
+
+
 def tracos_na_ordem(pontos: list[dict[str, Any]], salto_max_m: float = 160) -> list[list[list[float]]]:
     """Liga os pulsos na ordem do horário. Um salto acima de 160 m abre outro trecho."""
-    ordenados = sorted(pontos or [], key=lambda item: str(item.get("timestamp") or ""))
+    ordenados = sorted(pontos or [], key=ordem_do_pulso)
     pares: list[Ponto] = []
     for ponto in ordenados:
         lat = ponto.get("latitude")

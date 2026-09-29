@@ -238,6 +238,23 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         if isinstance(bruto, dict):
             anteriores = {str(placa): pontos for placa, pontos in bruto.items() if isinstance(pontos, list)}
     rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado, anteriores=anteriores)
+    falhas = [item for item in rotas if item.get("erro") and int(item.get("pontos_na_cidade") or 0) == 0]
+    rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0]
+    if not rotas and falhas:
+        if (pasta / "resumo.json").is_file():
+            progress("A Segtrack não devolveu o histórico. A conclusão salva continua valendo.")
+            guardado = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+            if isinstance(guardado, dict):
+                guardado["falha_historico"] = True
+                return guardado
+        progress("A Segtrack não devolveu o histórico. A conta não foi fechada.")
+        return {
+            "data": dia.isoformat(),
+            "com_rota": 0,
+            "media": None,
+            "falha_historico": True,
+            "caminhoes": [],
+        }
     if (
         (pasta / "resumo.json").is_file()
         and rotas

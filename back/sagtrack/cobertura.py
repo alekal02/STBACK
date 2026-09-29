@@ -8,7 +8,7 @@ from shapely import contains_xy
 from shapely.geometry import LineString, MultiPoint, Point
 from shapely.ops import linemerge, unary_union
 
-from .gps import haversine_m
+from .gps import haversine_m, ordem_do_pulso
 
 TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
 TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
@@ -78,7 +78,7 @@ def _wgs(coords: list[tuple[float, float]]) -> list[list[float]]:
 
 def _linhas_gps(pontos: list[dict[str, Any]], salto_m: float = SALTO_GPS_M) -> list[LineString]:
     xy: list[tuple[float, float]] = []
-    for ponto in pontos or []:
+    for ponto in sorted(pontos or [], key=ordem_do_pulso):
         par = _xy(ponto)
         if par:
             xy.append(par)

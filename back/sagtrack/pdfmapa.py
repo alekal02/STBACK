@@ -324,8 +324,8 @@ def _fundo_estatico(
     centro_lat = (sul + norte) / 2
     centro_lon = (oeste + leste) / 2
     if leve:
-        # Frota no Render: uma imagem menor por rota evita OOM no PDF.
-        largura, altura = 960, 680
+        # Frota no Render: imagem pequena por rota (Static @2x ~640×450).
+        largura, altura = 640, 450
     else:
         largura, altura = 1600, 1100
     zoom = _zoom_para_bbox(sul, norte, oeste, leste, largura, altura)
@@ -613,8 +613,9 @@ def renderizar_mapa(
             coords = [px(float(p[0]), float(p[1])) for p in anel if len(p) >= 2]
             if len(coords) >= 4:
                 aneis_px.append(coords)
-    if aneis_px:
+    if aneis_px and not leve:
         # Fora do setor bem suave — dentro fica o mapa natural das ruas.
+        # No modo leve (frota WhatsApp) pula o véu: economiza 2 imagens full-size.
         fora = Image.new("L", imagem.size, 28)
         desenho_fora = ImageDraw.Draw(fora)
         for coords in aneis_px:
@@ -690,13 +691,13 @@ def renderizar_mapa(
             desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
             y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
-    teto = 1600 if leve else 2600
+    teto = 1000 if leve else 2600
     if imagem.width > teto:
         altura = int(imagem.height * (teto / imagem.width))
         imagem = imagem.resize((teto, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    qualidade = 86 if leve else 92
-    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0 if not leve else 2)
+    qualidade = 75 if leve else 92
+    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=2 if leve else 0)
     return saida.getvalue()
 
 
@@ -1010,18 +1011,24 @@ def _mapa_da_rota(
 ) -> tuple[str, bytes, str]:
     # Frota: GPS colado no eixo das vias do polígono. Não desenha ruas em aberto.
     del pontos
-    feitos, faltando = _preparar_vias(
-        dia,
-        codigo,
-        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
-        frota,
-    )
+    # Modo leve (WhatsApp): sem rematch de malha — só desenha o GPS já salvo.
+    if _MAPA_LEVE:
+        feitos, faltando = [], []
+    else:
+        feitos, faltando = _preparar_vias(
+            dia,
+            codigo,
+            [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
+            frota,
+        )
     malha = list(feitos or []) + list(faltando or [])
     pintados: list[tuple[list[list[float]], tuple[int, int, int]]] = []
     legendas: list[tuple[str, tuple[int, int, int]]] = []
     if gps_por_placa:
+        passo = 4 if _MAPA_LEVE else 2
+        eps = 0.00012 if _MAPA_LEVE else 0.00006
         leve = {
-            placa: _simplificar_tracos(_afinar_gps(gps, 2), 0.00006)
+            placa: _simplificar_tracos(_afinar_gps(gps, passo), eps)
             for placa, gps in gps_por_placa.items()
             if gps
         }
@@ -1031,7 +1038,7 @@ def _mapa_da_rota(
     else:
         trajeto = _trajeto_do_caminhao(
             aneis,
-            _simplificar_tracos(_afinar_gps(tracos, 2), 0.00006),
+            _simplificar_tracos(_afinar_gps(tracos, 4 if _MAPA_LEVE else 2), 0.00012 if _MAPA_LEVE else 0.00006),
             malha or None,
         )
         pintados = [(t, (29, 78, 217)) for t in trajeto]
@@ -1192,7 +1199,7 @@ def _pdf_frota_fiscal(
     dia: date,
     periodo: str,
     balanco: list[dict[str, Any]],
-    mapas: list[tuple[str, bytes, str, tuple[float, float, float]]],
+    mapas: list[tuple[str, Any, str, tuple[float, float, float]]],
 ) -> bytes:
     from .relatorios import _faixa_agenda, _fmt_pct
 
@@ -1372,7 +1379,11 @@ def _pdf_frota_fiscal(
         pdf.setFillColorRGB(1, 1, 1)
         pdf.setFont(negrito, 12)
         pdf.drawString(16, altura - 23, titulo[:120])
-        imagem = ImageReader(io.BytesIO(blob))
+        if isinstance(blob, (bytes, bytearray)):
+            dados = bytes(blob)
+        else:
+            dados = Path(blob).read_bytes()
+        imagem = ImageReader(io.BytesIO(dados))
         pdf.drawImage(
             imagem,
             8,
@@ -1383,6 +1394,7 @@ def _pdf_frota_fiscal(
             anchor="c",
             mask="auto",
         )
+        del dados, imagem
         pdf.setFillColorRGB(0.11, 0.14, 0.19)
         pdf.setFont(fonte, 8)
         pdf.drawString(16, 8, legenda[:170])
@@ -1406,32 +1418,43 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         str(caminhao.get("placa") or ""): list(caminhao.get("gps") or [])
         for caminhao in (resumo.get("caminhoes") or [])
     }
+    # Fallback GPS por rota/placa sem manter frota inteira na memória dos mapas.
+    gps_rota_placa: dict[tuple[str, str], list] = {}
+    for item in frota:
+        placa = str(item.get("placa") or "")
+        for cob in item.get("coberturas_inlog") or []:
+            codigo = str(cob.get("codigo_rota") or "")
+            trechos = cob.get("trechos_gps") or []
+            if placa and codigo and trechos:
+                gps_rota_placa[(codigo, placa)] = list(trechos)
     periodo = resumo.get("periodo") or _turno(dia)
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:
         periodo = f"{periodo} · pulsos até {corte[11:16]}"
-    del resumo, setores
+    del resumo, setores, frota
     gc.collect()
-    mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(90 if _MAPA_LEVE else 120)
+
+    cache_mapas = pasta / "cache" / "mapas-frota"
+    cache_mapas.mkdir(parents=True, exist_ok=True)
+    for velho in cache_mapas.glob("*.jpg"):
+        try:
+            velho.unlink()
+        except OSError:
+            pass
+
+    mapas: list[tuple[str, Path, str, tuple[float, float, float]]] = []
+    _abrir_prazo_mapa(60 if _MAPA_LEVE else 120)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
         placas = [str(p) for p in (row.get("placas") or []) if str(p).strip()]
+        codigo = str(row.get("codigo") or "")
         por_placa = {placa: gps_por_placa.get(placa) or [] for placa in placas}
-        # Fallback: GPS recortado da cobertura da rota (quando o resumo veio vazio).
         if not any(por_placa.values()):
-            codigo = str(row.get("codigo") or "")
-            for item in frota:
-                placa = str(item.get("placa") or "")
-                if placa not in placas:
-                    continue
-                for cob in item.get("coberturas_inlog") or []:
-                    if str(cob.get("codigo_rota") or "") != codigo:
-                        continue
-                    trechos = cob.get("trechos_gps") or []
-                    if trechos:
-                        por_placa[placa] = list(trechos)
+            for placa in placas:
+                trechos = gps_rota_placa.get((codigo, placa)) or []
+                if trechos:
+                    por_placa[placa] = trechos
         tracos = [traco for gps in por_placa.values() for traco in gps]
         estado = _rotulo_andamento(row)
         titulo = (
@@ -1439,23 +1462,28 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         )
         cor = _COR_SITUACAO[row["situacao"]]
         try:
-            folha_titulo, png, legenda = _mapa_da_rota(
+            folha_titulo, jpeg, legenda = _mapa_da_rota(
                 titulo,
-                row["codigo"],
+                codigo,
                 _aneis(row),
                 tracos,
                 [],
                 dia,
-                frota,
+                [],
                 gps_por_placa=por_placa,
             )
         except Exception as exc:
-            print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
+            print(f"Mapa {codigo}: {exc}", flush=True)
             continue
-        print(f"PDF frota mapa {row.get('codigo')} ({len(png)} bytes)", flush=True)
-        mapas.append((folha_titulo, png, legenda, cor))
+        destino = cache_mapas / f"{codigo}.jpg"
+        destino.write_bytes(jpeg)
+        print(f"PDF frota mapa {codigo} ({len(jpeg)} bytes)", flush=True)
+        del jpeg, tracos, por_placa
+        mapas.append((folha_titulo, destino, legenda, cor))
         gc.collect()
-    del frota
+
+    del gps_por_placa, gps_rota_placa
+    gc.collect()
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

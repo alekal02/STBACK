@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, haversine_m, tracos_realistas
+from .gps import _datetime_do_timestamp, haversine_m, tracos_na_ordem
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
@@ -120,7 +120,7 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "gps": tracos_realistas(sorted(pontos, key=lambda p: str(p.get("timestamp") or "")), salto_max_m=2500, tolerancia_m=12),
+        "gps": tracos_na_ordem(pontos),
         "poligonos": poligonos[:3],
     }
 
@@ -238,6 +238,22 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         if isinstance(bruto, dict):
             anteriores = {str(placa): pontos for placa, pontos in bruto.items() if isinstance(pontos, list)}
     rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado, anteriores=anteriores)
+    if not rotas:
+        salvo = pasta / "resumo.json"
+        if salvo.is_file():
+            progress("A Segtrack não devolveu o histórico. A conclusão salva continua valendo.")
+            dados = json.loads(salvo.read_text(encoding="utf-8"))
+            if isinstance(dados, dict):
+                dados["falha_historico"] = True
+            return dados
+        progress("A Segtrack não devolveu o histórico. A conta não foi fechada.")
+        return {
+            "data": dia.isoformat(),
+            "com_rota": 0,
+            "media": None,
+            "falha_historico": True,
+            "caminhoes": [],
+        }
     if (
         (pasta / "resumo.json").is_file()
         and rotas

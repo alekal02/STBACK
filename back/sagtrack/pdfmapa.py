@@ -611,7 +611,7 @@ def _cache_fresco(pasta: Path, arquivo: Path) -> bool:
 
 
 def _ler_camadas(pasta: Path, codigo: str) -> list[dict[str, Any]] | None:
-    arquivo = _arquivo_rota(pasta, codigo, "tracos.json")
+    arquivo = _arquivo_rota(pasta, codigo, "pulsos.json")
     if not _cache_fresco(pasta, arquivo):
         return None
     try:
@@ -631,7 +631,7 @@ def _ler_camadas(pasta: Path, codigo: str) -> list[dict[str, Any]] | None:
 
 
 def _guardar_camadas(pasta: Path, codigo: str, camadas: list[dict[str, Any]]) -> None:
-    arquivo = _arquivo_rota(pasta, codigo, "tracos.json")
+    arquivo = _arquivo_rota(pasta, codigo, "pulsos.json")
     arquivo.parent.mkdir(parents=True, exist_ok=True)
     bruto = []
     for item in camadas:
@@ -663,14 +663,13 @@ def _camadas_da_rota(
     pontos_por_placa: dict[str, list],
     pasta: Path | None = None,
 ) -> list[dict[str, Any]]:
-    from .gps import trajetoria_uniforme
+    from .gps import tracos_na_ordem
 
     if pasta is not None:
         guardadas = _ler_camadas(pasta, codigo)
         if guardadas is not None:
             return guardadas
 
-    vias = _vias_oficiais(dia, codigo)
     ordem = {"ATUANDO": 0, "APOIO": 1}
     candidatos = []
     for item in frota:
@@ -687,7 +686,7 @@ def _camadas_da_rota(
             continue
         placa = str(item.get("placa") or "")
         brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-        tracos = trajetoria_uniforme(brutos, vias, dia=dia)
+        tracos = tracos_na_ordem(brutos)
         if not tracos:
             continue
         candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))

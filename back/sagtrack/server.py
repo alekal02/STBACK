@@ -86,12 +86,18 @@ def _rodar(settings: Settings, com_pdf: bool = True) -> None:
             del JOB["mensagens"][:-40]
 
     try:
-        executar(settings, on_progress=progresso)
+        resumo = executar(settings, on_progress=progresso)
         from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
-        avisar_coleta_pronta(settings)
-        if com_pdf:
-            preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
+        if isinstance(resumo, dict) and resumo.get("falha_historico"):
+            avisar_coleta_pronta(
+                settings,
+                falha="A Segtrack não devolveu o histórico dos caminhões. Peça de novo em alguns minutos.",
+            )
+        else:
+            avisar_coleta_pronta(settings)
+            if com_pdf:
+                preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
     except Exception as exc:
         with JOB["lock"]:
             JOB["erro"] = str(exc)

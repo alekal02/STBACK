@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, haversine_m, tracos_entre_pulsos, tracos_na_ordem
+from .gps import _datetime_do_timestamp, casar_tracos, haversine_m, tracos_na_ordem
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
@@ -120,7 +120,10 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "gps": item.get("_tracos") or tracos_na_ordem(pontos),
+        "gps": item.get("_tracos") if "_tracos" in item else tracos_na_ordem(pontos),
+        "gps_estimado": item.get("_tracos_estimados") or [],
+        "gps_original": item.get("_tracos_originais") or [],
+        "casamento": item.get("_casamento") or {},
         "poligonos": poligonos[:3],
     }
 
@@ -148,7 +151,8 @@ def montar_resumo(dia: date, folhas: list[dict[str, Any]], settings: Settings) -
 
 
 def _sem_pontos(item: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in item.items() if k != "pontos"}
+    ocultos = {"pontos", "_tracos", "_tracos_estimados", "_tracos_originais"}
+    return {k: v for k, v in item.items() if k not in ocultos}
 
 
 _CAMPOS_CONTA = (
@@ -286,9 +290,14 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         medir_presenca(refazer, setores, dia)
     _aplicar_apoio(rotas)
 
-    progress("Ligando os pulsos pela hora. O salto longo segue a via.")
+    progress("Casando os pulsos com a malha oficial, na ordem da hora.")
     for item in rotas:
-        item["_tracos"] = tracos_entre_pulsos(item.get("pontos") or [], dia=dia)
+        progress(f"Trajeto na via · {item.get('placa') or ''}")
+        casado = casar_tracos(item.get("pontos") or [], dia=dia)
+        item["_tracos"] = casado["confirmado"]
+        item["_tracos_estimados"] = casado["estimado"]
+        item["_tracos_originais"] = casado["original"]
+        item["_casamento"] = casado["resumo"]
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
     resumo["congelado_em"] = congelado.isoformat(timespec="seconds")

@@ -169,6 +169,7 @@ def _codigo_setor(texto: str) -> str:
 
 _LINHAS_VIA: list[Any] | None = None
 _ARVORE_VIA: Any = None
+_LINHAS_SENTIDO: list[tuple[Any, int]] | None = None
 
 
 def vias_no_corredor(origem: tuple[float, float], destino: tuple[float, float], folga_m: float) -> list[list[list[float]]]:
@@ -195,6 +196,58 @@ def vias_no_corredor(origem: tuple[float, float], destino: tuple[float, float], 
         if len(coords) >= 2:
             saida.append(coords)
     return saida
+
+
+def _sentido_osm(valor: Any) -> int:
+    """1 segue o desenho da linha, -1 o contrário, 0 nos dois sentidos."""
+    bruto = str(valor or "").strip().lower()
+    if bruto in {"yes", "1", "true"}:
+        return 1
+    if bruto in {"-1", "reverse"}:
+        return -1
+    return 0
+
+
+def linhas_oficiais() -> list[tuple[Any, int]]:
+    """Vias em UTM 31982 com o sentido. A malha do map matching nasce daqui."""
+    global _LINHAS_SENTIDO
+    if _LINHAS_SENTIDO is not None:
+        return _LINHAS_SENTIDO
+    arquivo = _sincronizar_gpkg()
+    if not arquivo:
+        _LINHAS_SENTIDO = []
+        return _LINHAS_SENTIDO
+    con = sqlite3.connect(str(arquivo))
+    tabela = _tabela_vias(con)
+    if not tabela:
+        con.close()
+        _LINHAS_SENTIDO = []
+        return _LINHAS_SENTIDO
+    cols = _colunas(con, tabela)
+    geom_col = _achar_coluna(cols, "geom", "geometry") or "geom"
+    sentido_col = _achar_coluna(cols, "oneway")
+    campos = _quote(geom_col)
+    if sentido_col:
+        campos = f"{campos}, {_quote(sentido_col)}"
+    pares: list[tuple[Any, int]] = []
+    for row in con.execute(f"SELECT {campos} FROM {_quote(tabela)}"):
+        blob = row[0]
+        if not blob:
+            continue
+        try:
+            geom = _gpkg_geom(blob)
+        except Exception:
+            continue
+        if geom is None or geom.is_empty:
+            continue
+        sentido = _sentido_osm(row[1] if sentido_col else None)
+        partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
+        for parte in partes:
+            if parte.geom_type == "LineString" and len(parte.coords) >= 2 and parte.length >= 1:
+                pares.append((parte, sentido))
+    con.close()
+    _LINHAS_SENTIDO = pares
+    return pares
 
 
 def carregar_vias() -> list[Any]:

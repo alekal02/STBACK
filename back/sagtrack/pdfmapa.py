@@ -606,7 +606,7 @@ def _camadas_da_rota(
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list],
 ) -> list[dict[str, Any]]:
-    from .gps import tracos_na_ordem
+    from .gps import casar_tracos
 
     ordem = {"ATUANDO": 0, "APOIO": 1}
     candidatos = []
@@ -624,7 +624,8 @@ def _camadas_da_rota(
             continue
         placa = str(item.get("placa") or "")
         brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-        tracos = tracos_na_ordem(brutos)
+        casado = casar_tracos(brutos, dia=dia)
+        tracos = list(casado["confirmado"]) + list(casado["estimado"])
         if not tracos:
             continue
         candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))
@@ -1150,6 +1151,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     for caminhao in rel.get("caminhoes") or []:
         if caminhao.get("papel") in {"ATUANDO", "APOIO"}:
             tracos.extend(caminhao.get("gps") or [])
+            tracos.extend(caminhao.get("gps_estimado") or [])
             pontos.extend(caminhao.get("paradas_pontos") or [])
     tabela = [["Caminhão", "Papel", "Paradas", "Minutos", "%"]]
     for caminhao in rel.get("caminhoes") or []:
@@ -1203,7 +1205,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     caminhao = caminhoes[0]
     frota = _ler(output_dir / dia.isoformat(), "frota.json") or []
     _aplicar_apoio(frota)
-    tracos = caminhao.get("gps") or []
+    tracos = list(caminhao.get("gps") or []) + list(caminhao.get("gps_estimado") or [])
     titulo = f"Segtrack · {rel.get('titulo') or caminhao.get('placa') or consulta}"
     tabela = [["Rota", "Situação", "Papel", "Paradas", "Minutos", "%"]]
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []

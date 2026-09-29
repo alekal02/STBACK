@@ -797,12 +797,13 @@ def _gps_na_rota(
     aneis: list,
     placa: str,
     pontos_por_placa: dict[str, list],
-) -> list[list[list[float]]]:
-    from .gps import tracos_entre_pulsos
+) -> dict[str, Any]:
+    from .gps import casar_tracos
     from .pdfmapa import _dentro_da_rota
 
+    del codigo
     brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-    return tracos_entre_pulsos(brutos, dia=dia)
+    return casar_tracos(brutos, dia=dia)
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:
@@ -856,6 +857,15 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
             if pct_cob > melhor_faltando:
                 melhor_faltando = pct_cob
                 faltando_rota = faltando
+        casado = (
+            _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
+            if com_gps and papel in {"ATUANDO", "APOIO"}
+            else {}
+        )
+        gps = list(casado.get("confirmado") or [])
+        gps_estimado = list(casado.get("estimado") or [])
+        if not gps and not gps_estimado:
+            gps = _linhas_leves(bruto.get("trechos_gps"), 800)
         presentes.append(
             {
                 "placa": item.get("placa") or "",
@@ -873,12 +883,9 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
                 "feitos": feitos,
                 "faltando": faltando,
                 "paradas_pontos": cob.get("paradas_pontos") or [],
-                "gps": (
-                    _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
-                    if com_gps and papel in {"ATUANDO", "APOIO"}
-                    else []
-                )
-                or _linhas_leves(bruto.get("trechos_gps"), 800),
+                "gps": gps,
+                "gps_estimado": gps_estimado,
+                "casamento": casado.get("resumo") or {},
             }
         )
     if not faltando_rota:

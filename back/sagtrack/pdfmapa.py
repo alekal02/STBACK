@@ -150,7 +150,9 @@ def _vias_no_poligono(dia: date, codigo: str, tracos: list[list[list[float]]]) -
     zona = None
     if linhas:
         try:
-            zona = unary_union(linhas).simplify(12).buffer(45)
+            from .cobertura import RAIO_M
+
+            zona = unary_union(linhas).simplify(12).buffer(RAIO_M)
         except Exception:
             zona = None
     feitos: list = []
@@ -897,15 +899,26 @@ def _mapa_da_rota(
         trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
         legendas = []
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
+    base = {
+        "aneis": aneis,
+        "rotulo": codigo,
+        "feitos": [],
+        "faltando": list(faltando or []),
+    }
     if pintados:
         if len(legendas) > 1:
             nomes = ", ".join(p for p, _c in legendas)
-            legenda = f"Cada cor é um caminhão ({nomes}). Caminho real do GPS na rota."
+            legenda = (
+                f"Cada cor é um caminhão ({nomes}). "
+                "Vermelho = via da rota ainda sem passagem."
+            )
         elif legendas:
-            legenda = f"{legendas[0][0]}: caminho real do caminhão na rota (GPS). Sem pontos de coleta."
+            legenda = (
+                f"{legendas[0][0]}: caminho GPS na rota. "
+                "Vermelho = via planejada ainda sem passagem."
+            )
         else:
-            legenda = "Caminho real do caminhão dentro da rota (GPS). Sem pontos de coleta."
+            legenda = "Caminho GPS na rota. Vermelho = via planejada ainda sem passagem."
     else:
         legenda = "Programada para o dia. Nenhum pulso do caminhão entrou nesta rota."
     return (
@@ -915,7 +928,7 @@ def _mapa_da_rota(
             [],
             [],
             aneis,
-            vias="feitas",
+            vias="ambas" if faltando else "feitas",
             tracos_cor=pintados,
             legenda_placas=legendas,
         ),

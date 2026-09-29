@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import threading
@@ -10,7 +11,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ _MANTER = True
 _ULTIMO_ENVIO: dict[str, Any] = {}
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
+_PACOTE_MIN = max(5, int(os.getenv("WHATSAPP_PACOTE_MIN", "30") or "30"))
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -570,6 +572,7 @@ def _menu() -> str:
         "*Relatórios Segtrack*\n"
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
         "Peça *frota* neste grupo: atualizo os pulsos e envio o PDF.\n"
+        f"Depois, por {_PACOTE_MIN} min, *frota*/rota/placa reenviam o mesmo pacote.\n"
         "Antes, se quiser outro dia: *dia 26* ou *26/09*.\n\n"
         "*frota* — atualiza a frota e manda o relatório\n"
         "*dia 26 frota* ou *26/09 frota* — frota daquele turno\n"
@@ -629,6 +632,134 @@ def _invalidar_cache_pdf(pasta: Path, tipo: str = "frota") -> None:
             pass
 
 
+def _chave_pacote(tipo: str, consulta: str) -> str:
+    return f"{tipo}-{(consulta or '').strip().upper()}"
+
+
+def _caminho_pacote(pasta: Path) -> Path:
+    return pasta / "pacote-whatsapp.json"
+
+
+def _pasta_arquivos_pacote(pasta: Path) -> Path:
+    return pasta / "pacote"
+
+
+def _hora_br(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=-3))).strftime("%H:%M")
+
+
+def _ler_pacote(pasta: Path) -> dict[str, Any] | None:
+    arquivo = _caminho_pacote(pasta)
+    if not arquivo.is_file():
+        return None
+    try:
+        dado = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dado if isinstance(dado, dict) else None
+
+
+def _pacote_ativo(pasta: Path) -> dict[str, Any] | None:
+    pac = _ler_pacote(pasta)
+    if not pac:
+        return None
+    try:
+        valido_ate = float(pac.get("valido_ate") or 0)
+    except (TypeError, ValueError):
+        return None
+    if valido_ate <= time.time():
+        return None
+    return pac
+
+
+def _invalidar_pacote(pasta: Path) -> None:
+    arquivo = _caminho_pacote(pasta)
+    if arquivo.is_file():
+        try:
+            arquivo.unlink()
+        except OSError:
+            pass
+    pasta_arq = _pasta_arquivos_pacote(pasta)
+    if pasta_arq.is_dir():
+        for item in pasta_arq.glob("*.pdf"):
+            try:
+                item.unlink()
+            except OSError:
+                pass
+
+
+def _gravar_pacote(pasta: Path, pac: dict[str, Any]) -> None:
+    pasta.mkdir(parents=True, exist_ok=True)
+    _caminho_pacote(pasta).write_text(
+        json.dumps(pac, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _abrir_pacote(pasta: Path, *, congelado_em: str = "") -> dict[str, Any]:
+    agora = time.time()
+    pac = {
+        "criado_em": agora,
+        "valido_ate": agora + _PACOTE_MIN * 60,
+        "congelado_em": congelado_em,
+        "arquivos": {},
+        "textos": {},
+    }
+    _pasta_arquivos_pacote(pasta).mkdir(parents=True, exist_ok=True)
+    _gravar_pacote(pasta, pac)
+    return pac
+
+
+def _guardar_no_pacote(
+    pasta: Path,
+    pac: dict[str, Any],
+    tipo: str,
+    consulta: str,
+    arquivo: bytes,
+    nome: str,
+    texto: str = "",
+) -> Path:
+    chave = _chave_pacote(tipo, consulta)
+    destino = _pasta_arquivos_pacote(pasta) / f"{chave}.pdf"
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_bytes(arquivo)
+    arquivos = dict(pac.get("arquivos") or {})
+    arquivos[chave] = {"rel": f"pacote/{chave}.pdf", "nome": nome, "bytes": len(arquivo)}
+    pac["arquivos"] = arquivos
+    if texto:
+        textos = dict(pac.get("textos") or {})
+        textos[chave] = texto
+        pac["textos"] = textos
+    _gravar_pacote(pasta, pac)
+    return destino
+
+
+def _pdf_do_pacote(pasta: Path, pac: dict[str, Any], tipo: str, consulta: str) -> tuple[bytes, str] | None:
+    chave = _chave_pacote(tipo, consulta)
+    info = (pac.get("arquivos") or {}).get(chave)
+    if not isinstance(info, dict):
+        return None
+    caminho = pasta / str(info.get("rel") or "")
+    if not caminho.is_file():
+        return None
+    nome = str(info.get("nome") or caminho.name)
+    return caminho.read_bytes(), nome
+
+
+def _texto_do_pacote(pac: dict[str, Any], tipo: str, consulta: str) -> str:
+    chave = _chave_pacote(tipo, consulta)
+    return str((pac.get("textos") or {}).get(chave) or "")
+
+
+def _aviso_pacote(pac: dict[str, Any]) -> str:
+    criado = _hora_br(float(pac.get("criado_em") or time.time()))
+    valido = _hora_br(float(pac.get("valido_ate") or time.time()))
+    return (
+        f"Pacote das {criado} (válido até {valido}). "
+        "Reenviando o mesmo relatório — sem nova atualização da Segtrack."
+    )
+
+
 def _atualizar_conta(
     settings: Settings,
     dia: date,
@@ -665,6 +796,7 @@ def _atualizar_conta(
     try:
         resumo = executar(ajustado, on_progress=progresso)
         _invalidar_cache_pdf(pasta, "frota")
+        _invalidar_pacote(pasta)
         return resumo if isinstance(resumo, dict) else None
     finally:
         with JOB["lock"]:
@@ -865,40 +997,97 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             inicio = time.perf_counter()
             _ULTIMO_ENVIO.clear()
             _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "coleta"})
-            if tipo == "frota":
-                pasta_dia = settings.output_dir / dia.isoformat()
-                resumo_arquivo = pasta_dia / "resumo.json"
-                idade_s = (
-                    time.time() - resumo_arquivo.stat().st_mtime
-                    if resumo_arquivo.is_file()
-                    else 10**9
-                )
-                # Conta com menos de 20 min: só monta o PDF (evita matar o Render e demorar de novo).
-                if idade_s <= 20 * 60:
-                    enviar_texto(
-                        settings,
-                        mensagem["grupo"],
-                        f"Recebi a frota. A conta de {_rotulo_turno(dia)} já está atualizada. "
-                        "Montando o PDF agora e envio neste grupo.",
+            pasta_dia = settings.output_dir / dia.isoformat()
+            pac = _pacote_ativo(pasta_dia)
+
+            # Pacote válido: reenvia PDF congelado; rota/placa gera 1× e congela.
+            if pac is not None and tipo in {"frota", "rota", "placa"}:
+                _ULTIMO_ENVIO["fase"] = "pacote"
+                _ULTIMO_ENVIO["pacote_ate"] = pac.get("valido_ate")
+                pronto = _pdf_do_pacote(pasta_dia, pac, tipo, consulta)
+                if pronto is not None:
+                    enviar_texto(settings, mensagem["grupo"], _aviso_pacote(pac))
+                    texto_guardado = _texto_do_pacote(pac, tipo, consulta)
+                    if texto_guardado:
+                        enviar_texto(settings, mensagem["grupo"], texto_guardado)
+                    arquivo, nome = pronto
+                    resumo_s = round(time.perf_counter() - inicio, 1)
+                    _ULTIMO_ENVIO["fase"] = "pdf"
+                    _ULTIMO_ENVIO["resumo_s"] = resumo_s
+                    print(f"WhatsApp: reenviando pacote {nome} ({len(arquivo)} bytes)", flush=True)
+                    enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+                    total_s = round(time.perf_counter() - inicio, 1)
+                    _ULTIMO_ENVIO.update(
+                        {
+                            "fase": "enviado",
+                            "nome": nome,
+                            "bytes": len(arquivo),
+                            "resumo_s": resumo_s,
+                            "pdf_s": total_s,
+                            "total_s": total_s,
+                            "pacote": True,
+                        }
                     )
+                    print(f"WhatsApp: {nome} (pacote) enviado em {total_s}s", flush=True)
+                    return
+
+                # Ainda no pacote, mas este PDF ainda não existe: gera sem rematch.
+                enviar_texto(settings, mensagem["grupo"], _aviso_pacote(pac))
+                if tipo == "frota":
+                    texto = _texto_frota(settings, dia)
+                else:
+                    _garantir_coleta(settings, dia)
+                    texto = _texto_consulta(settings, tipo, consulta, dia)
+                if texto:
+                    enviar_texto(settings, mensagem["grupo"], texto)
                 else:
                     enviar_texto(
                         settings,
                         mensagem["grupo"],
-                        f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
-                        "e montando o PDF. Pode levar alguns minutos — já envio neste grupo.",
+                        f"Montando o PDF de {_rotulo_turno(dia)} a partir do pacote. Já envio neste grupo.",
                     )
-                    try:
-                        _atualizar_conta(
-                            settings,
-                            dia,
-                            forcar=True,
-                            aviso=f"WhatsApp frota · {dia.isoformat()}",
-                        )
-                    except RuntimeError as exc:
-                        enviar_texto(settings, mensagem["grupo"], str(exc))
-                        _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
-                        return
+                resumo_s = round(time.perf_counter() - inicio, 1)
+                _ULTIMO_ENVIO["fase"] = "pdf"
+                _ULTIMO_ENVIO["resumo_s"] = resumo_s
+                arquivo, nome = _gerar(settings, tipo, consulta, dia)
+                _guardar_no_pacote(pasta_dia, pac, tipo, consulta, arquivo, nome, texto)
+                pdf_s = round(time.perf_counter() - inicio, 1)
+                print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes) [pacote novo]", flush=True)
+                enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+                total_s = round(time.perf_counter() - inicio, 1)
+                _ULTIMO_ENVIO.update(
+                    {
+                        "fase": "enviado",
+                        "nome": nome,
+                        "bytes": len(arquivo),
+                        "resumo_s": resumo_s,
+                        "pdf_s": pdf_s,
+                        "total_s": total_s,
+                        "pacote": True,
+                    }
+                )
+                print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)
+                return
+
+            if tipo == "frota":
+                # Abre pacote novo: atualiza Segtrack, gera frota e congela por 30 min.
+                enviar_texto(
+                    settings,
+                    mensagem["grupo"],
+                    f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
+                    f"e montando o PDF. Pacote válido por {_PACOTE_MIN} min no grupo.",
+                )
+                try:
+                    _atualizar_conta(
+                        settings,
+                        dia,
+                        forcar=True,
+                        aviso=f"WhatsApp frota · {dia.isoformat()}",
+                    )
+                except RuntimeError as exc:
+                    enviar_texto(settings, mensagem["grupo"], str(exc))
+                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                    return
                 _ULTIMO_ENVIO["fase"] = "resumo"
                 resumo = _texto_frota(settings, dia)
                 if resumo:
@@ -909,22 +1098,55 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                         mensagem["grupo"],
                         "Conta pronta. Montando o PDF com os mapas...",
                     )
+                resumo_s = round(time.perf_counter() - inicio, 1)
+                _ULTIMO_ENVIO["fase"] = "pdf"
+                _ULTIMO_ENVIO["resumo_s"] = resumo_s
+                arquivo, nome = _gerar(settings, tipo, consulta, dia)
+                congelado = ""
+                resumo_dia = {}
+                try:
+                    resumo_dia = json.loads((pasta_dia / "resumo.json").read_text(encoding="utf-8"))
+                    congelado = str(resumo_dia.get("congelado_em") or "")
+                except (OSError, json.JSONDecodeError, TypeError):
+                    pass
+                pac = _abrir_pacote(pasta_dia, congelado_em=congelado)
+                _guardar_no_pacote(pasta_dia, pac, "frota", "", arquivo, nome, resumo)
+                pdf_s = round(time.perf_counter() - inicio, 1)
+                print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
+                enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
+                total_s = round(time.perf_counter() - inicio, 1)
+                _ULTIMO_ENVIO.update(
+                    {
+                        "fase": "enviado",
+                        "nome": nome,
+                        "bytes": len(arquivo),
+                        "resumo_s": resumo_s,
+                        "pdf_s": pdf_s,
+                        "total_s": total_s,
+                        "pacote_ate": pac.get("valido_ate"),
+                    }
+                )
+                print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)
+                return
+
+            _garantir_coleta(settings, dia)
+            _ULTIMO_ENVIO["fase"] = "resumo"
+            resumo = _texto_consulta(settings, tipo, consulta, dia)
+            if resumo:
+                enviar_texto(settings, mensagem["grupo"], resumo)
             else:
-                _garantir_coleta(settings, dia)
-                _ULTIMO_ENVIO["fase"] = "resumo"
-                resumo = _texto_consulta(settings, tipo, consulta, dia)
-                if resumo:
-                    enviar_texto(settings, mensagem["grupo"], resumo)
-                else:
-                    enviar_texto(
-                        settings,
-                        mensagem["grupo"],
-                        f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
-                    )
+                enviar_texto(
+                    settings,
+                    mensagem["grupo"],
+                    f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+                )
             resumo_s = round(time.perf_counter() - inicio, 1)
             _ULTIMO_ENVIO["fase"] = "pdf"
             _ULTIMO_ENVIO["resumo_s"] = resumo_s
             arquivo, nome = _gerar(settings, tipo, consulta, dia)
+            # Primeiro rota/placa do turno também abre pacote (sem rematch novo).
+            pac = _abrir_pacote(pasta_dia)
+            _guardar_no_pacote(pasta_dia, pac, tipo, consulta, arquivo, nome, resumo)
             pdf_s = round(time.perf_counter() - inicio, 1)
             print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
             enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
@@ -937,6 +1159,7 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                     "resumo_s": resumo_s,
                     "pdf_s": pdf_s,
                     "total_s": total_s,
+                    "pacote_ate": pac.get("valido_ate"),
                 }
             )
             print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)

@@ -13,11 +13,31 @@ from .gps import haversine_m
 TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
 TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
 
-RAIO_M = 45.0
-PASSO_M = 40.0
+RAIO_M = 25.0
+PASSO_M = 35.0
 SALTO_GPS_M = 160.0
 FEITA_MIN = 90.0
 PARCIAL_MIN = 45.0
+
+
+def _trecho_coberto(trecho: LineString, gps_geom, raio_m: float) -> bool:
+    """Via feita só se o meio do pedaço está no GPS e a maior parte dos pontos também."""
+    if gps_geom is None or gps_geom.is_empty or trecho.is_empty:
+        return False
+    try:
+        meio = trecho.interpolate(0.5, normalized=True)
+    except Exception:
+        return gps_geom.distance(trecho) <= raio_m
+    if gps_geom.distance(meio) > raio_m:
+        return False
+    amostras = [meio]
+    for frac in (0.2, 0.8):
+        try:
+            amostras.append(trecho.interpolate(frac, normalized=True))
+        except Exception:
+            continue
+    perto = sum(1 for p in amostras if gps_geom.distance(p) <= raio_m)
+    return perto >= 2
 
 
 def _xy(ponto: dict[str, Any] | tuple[float, float]) -> tuple[float, float] | None:
@@ -337,20 +357,15 @@ def avaliar_cobertura(
         for linha in planejadas:
             for trecho in _cortar(linha, PASSO_M):
                 km_plano += trecho.length / 1000.0
-                coberto = (
-                    gps_geom is not None
-                    and not gps_geom.is_empty
-                    and gps_geom.distance(trecho) <= RAIO_M
-                )
+                coberto = _trecho_coberto(trecho, gps_geom, RAIO_M)
                 if coberto:
                     feitos.append(trecho)
                     km_feito += trecho.length / 1000.0
                 else:
                     faltando.append(trecho)
+        # % = km de via oficial coberta / km de via oficial no polígono.
+        # Não usa km_oficial cadastral sozinho — ele costuma ser menor e inflava a conta (ex.: 97%).
         pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
-        if km_oficial and km_oficial > 0:
-            pct = round(min(100.0, 100.0 * km_feito / km_oficial), 1)
-            km_plano = float(km_oficial)
         metodo = "ruas"
     else:
         base = km_oficial or 0.0

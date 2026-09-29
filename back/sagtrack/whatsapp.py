@@ -588,7 +588,7 @@ def _menu() -> str:
         "*dia 26 frota* ou *26/09 frota* — PDF da frota nesse turno\n"
         "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n"
-        "O resumo e o PDF chegam neste grupo. A frota também chega sozinha a cada 1 hora.\n\n"
+        "O resumo e o PDF chegam neste grupo. Se já houver um PDF salvo, ele vem na hora e outro atualizado é gerado em seguida.\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -757,6 +757,39 @@ def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tupl
     return 200, pronto.read_bytes(), nome
 
 
+def _nome_arquivo_pdf(tipo: str, consulta: str, dia: date) -> str:
+    if tipo == "frota":
+        return f"frota-{dia.isoformat()}.pdf"
+    return f"{tipo}-{(consulta or '').strip().upper()}-{dia.isoformat()}.pdf"
+
+
+def _caminho_memoria(pasta: Path, tipo: str, consulta: str) -> Path:
+    return pasta / "memoria" / _chave_pdf(tipo, consulta)
+
+
+def guardar_memoria(pasta: Path, tipo: str, consulta: str, arquivo: bytes) -> None:
+    """Guarda o último PDF bom deste pedido para a próxima resposta sair na hora."""
+    if len(arquivo) < 800:
+        return
+    destino = _caminho_memoria(pasta, tipo, consulta)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporario = destino.with_name(destino.name + ".tmp")
+    temporario.write_bytes(arquivo)
+    temporario.replace(destino)
+
+
+def pdf_na_memoria(settings: Settings, dia: date, tipo: str, consulta: str) -> tuple[bytes, str] | None:
+    pasta = settings.output_dir / dia.isoformat()
+    nome = _nome_arquivo_pdf(tipo, consulta, dia)
+    memoria = _caminho_memoria(pasta, tipo, consulta)
+    if memoria.is_file() and memoria.stat().st_size > 800:
+        return memoria.read_bytes(), nome
+    pronto = _ultimo_pdf(pasta, _chave_pdf(tipo, consulta))
+    if pronto is None:
+        return None
+    return pronto.read_bytes(), nome
+
+
 def obter_pdf(
     settings: Settings,
     dia: date,
@@ -768,22 +801,30 @@ def obter_pdf(
     """Monta o PDF fora do site e devolve o arquivo. Reusa o último se os pulsos não mudaram."""
     pasta = settings.output_dir / dia.isoformat()
     chave = _chave_pdf(tipo, consulta)
-    nome = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
+    nome = _nome_arquivo_pdf(tipo, consulta, dia)
     if not (pasta / "resumo.json").is_file():
         return None
+
+    def entregar(pronto: Path) -> tuple[bytes, str]:
+        dados = pronto.read_bytes()
+        guardar_memoria(pasta, tipo, consulta, dados)
+        return dados, nome
+
     if not forcar and not _pdf_atrasado(pasta, chave):
         pronto = _ultimo_pdf(pasta, chave)
         if pronto is not None:
-            return pronto.read_bytes(), nome
+            return entregar(pronto)
     trava = _trava_pdf(chave)
     if not trava.acquire(timeout=20 * 60):
         pronto = _ultimo_pdf(pasta, chave)
-        return (pronto.read_bytes(), nome) if pronto is not None else None
+        return entregar(pronto) if pronto is not None else None
     try:
         if not forcar and not _pdf_atrasado(pasta, chave):
             pronto = _ultimo_pdf(pasta, chave)
             if pronto is not None:
-                return pronto.read_bytes(), nome
+                return entregar(pronto)
+        anterior = _ultimo_pdf(pasta, chave)
+        selo = anterior.stat().st_mtime if anterior is not None else 0
         proc = multiprocessing.get_context("spawn").Process(
             target=_pdf_em_processo,
             args=(str(settings.output_dir), dia.isoformat(), tipo, consulta, True),
@@ -793,7 +834,9 @@ def obter_pdf(
         pronto = _ultimo_pdf(pasta, chave)
         if pronto is None:
             return None
-        return pronto.read_bytes(), nome
+        if pronto.stat().st_mtime <= selo:
+            return pronto.read_bytes(), nome
+        return entregar(pronto)
     finally:
         trava.release()
 
@@ -813,16 +856,27 @@ def enviar_conta(
     dia: date,
     *,
     aviso: str = "",
+    somente_novo: bool = False,
 ) -> None:
-    """Manda o resumo e, em seguida, o PDF. Sem link."""
+    """Manda o resumo e o PDF. Com somente_novo, não repete o arquivo que já estava salvo."""
+    pasta = settings.output_dir / dia.isoformat()
+    chave = _chave_pdf(tipo, consulta)
+    anterior = _ultimo_pdf(pasta, chave)
+    selo = anterior.stat().st_mtime if anterior is not None else 0
     corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
     if aviso:
         corpo = aviso.rstrip() + "\n\n" + (corpo or "")
-    enviar_texto(settings, grupo, _cortar_texto(corpo))
     pacote = obter_pdf(settings, dia, tipo, consulta, forcar=False)
     if pacote is None:
-        enviar_texto(settings, grupo, "A conta está na mensagem acima. O PDF não fechou agora.")
+        if not somente_novo:
+            enviar_texto(settings, grupo, _cortar_texto(corpo))
+            enviar_texto(settings, grupo, "A conta está na mensagem acima. O PDF não fechou agora.")
         return
+    gerado = _ultimo_pdf(pasta, chave)
+    if somente_novo and (gerado is None or gerado.stat().st_mtime <= selo + 0.5):
+        print(f"PDF {tipo} {consulta} salvo continua valendo.".strip(), flush=True)
+        return
+    enviar_texto(settings, grupo, _cortar_texto(corpo))
     arquivo, nome = pacote
     enviar_pdf(settings, grupo, arquivo, nome)
 
@@ -1036,7 +1090,15 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
                     "Não consegui gravar os pulsos deste turno. Peça de novo neste grupo.",
                 )
                 continue
-            enviar_conta(settings, grupo, str(pedido["tipo"]), str(pedido["consulta"]), dia)
+            enviar_conta(
+                settings,
+                grupo,
+                str(pedido["tipo"]),
+                str(pedido["consulta"]),
+                dia,
+                aviso="Conta atualizada com os pulsos de agora.",
+                somente_novo=True,
+            )
             _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": pedido["tipo"], "consulta": pedido["consulta"]})
             print(f"WhatsApp: PDF enviado · {pedido['tipo']} {pedido['consulta']}".strip(), flush=True)
         except Exception as exc:
@@ -1160,18 +1222,29 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
         from .server import JOB
 
+        nome = _nome_pedido(tipo, consulta)
+        salvo = pdf_na_memoria(settings, dia, tipo, consulta)
+        if salvo is not None:
+            arquivo, nome_arquivo = salvo
+            corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
+            corpo = (
+                (corpo or "Conta salva.").rstrip()
+                + f"\n\nPDF salvo de {nome}. Já estou gerando outro com os pulsos de agora."
+            )
+            enviar_texto(settings, mensagem["grupo"], _cortar_texto(corpo))
+            enviar_pdf(settings, mensagem["grupo"], arquivo, nome_arquivo)
         with JOB["lock"]:
             desde = float(JOB.get("desde") or 0)
             rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
-        nome = _nome_pedido(tipo, consulta)
-        if rodando:
-            texto = (
-                f"Recebi {nome}. A conta já está fechando. "
-                "O resumo e o PDF chegam neste grupo assim que terminar."
-            )
-        else:
-            texto = f"Recebi {nome}. Fechando os pulsos até agora. O resumo e o PDF chegam neste grupo."
-        enviar_texto(settings, mensagem["grupo"], texto)
+        if salvo is None:
+            if rodando:
+                texto = (
+                    f"Recebi {nome}. Ainda não há PDF salvo. "
+                    "A conta já está fechando e o arquivo chega neste grupo assim que terminar."
+                )
+            else:
+                texto = f"Recebi {nome}. Ainda não há PDF salvo. Estou gerando o primeiro agora."
+            enviar_texto(settings, mensagem["grupo"], texto)
         if not rodando:
             _disparar_coleta(settings, dia)
         _ULTIMO_ENVIO.update({"fase": "coleta", "total_s": round(time.perf_counter() - inicio, 1)})

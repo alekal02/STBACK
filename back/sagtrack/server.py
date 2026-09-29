@@ -43,11 +43,15 @@ def _rodar(settings: Settings, com_pdf: bool = True) -> None:
         with JOB["lock"]:
             JOB["mensagens"].append(msg)
             del JOB["mensagens"][:-40]
+        from .whatsapp import notificar_andamento_frota
+
+        notificar_andamento_frota(settings, msg)
 
     try:
         resumo = executar(settings, on_progress=progresso)
         from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
+        progresso("Conta gravada. Preparando envio no WhatsApp...")
         if isinstance(resumo, dict) and resumo.get("falha_historico"):
             avisar_coleta_pronta(
                 settings,

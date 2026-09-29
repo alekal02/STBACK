@@ -34,6 +34,7 @@ _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
 _MANTER = True
 _ULTIMO_ENVIO: dict[str, Any] = {}
+_ULTIMO_ANDAMENTO_WHATS = 0.0
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
 def _caminho_config() -> Path:
@@ -815,6 +816,11 @@ def entregar_frota_congelada(settings: Settings, grupo: str, dia: date) -> dict[
         + (f" às {hora}" if hora else "")
         + ". O mapa já estava atualizado; não busquei a Segtrack de novo."
     )
+    enviar_texto(
+        settings,
+        grupo,
+        "Conta fechada. Montando o PDF da frota (pode levar cerca de 1 minuto no servidor).",
+    )
     _enviar_no_grupo(
         settings,
         grupo,
@@ -1112,6 +1118,46 @@ def _coleta_grupo_pendente() -> bool:
     """Pedido do WhatsApp ou painel aguardando conta — o relógio não compete."""
     with _LOCK:
         return bool(_PENDENTES)
+
+
+def _pedido_frota_pendente() -> dict[str, Any] | None:
+    with _LOCK:
+        for item in reversed(_PENDENTES):
+            if str(item.get("tipo") or "") == "frota":
+                return item
+    return None
+
+
+def notificar_andamento_frota(settings: Settings, msg: str) -> None:
+    """Avisa no grupo a cada ~90 s enquanto a primeira conta do turno fecha (Render demora)."""
+    global _ULTIMO_ANDAMENTO_WHATS
+    texto = (msg or "").strip()
+    if not texto:
+        return
+    gatilhos = (
+        "Trajeto na via",
+        "Mapa oficial",
+        "rota(s) no trajeto",
+        "Medindo paradas",
+        "Pronto.",
+        "Conta gravada",
+    )
+    if not any(marca in texto for marca in gatilhos):
+        return
+    pedido = _pedido_frota_pendente()
+    if not pedido:
+        return
+    grupo = str(pedido.get("grupo") or grupo_configurado(settings) or "").strip()
+    if not grupo:
+        return
+    agora = time.time()
+    if agora - _ULTIMO_ANDAMENTO_WHATS < 90:
+        return
+    _ULTIMO_ANDAMENTO_WHATS = agora
+    try:
+        enviar_texto(settings, grupo, f"*Andamento da frota*\n{texto}")
+    except Exception as exc:
+        print(f"WhatsApp andamento: {exc}", flush=True)
 
 
 def relogio_frota(settings: Settings) -> None:

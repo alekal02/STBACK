@@ -418,28 +418,35 @@ def aplicar_setores_oficiais(
 ) -> None:
     if not setores:
         return
-    from .cobertura import avaliar_cobertura, recortar_pontos
+    from .cobertura import avaliar_cobertura, pecas_da_rua, recortar_pontos
     from .verificacao import coberturas_executadas
 
+    for setor in setores:
+        if "_pecas" not in setor:
+            setor["_pecas"] = pecas_da_rua(setor.get("ruas") or [])
     total = len(rotas)
+    n_setores = len(setores)
     for indice, item in enumerate(rotas, start=1):
+        placa = item.get("placa") or item.get("veiculo")
         if on_progress:
-            on_progress(f"Mapa oficial {indice}/{total} · {item.get('placa') or item.get('veiculo')}")
+            on_progress(f"Mapa oficial {indice}/{total} · {placa}")
         pontos = item.get("pontos_dia") or item.get("pontos") or []
         coberturas = []
         melhor = None
         melhor_cob: dict[str, Any] | None = None
         melhor_pct = -1.0
-        for setor in setores:
+        for ordem, setor in enumerate(setores, start=1):
+            if on_progress and (ordem == 1 or ordem % 8 == 0):
+                on_progress(f"Mapa oficial {indice}/{total} · {placa} · rota {ordem}/{n_setores}")
             clip = recortar_pontos(pontos, setor["geom"], 120)
             if len(clip) < 8:
                 continue
             cob = avaliar_cobertura(
                 [],
-                pontos,
+                clip,
                 geom_setor=setor["geom"],
                 km_oficial=setor.get("km_oficial"),
-                ruas=setor.get("ruas") or [],
+                pecas=setor.get("_pecas") or [],
             )
             km_feito = float(cob.get("km_coleta") or 0)
             n_pts = int(cob.get("pontos_no_setor") or 0)

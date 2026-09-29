@@ -148,16 +148,19 @@ def _no_patio(lat: float, lon: float) -> bool:
     return any(zona.covers(ponto) for zona in _patios())
 
 
-def _malha_do_setor(setor: dict[str, Any]):
-    from shapely.ops import unary_union
+def _arvore_do_setor(setor: dict[str, Any]):
+    from shapely.strtree import STRtree
 
-    guardada = setor.get("_ruas_uniao")
+    guardada = setor.get("_arvore")
     if guardada is not None:
-        return guardada
-    ruas = [rua for rua in (setor.get("ruas") or []) if not getattr(rua, "is_empty", True)]
-    uniao = unary_union(ruas) if ruas else None
-    setor["_ruas_uniao"] = uniao
-    return uniao
+        return guardada or None
+    pecas = setor.get("_pecas") or []
+    linhas = [peca[0] for peca in pecas] if pecas else [
+        rua for rua in (setor.get("ruas") or []) if rua is not None and not getattr(rua, "is_empty", True)
+    ]
+    arvore = STRtree(linhas) if linhas else False
+    setor["_arvore"] = arvore
+    return arvore or None
 
 
 def _setor_da_parada(lat: float, lon: float, setores: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -177,10 +180,13 @@ def _setor_da_parada(lat: float, lon: float, setores: list[dict[str, Any]]) -> d
     melhor = None
     melhor_m = RAIO_M + 1
     for setor in setores:
-        malha = _malha_do_setor(setor)
-        if malha is None or malha.is_empty:
+        arvore = _arvore_do_setor(setor)
+        if arvore is None:
             continue
-        distancia = malha.distance(ponto)
+        achados = arvore.query(ponto, predicate="dwithin", distance=RAIO_M)
+        if len(achados) == 0:
+            continue
+        distancia = min(float(arvore.geometries[int(i)].distance(ponto)) for i in achados)
         if distancia <= RAIO_M and distancia < melhor_m:
             melhor = setor
             melhor_m = distancia
@@ -257,21 +263,27 @@ def _e_coleta(cob: dict[str, Any]) -> bool:
 
 def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date, ruas: list | None = None) -> tuple[int, float]:
     """Pulsos a até 45 m da rua oficial, ou dentro do polígono quando a rua não está no mapa."""
+    from shapely.strtree import STRtree
+
     from .cobertura import RAIO_M
 
     if not pontos:
         return 0, 0.0
-    malha = None
-    if ruas:
-        from shapely.ops import unary_union
-
-        linhas = [rua for rua in ruas if rua is not None and not getattr(rua, "is_empty", True)]
-        if linhas:
-            malha = unary_union(linhas)
-    if (malha is None or malha.is_empty) and (geom is None or geom.is_empty):
+    linhas = [rua for rua in (ruas or []) if rua is not None and not getattr(rua, "is_empty", True)]
+    arvore = STRtree(linhas) if linhas else None
+    if arvore is None and (geom is None or geom.is_empty):
         return 0, 0.0
-    zona = malha.buffer(RAIO_M) if malha is not None and not malha.is_empty else geom
-    minx, miny, maxx, maxy = zona.bounds
+    if arvore is not None:
+        minx, miny, maxx, maxy = arvore.geometries[0].bounds
+        for linha in arvore.geometries[1:]:
+            a, b, c, d = linha.bounds
+            minx, miny, maxx, maxy = min(minx, a), min(miny, b), max(maxx, c), max(maxy, d)
+        minx -= RAIO_M
+        miny -= RAIO_M
+        maxx += RAIO_M
+        maxy += RAIO_M
+    else:
+        minx, miny, maxx, maxy = geom.bounds
     marcas: list[datetime] = []
     total = 0
     for ponto in pontos:
@@ -283,7 +295,11 @@ def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date, ruas: list | N
         x, y = TO_UTM.transform(lon, lat)
         if x < minx or x > maxx or y < miny or y > maxy:
             continue
-        if not zona.covers(Point(x, y)):
+        marca_ponto = Point(x, y)
+        if arvore is not None:
+            if len(arvore.query(marca_ponto, predicate="dwithin", distance=RAIO_M)) == 0:
+                continue
+        elif not geom.covers(marca_ponto):
             continue
         total += 1
         marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)

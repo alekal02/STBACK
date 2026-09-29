@@ -305,56 +305,129 @@ def _linhas_planejadas(planejada: list[Any], salto_m: float = 90) -> list[LineSt
     return linhas
 
 
+def pecas_da_rua(ruas: list[LineString]) -> list[tuple[LineString, float, float, float]]:
+    """Corta a rua uma vez. O meio de cada pedaço é o que o pulso precisa alcançar."""
+    pecas = []
+    for linha in ruas or []:
+        if linha is None or linha.is_empty:
+            continue
+        for trecho in _cortar(linha, PASSO_M):
+            if trecho.length < 1:
+                continue
+            meio = trecho.interpolate(0.5, normalized=True)
+            pecas.append((trecho, float(meio.x), float(meio.y), trecho.length / 1000.0))
+    return pecas
+
+
+def _meios_com_pulso(
+    pecas: list[tuple[LineString, float, float, float]],
+    pulsos: list[tuple[float, float]],
+) -> list[bool]:
+    """O meio do pedaço está a até 45 m de algum pulso. A grade só evita medir o que está longe."""
+    if not pecas:
+        return []
+    if not pulsos:
+        return [False] * len(pecas)
+    celula = RAIO_M
+    limite = RAIO_M * RAIO_M
+    grade: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for x, y in pulsos:
+        grade.setdefault((int(x // celula), int(y // celula)), []).append((x, y))
+    coberto = []
+    for _trecho, mx, my, _km in pecas:
+        cx, cy = int(mx // celula), int(my // celula)
+        ok = False
+        for ix in range(cx - 1, cx + 2):
+            fila = grade.get((ix, cy - 1))
+            meio = grade.get((ix, cy))
+            baixo = grade.get((ix, cy + 1))
+            for grupo in (fila, meio, baixo):
+                if not grupo:
+                    continue
+                for px, py in grupo:
+                    dx = px - mx
+                    dy = py - my
+                    if dx * dx + dy * dy <= limite:
+                        ok = True
+                        break
+                if ok:
+                    break
+            if ok:
+                break
+        coberto.append(ok)
+    return coberto
+
+
 def avaliar_cobertura(
     planejada: list[Any],
     gps: list[dict[str, Any]],
     geom_setor=None,
     km_oficial: float | None = None,
     ruas: list[LineString] | None = None,
+    pecas: list[tuple[LineString, float, float, float]] | None = None,
 ) -> dict[str, Any]:
     pontos = list(gps or [])
-    pulsos_xy = [par for par in (_xy(p) for p in pontos) if par]
-    perto: list[tuple[float, float]] = []
+    pares = []
+    for ponto in pontos:
+        xy = _xy(ponto)
+        if xy:
+            pares.append((ponto, xy))
+    pulsos_xy = [xy for _ponto, xy in pares]
     planejadas = list(ruas or [])
-    if not planejadas:
+    if pecas is None and not planejadas:
         candidatas = _linhas_planejadas(planejada)
         if candidatas and not _parece_contorno(candidatas):
             planejadas = candidatas
-    zona_pulso = None
-    if pulsos_xy and planejadas:
-        malha = unary_union(planejadas)
-        if not malha.is_empty:
-            perto = [par for par in pulsos_xy if malha.distance(Point(par)) <= RAIO_M]
-            if perto:
-                zona_pulso = MultiPoint(perto).buffer(RAIO_M)
-    elif pulsos_xy and geom_setor is not None:
+    if pecas is None:
+        pecas = pecas_da_rua(planejadas)
+    if not pecas and pulsos_xy and geom_setor is not None:
         pontos = recortar_pontos(pontos, geom_setor, 90)
         pulsos_xy = [par for par in (_xy(p) for p in pontos) if par]
-    n_pts = len(perto) if planejadas else len(pulsos_xy)
-    if planejadas:
-        marcas = set(perto)
-        pontos_perto = [p for p in pontos if _xy(p) in marcas]
-    else:
-        pontos_perto = pontos
+    marcas = _meios_com_pulso(pecas, pulsos_xy) if pecas else []
+    perto_idx = set()
+    if pecas and pulsos_xy and any(marcas):
+        celula = RAIO_M
+        limite = RAIO_M * RAIO_M
+        grade_meio: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for fica, (_trecho, mx, my, _km) in zip(marcas, pecas):
+            if fica:
+                grade_meio.setdefault((int(mx // celula), int(my // celula)), []).append((mx, my))
+        for indice, (x, y) in enumerate(pulsos_xy):
+            cx, cy = int(x // celula), int(y // celula)
+            achou = False
+            for ix in range(cx - 1, cx + 2):
+                for iy in range(cy - 1, cy + 2):
+                    for mx, my in grade_meio.get((ix, iy), ()):
+                        dx = x - mx
+                        dy = y - my
+                        if dx * dx + dy * dy <= limite:
+                            achou = True
+                            break
+                    if achou:
+                        break
+                if achou:
+                    break
+            if achou:
+                perto_idx.add(indice)
+    ordem = sorted(perto_idx)
+    pontos_perto = [pares[i][0] for i in ordem] if pecas else pontos
+    n_pts = len(ordem) if pecas else len(pulsos_xy)
     km_rastreio = km_gps(pontos_perto, salto_m=SALTO_GPS_M + 40)
     gps_linhas = _linhas_gps(pontos_perto)
-    gps_xy = perto if planejadas else pulsos_xy
+    gps_xy = [pares[i][1] for i in ordem] if pecas else pulsos_xy
 
     feitos: list[LineString] = []
     faltando: list[LineString] = []
     km_plano = 0.0
     km_feito = 0.0
-    if planejadas:
-        for linha in planejadas:
-            for trecho in _cortar(linha, PASSO_M):
-                km_plano += trecho.length / 1000.0
-                meio = trecho.interpolate(0.5, normalized=True)
-                coberto = zona_pulso is not None and not zona_pulso.is_empty and zona_pulso.covers(meio)
-                if coberto:
-                    feitos.append(trecho)
-                    km_feito += trecho.length / 1000.0
-                else:
-                    faltando.append(trecho)
+    if pecas:
+        for fica, (trecho, _mx, _my, km) in zip(marcas, pecas):
+            km_plano += km
+            if fica:
+                feitos.append(trecho)
+                km_feito += km
+            else:
+                faltando.append(trecho)
         pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
         metodo = "ruas"
     else:

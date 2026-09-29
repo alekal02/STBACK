@@ -8,7 +8,7 @@ from shapely import contains_xy
 from shapely.geometry import LineString, MultiPoint, Point
 from shapely.ops import linemerge, unary_union
 
-from .gps import haversine_m, ordem_do_pulso
+from .gps import haversine_m
 
 TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
 TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
@@ -78,7 +78,7 @@ def _wgs(coords: list[tuple[float, float]]) -> list[list[float]]:
 
 def _linhas_gps(pontos: list[dict[str, Any]], salto_m: float = SALTO_GPS_M) -> list[LineString]:
     xy: list[tuple[float, float]] = []
-    for ponto in sorted(pontos or [], key=ordem_do_pulso):
+    for ponto in pontos or []:
         par = _xy(ponto)
         if par:
             xy.append(par)
@@ -276,13 +276,8 @@ def _confianca(n_pts: int, km_rastreio: float, km_plano: float, n_gaps: int) -> 
 def _veredicto(pct: float, confianca: str, n_pts: int) -> str:
     if n_pts == 0:
         return "SEM RASTREIO"
-    # Sem densidade mínima não dá para fechar Feita — marca incerteza.
-    if confianca == "baixa":
-        if pct >= FEITA_MIN:
-            return "INCERTA"
-        if pct >= PARCIAL_MIN:
-            return "INCERTA"
-        return "NÃO FEITA" if pct > 0 else "SEM RASTREIO"
+    if confianca == "baixa" and pct < FEITA_MIN:
+        return "INCERTA"
     if pct >= FEITA_MIN:
         return "FEITA"
     if pct >= PARCIAL_MIN:
@@ -310,185 +305,52 @@ def _linhas_planejadas(planejada: list[Any], salto_m: float = 90) -> list[LineSt
     return linhas
 
 
-def pecas_da_rua(ruas: list[LineString]) -> list[tuple[LineString, float, float, float]]:
-    """Corta a rua uma vez. O meio de cada pedaço é o que o pulso precisa alcançar."""
-    pecas = []
-    for linha in ruas or []:
-        if linha is None or linha.is_empty:
-            continue
-        for trecho in _cortar(linha, PASSO_M):
-            if trecho.length < 1:
-                continue
-            meio = trecho.interpolate(0.5, normalized=True)
-            pecas.append((trecho, float(meio.x), float(meio.y), trecho.length / 1000.0))
-    return pecas
-
-
-def _meios_com_pulso(
-    pecas: list[tuple[LineString, float, float, float]],
-    pulsos: list[tuple[float, float]],
-) -> list[bool]:
-    """O meio do pedaço está a até 45 m de algum pulso. A grade só evita medir o que está longe."""
-    if not pecas:
-        return []
-    if not pulsos:
-        return [False] * len(pecas)
-    celula = RAIO_M
-    limite = RAIO_M * RAIO_M
-    grade: dict[tuple[int, int], list[tuple[float, float]]] = {}
-    for x, y in pulsos:
-        grade.setdefault((int(x // celula), int(y // celula)), []).append((x, y))
-    coberto = []
-    for _trecho, mx, my, _km in pecas:
-        cx, cy = int(mx // celula), int(my // celula)
-        ok = False
-        for ix in range(cx - 1, cx + 2):
-            fila = grade.get((ix, cy - 1))
-            meio = grade.get((ix, cy))
-            baixo = grade.get((ix, cy + 1))
-            for grupo in (fila, meio, baixo):
-                if not grupo:
-                    continue
-                for px, py in grupo:
-                    dx = px - mx
-                    dy = py - my
-                    if dx * dx + dy * dy <= limite:
-                        ok = True
-                        break
-                if ok:
-                    break
-            if ok:
-                break
-        coberto.append(ok)
-    return coberto
-
-
-def faixa_de_tracos(tracos: list, buffer_m: float = 12.0):
-    """Faixa de 12 m ao redor do trajeto casado. Rua paralela fica de fora."""
-    from shapely.geometry import Polygon
-
-    linhas = []
-    for trecho in tracos or []:
-        xy = []
-        for par in trecho:
-            if not isinstance(par, (list, tuple)) or len(par) < 2:
-                continue
-            ponto = _xy((float(par[0]), float(par[1])))
-            if ponto:
-                xy.append(ponto)
-        if len(xy) >= 2:
-            linhas.append(LineString(xy))
-    if not linhas:
-        return Polygon()
-    faixa = unary_union(linhas).buffer(buffer_m)
-    if not faixa.is_valid:
-        faixa = faixa.buffer(0)
-    return faixa
-
-
-def _corte_faixa(trecho: LineString, faixa) -> LineString:
-    if faixa is None or faixa.is_empty or not trecho.intersects(faixa):
-        return LineString()
-    try:
-        inter = trecho.intersection(faixa)
-    except Exception:
-        return LineString()
-    return inter
-
-
 def avaliar_cobertura(
     planejada: list[Any],
     gps: list[dict[str, Any]],
     geom_setor=None,
     km_oficial: float | None = None,
     ruas: list[LineString] | None = None,
-    pecas: list[tuple[LineString, float, float, float]] | None = None,
-    faixa_confirmada=None,
-    faixa_estimada=None,
 ) -> dict[str, Any]:
-    pontos = list(gps or [])
-    pares = []
-    for ponto in pontos:
-        xy = _xy(ponto)
-        if xy:
-            pares.append((ponto, xy))
-    pulsos_xy = [xy for _ponto, xy in pares]
+    pontos = recortar_pontos(gps, geom_setor, 90) if geom_setor is not None else list(gps or [])
+    n_pts = len(pontos)
+    km_rastreio = km_gps(pontos, salto_m=SALTO_GPS_M + 40)
     planejadas = list(ruas or [])
-    if pecas is None and not planejadas:
+    if not planejadas:
         candidatas = _linhas_planejadas(planejada)
         if candidatas and not _parece_contorno(candidatas):
             planejadas = candidatas
-    if pecas is None:
-        pecas = pecas_da_rua(planejadas)
-    if not pecas and pulsos_xy and geom_setor is not None:
-        pontos = recortar_pontos(pontos, geom_setor, 90)
-        pulsos_xy = [par for par in (_xy(p) for p in pontos) if par]
-    marcas = _meios_com_pulso(pecas, pulsos_xy) if pecas else []
-    perto_idx = set()
-    if pecas and pulsos_xy and any(marcas):
-        celula = RAIO_M
-        limite = RAIO_M * RAIO_M
-        grade_meio: dict[tuple[int, int], list[tuple[float, float]]] = {}
-        for fica, (_trecho, mx, my, _km) in zip(marcas, pecas):
-            if fica:
-                grade_meio.setdefault((int(mx // celula), int(my // celula)), []).append((mx, my))
-        for indice, (x, y) in enumerate(pulsos_xy):
-            cx, cy = int(x // celula), int(y // celula)
-            achou = False
-            for ix in range(cx - 1, cx + 2):
-                for iy in range(cy - 1, cy + 2):
-                    for mx, my in grade_meio.get((ix, iy), ()):
-                        dx = x - mx
-                        dy = y - my
-                        if dx * dx + dy * dy <= limite:
-                            achou = True
-                            break
-                    if achou:
-                        break
-                if achou:
-                    break
-            if achou:
-                perto_idx.add(indice)
-    ordem = sorted(perto_idx)
-    pontos_perto = [pares[i][0] for i in ordem] if pecas else pontos
-    n_pts = len(ordem) if pecas else len(pulsos_xy)
-    km_rastreio = km_gps(pontos_perto, salto_m=SALTO_GPS_M + 40)
-    gps_linhas = _linhas_gps(pontos_perto)
-    gps_xy = [pares[i][1] for i in ordem] if pecas else pulsos_xy
+    gps_linhas = _linhas_gps(pontos)
+    gps_xy = [_xy(p) for p in pontos]
+    gps_xy = [p for p in gps_xy if p]
 
     feitos: list[LineString] = []
     faltando: list[LineString] = []
-    incertos: list[LineString] = []
     km_plano = 0.0
     km_feito = 0.0
-    if pecas and (faixa_confirmada is not None or faixa_estimada is not None):
-        for trecho, _mx, _my, km in pecas:
-            km_plano += km
-            coberta = _corte_faixa(trecho, faixa_confirmada)
-            sobra = trecho.difference(faixa_confirmada) if coberta.length else trecho
-            incerta = _corte_faixa(sobra, faixa_estimada) if sobra is not None and not sobra.is_empty else LineString()
-            if incerta.length:
-                try:
-                    falta = sobra.difference(faixa_estimada)
-                except Exception:
-                    falta = sobra
-            else:
-                falta = sobra
-            km_feito += coberta.length / 1000.0
-            feitos.extend(geom for geom in _iter_linhas(coberta) if geom.length >= 1)
-            incertos.extend(geom for geom in _iter_linhas(incerta) if geom.length >= 1)
-            faltando.extend(geom for geom in _iter_linhas(falta) if geom.length >= 1)
+    if planejadas:
+        gps_geom = None
+        if gps_linhas:
+            gps_geom = unary_union(gps_linhas)
+        elif gps_xy:
+            gps_geom = unary_union([Point(p) for p in gps_xy])
+        for linha in planejadas:
+            for trecho in _cortar(linha, PASSO_M):
+                km_plano += trecho.length / 1000.0
+                coberto = (
+                    gps_geom is not None
+                    and not gps_geom.is_empty
+                    and gps_geom.distance(trecho) <= RAIO_M
+                )
+                if coberto:
+                    feitos.append(trecho)
+                    km_feito += trecho.length / 1000.0
+                else:
+                    faltando.append(trecho)
         pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
-        metodo = "malha"
-    elif pecas:
-        for fica, (trecho, _mx, _my, km) in zip(marcas, pecas):
-            km_plano += km
-            if fica:
-                feitos.append(trecho)
-                km_feito += km
-            else:
-                faltando.append(trecho)
-        pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
+        if km_oficial and km_oficial > 0:
+            pct = round(min(100.0, 100.0 * km_feito / km_oficial), 1)
+            km_plano = float(km_oficial)
         metodo = "ruas"
     else:
         base = km_oficial or 0.0
@@ -510,14 +372,13 @@ def avaliar_cobertura(
         "veredicto": veredicto,
         "confianca": conf,
         "metodo": metodo,
-        "km_coleta": round(km_feito if metodo in {"ruas", "malha"} else km_rastreio, 3),
+        "km_coleta": round(km_feito if metodo == "ruas" else km_rastreio, 3),
         "km_gps": round(km_rastreio, 3),
         "km_total": round(km_plano or (km_oficial or 0.0), 3),
         "km_faltando": round(max(0.0, (km_plano or 0) - km_feito), 3),
         "pontos_no_setor": n_pts,
         "trechos_feitos": _fundir(feitos),
         "trechos_faltando": _fundir(faltando),
-        "trechos_incertos": _fundir(incertos),
         "trechos_planejados": _fundir(planejadas),
         "trechos_gps": [_wgs(list(linha.coords)) for linha in gps_linhas],
         "pontos_clip": pontos,

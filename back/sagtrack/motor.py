@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, casar_tracos, haversine_m, tracos_na_ordem
+from .gps import _datetime_do_timestamp, haversine_m, tracos_realistas
 from .mapa import aplicar_setores_oficiais, carregar_setores
-from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
+from .relatorios import medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
 
 Progresso = Callable[[str], None]
@@ -67,19 +67,16 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
                 "confianca": item.get("confianca") or "",
                 "trechos_feitos": item.get("trechos_feitos") or [],
                 "trechos_faltando": item.get("trechos_faltando") or [],
-                "trechos_incertos": item.get("trechos_incertos") or [],
                 "poligonos": item.get("poligonos") or [],
             }
         ]
     feitos: list = []
     faltando: list = []
-    incertos: list = []
     poligonos: list = []
     setores = []
     for cob in visiveis:
         feitos.extend(_thin(t, 160) for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2)
         faltando.extend(_thin(t, 160) for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2)
-        incertos.extend(_thin(t, 160) for t in (cob.get("trechos_incertos") or []) if t and len(t) >= 2)
         for anel in (cob.get("poligonos") or [])[:1]:
             if anel and len(anel) >= 4:
                 poligonos.append(_thin(anel, 120))
@@ -123,12 +120,7 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "incertos": incertos,
-        "gps": item.get("_tracos") if "_tracos" in item else tracos_na_ordem(pontos),
-        "gps_estimado": item.get("_tracos_estimados") or [],
-        "gps_original": item.get("_tracos_originais") or [],
-        "gps_deslocamento": item.get("_tracos_deslocamento") or [],
-        "casamento": item.get("_casamento") or {},
+        "gps": tracos_realistas(sorted(pontos, key=lambda p: str(p.get("timestamp") or "")), salto_max_m=2500, tolerancia_m=12),
         "poligonos": poligonos[:3],
     }
 
@@ -156,159 +148,10 @@ def montar_resumo(dia: date, folhas: list[dict[str, Any]], settings: Settings) -
 
 
 def _sem_pontos(item: dict[str, Any]) -> dict[str, Any]:
-    ocultos = {"pontos", "_tracos", "_tracos_estimados", "_tracos_originais"}
-    return {k: v for k, v in item.items() if k not in ocultos}
+    return {k: v for k, v in item.items() if k != "pontos"}
 
 
-_CAMPOS_CONTA = (
-    "coberturas_inlog",
-    "percentual_concluido",
-    "veredicto",
-    "confianca",
-    "setor",
-    "rota",
-    "codigo_rota",
-    "km_coleta",
-    "km_total",
-    "km_faltando",
-    "qtd_pacmans",
-    "trechos_feitos",
-    "trechos_faltando",
-    "trechos_incertos",
-    "trechos_planejados",
-    "cobertura_malha",
-    "trechos_gps",
-    "poligonos",
-    "vias",
-    "rota_planejada",
-    "paradas_dia",
-    "saida",
-    "papel",
-    "paradas",
-    "minutos_parado",
-    "paradas_pontos",
-)
-
-
-def _contas_salvas(pasta: Path) -> dict[str, dict[str, Any]]:
-    arquivo = pasta / "frota.json"
-    if not arquivo.is_file():
-        return {}
-    try:
-        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(bruto, list):
-        return {}
-    return {
-        str(item.get("placa") or ""): item
-        for item in bruto
-        if isinstance(item, dict) and item.get("placa") and item.get("coberturas_inlog")
-    }
-
-
-def _guardar_casamento(
-    item: dict[str, Any],
-    dia: date,
-    pasta: Path,
-    *,
-    malha: Any | None = None,
-) -> None:
-    from .cobertura import faixa_de_tracos
-    from .gps import _afinar_para_casamento
-
-    pontos = item.get("pontos") or []
-    afinados = _afinar_para_casamento(pontos, dia)
-    casado = casar_tracos(
-        afinados,
-        dia=dia,
-        placa=str(item.get("placa") or ""),
-        pasta_cache=pasta / "casamento",
-        malha=malha,
-    )
-    item["_tracos"] = casado.get("confirmado") or []
-    item["_tracos_estimados"] = casado.get("estimado") or []
-    item["_tracos_deslocamento"] = casado.get("deslocamento") or []
-    item["_tracos_originais"] = casado.get("original") or []
-    item["_casamento"] = casado.get("resumo") or {}
-    if casado.get("disponivel"):
-        item["_faixa_confirmada"] = faixa_de_tracos(item["_tracos"])
-        item["_faixa_estimada"] = faixa_de_tracos(item["_tracos_estimados"])
-
-
-def _restaurar_tracos(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
-    """Reaproveita o trajeto já casado do resumo quando não houve pulso novo."""
-    if not anterior:
-        return False
-    if not (anterior.get("gps") or anterior.get("gps_estimado")):
-        return False
-    if "confianca" not in (anterior.get("casamento") or {}):
-        return False
-    from .cobertura import faixa_de_tracos
-
-    item["_tracos"] = list(anterior.get("gps") or [])
-    item["_tracos_estimados"] = list(anterior.get("gps_estimado") or [])
-    item["_tracos_deslocamento"] = list(anterior.get("gps_deslocamento") or [])
-    item["_tracos_originais"] = list(anterior.get("gps_original") or [])
-    item["_casamento"] = dict(anterior.get("casamento") or {})
-    item["_faixa_confirmada"] = faixa_de_tracos(item["_tracos"])
-    item["_faixa_estimada"] = faixa_de_tracos(item["_tracos_estimados"])
-    return True
-
-
-def _casar_frota(
-    rotas: list[dict[str, Any]],
-    dia: date,
-    pasta: Path,
-    *,
-    resumo_anterior: dict[str, Any] | None,
-    on_progress: Progresso | None = None,
-) -> None:
-    """Casa os pulsos. Quem já tem trajeto salvo e sem pulso novo não recalcula."""
-    from .gps import malha_oficial
-
-    por_placa = {
-        str(c.get("placa") or ""): c
-        for c in ((resumo_anterior or {}).get("caminhoes") or [])
-        if isinstance(c, dict)
-    }
-    pendentes: list[dict[str, Any]] = []
-    for item in rotas:
-        placa = str(item.get("placa") or "")
-        if str(item.get("origem_pulso") or "") == "salvo" and _restaurar_tracos(item, por_placa.get(placa)):
-            continue
-        pendentes.append(item)
-    if not pendentes:
-        return
-    if on_progress:
-        on_progress(f"Preparando a malha viária para {len(pendentes)} caminhão(ões)...")
-    malha = malha_oficial()
-    total = len(pendentes)
-    for indice, item in enumerate(pendentes, start=1):
-        if on_progress:
-            on_progress(f"Trajeto na via {indice}/{total} · {item.get('placa') or ''}")
-        _guardar_casamento(item, dia, pasta, malha=malha)
-
-def _reaproveitar_conta(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
-    """Mantém a rua já cruzada quando o caminhão não teve pulso novo."""
-    if not anterior or not anterior.get("coberturas_inlog"):
-        return False
-    from .mapa import caminho_gpkg
-
-    if caminho_gpkg() and not anterior.get("cobertura_malha"):
-        return False
-    for campo in _CAMPOS_CONTA:
-        if campo in anterior:
-            item[campo] = anterior[campo]
-    return True
-
-
-def executar(
-    settings: Settings,
-    on_progress: Progresso | None = None,
-    *,
-    so_pulsos: bool = False,
-) -> dict[str, Any]:
+def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[str, Any]:
     def progress(msg: str) -> None:
         print(msg, flush=True)
         if on_progress:
@@ -319,7 +162,7 @@ def executar(
     pasta.mkdir(parents=True, exist_ok=True)
 
     inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
-    agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
+    agora = datetime.now().replace(microsecond=0)
     if agora < inicio:
         congelado = inicio
     elif agora > fim:
@@ -330,91 +173,16 @@ def executar(
         f"Horário congelado às {congelado.strftime('%H:%M:%S')}. "
         "A coleta usa os pulsos até esse instante."
     )
-    anteriores: dict[str, list] = {}
-    arquivo_pontos = pasta / "pontos.json"
-    if arquivo_pontos.is_file():
-        try:
-            bruto = json.loads(arquivo_pontos.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            bruto = {}
-        if isinstance(bruto, dict):
-            anteriores = {str(placa): pontos for placa, pontos in bruto.items() if isinstance(pontos, list)}
-    rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado, anteriores=anteriores)
-    falhas = [item for item in rotas if item.get("erro") and int(item.get("pontos_na_cidade") or 0) == 0]
-    rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0]
-    if not rotas and falhas:
-        if (pasta / "resumo.json").is_file():
-            progress("A Segtrack não devolveu o histórico. A conclusão salva continua valendo.")
-            guardado = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
-            if isinstance(guardado, dict):
-                guardado["falha_historico"] = True
-                return guardado
-        progress("A Segtrack não devolveu o histórico. A conta não foi fechada.")
-        return {
-            "data": dia.isoformat(),
-            "com_rota": 0,
-            "media": None,
-            "falha_historico": True,
-            "caminhoes": [],
-        }
-    if (
-        (pasta / "resumo.json").is_file()
-        and rotas
-        and all(str(item.get("origem_pulso") or "") == "salvo" for item in rotas)
-    ):
-        guardado = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
-        casas = [((c or {}).get("casamento") or {}) for c in (guardado.get("caminhoes") or [])]
-        if casas and all("confianca" in casa for casa in casas):
-            (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
-            progress("Nenhum pulso novo. A conclusão já salva continua valendo.")
-            return guardado
+    rotas = coletar_percursos(settings, dia, on_progress=progress, ate=congelado)
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 
-    # Relógio ao vivo: só guarda pulsos. O casamento completo fica para o pedido/ciclo completo.
-    if so_pulsos and (pasta / "resumo.json").is_file():
-        novos = sum(1 for item in rotas if str(item.get("origem_pulso") or "") != "salvo")
-        (pasta / "pontos.json").write_text(
-            json.dumps(pontos_leves(rotas), ensure_ascii=False),
-            encoding="utf-8",
-        )
-        (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
-        progress(
-            f"Ao vivo: pulsos guardados"
-            + (f" ({novos} caminhão(ões) com trecho novo)" if novos else "")
-            + ". Conta do mapa na próxima atualização completa."
-        )
-        return json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
-
-    contas = _contas_salvas(pasta)
-    refazer = []
-    for item in rotas:
-        placa = str(item.get("placa") or "")
-        if str(item.get("origem_pulso") or "") == "salvo" and _reaproveitar_conta(item, contas.get(placa)):
-            continue
-        refazer.append(item)
-
-    progress("Casando os pulsos com a malha. Quem já tem trajeto salvo fica de fora.")
-    resumo_ant = None
-    if (pasta / "resumo.json").is_file():
-        try:
-            resumo_ant = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            resumo_ant = None
-    _casar_frota(rotas, dia, pasta, resumo_anterior=resumo_ant, on_progress=progress)
     progress("Lendo o mapa oficial de Aparecida...")
     setores = carregar_setores(dia)
-    if refazer:
-        progress(
-            f"Setores do dia: {len(setores)}. "
-            f"Cruzando ruas de {len(refazer)} caminhão(ões) com pulso novo."
-        )
-        aplicar_setores_oficiais(refazer, setores, dia, on_progress=progress)
-        progress("Medindo paradas de coleta...")
-        medir_presenca(refazer, setores, dia)
-    else:
-        progress("Sem pulso novo nos caminhões: setores e paradas do turno permanecem como estavam.")
-    _aplicar_apoio(rotas)
+    progress(f"Setores do dia: {len(setores)}. Cruzando ruas com o trajeto...")
+    aplicar_setores_oficiais(rotas, setores, dia, on_progress=progress)
+    progress("Medindo paradas de coleta...")
+    medir_presenca(rotas, setores, dia)
 
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
@@ -438,71 +206,6 @@ def carregar_resumo(pasta_output: Path, dia: date) -> dict[str, Any] | None:
     if not arquivo.is_file():
         return None
     return json.loads(arquivo.read_text(encoding="utf-8"))
-
-
-def _ultimo_pulso_salvo(pasta: Path, dia: date) -> datetime | None:
-    from .gps import _datetime_do_timestamp
-
-    arquivo = pasta / "pontos.json"
-    if not arquivo.is_file():
-        return None
-    try:
-        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    marcas: list[datetime] = []
-    for pontos in (bruto or {}).values():
-        if not isinstance(pontos, list):
-            continue
-        for ponto in pontos:
-            if not isinstance(ponto, dict):
-                continue
-            marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
-            if marca is not None:
-                marcas.append(marca)
-    return max(marcas) if marcas else None
-
-
-def congelar_conta(
-    settings: Settings,
-    *,
-    on_progress: Progresso | None = None,
-) -> dict[str, Any]:
-    """Trava o último pulso já salvo e devolve o resumo. Não busca Segtrack de novo."""
-
-    def progress(msg: str) -> None:
-        print(msg, flush=True)
-        if on_progress:
-            on_progress(msg)
-
-    dia = settings.data_rota
-    pasta = settings.output_dir / dia.isoformat()
-    arquivo = pasta / "resumo.json"
-    if not arquivo.is_file():
-        raise FileNotFoundError("Ainda não há frota deste turno para congelar.")
-    resumo = json.loads(arquivo.read_text(encoding="utf-8"))
-    if not isinstance(resumo, dict):
-        raise RuntimeError("Resumo da frota inválido.")
-    inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
-    agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
-    ultimo = _ultimo_pulso_salvo(pasta, dia)
-    if ultimo is not None:
-        congelado = min(max(ultimo, inicio), fim)
-    elif agora < inicio:
-        congelado = inicio
-    elif agora > fim:
-        congelado = fim
-    else:
-        congelado = agora
-    resumo["congelado_em"] = congelado.isoformat(timespec="seconds")
-    resumo["congelado_por_pedido"] = True
-    arquivo.write_text(json.dumps(resumo, ensure_ascii=False), encoding="utf-8")
-    (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
-    progress(
-        f"Conta congelada no último pulso às {congelado.strftime('%H:%M:%S')}. "
-        "Gerando o relatório com o que já estava no mapa."
-    )
-    return resumo
 
 
 _AO_VIVO = threading.Lock()
@@ -633,8 +336,6 @@ def _gravar_trajeto_ao_vivo(
         f"Caminhão na rota {setor.get('codigo') or ''}. Atualizando trajeto até {agora.strftime('%H:%M')}.",
         flush=True,
     )
-    for base in atualizados:
-        _guardar_casamento(base, dia, pasta)
     aplicar_setores_oficiais(atualizados, setores, dia)
     medir_presenca(atualizados, setores, dia)
     for base in atualizados:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import io
 import json
 import math
@@ -75,15 +74,13 @@ def _cor_situacao(situacao: str) -> tuple[int, int, int]:
         return (31, 122, 77)
     if situacao == "Parcial":
         return (165, 107, 0)
-    if situacao == "Incerta":
-        return (120, 90, 40)
     if situacao == "Não feita":
         return (180, 35, 24)
     return (148, 163, 184)
 
 
 def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
-    """A mesma cobertura que gerou o percentual: ruas com pulso e ruas sem pulso."""
+    """Usa a cobertura que mais marcou via feita. O restante fica só nessa mesma cobertura."""
     melhor: tuple[int, float, list, list] | None = None
     for item in frota:
         for cob in item.get("coberturas_inlog") or []:
@@ -91,23 +88,14 @@ def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
                 continue
             feitos = [t for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2]
             faltando = [t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2]
-            faltando = faltando + [t for t in (cob.get("trechos_incertos") or []) if t and len(t) >= 2]
             if not feitos and not faltando:
                 continue
-            rank = 1 if str(cob.get("papel") or "") in {"ATUANDO", "APOIO"} else 0
-            nota = (rank, float(cob.get("percentual") or 0), feitos, faltando)
+            nota = (len(feitos), float(cob.get("percentual") or 0), feitos, faltando)
             if melhor is None or nota[0] > melhor[0] or (nota[0] == melhor[0] and nota[1] > melhor[1]):
                 melhor = nota
     if melhor is None:
         return [], []
     return melhor[2], melhor[3]
-
-
-def _partes_da_conta(pct: float) -> tuple[float, float]:
-    """O feito e o que falta somam 100. Os dois nascem do mesmo percentual."""
-    feito = round(float(pct or 0), 1)
-    falta = round(max(0.0, 100.0 - feito), 1)
-    return feito, falta
 
 
 _MALHA: dict[str, list[dict[str, Any]]] = {}
@@ -162,7 +150,7 @@ def _vias_no_poligono(dia: date, codigo: str, tracos: list[list[list[float]]]) -
     zona = None
     if linhas:
         try:
-            zona = unary_union(linhas).simplify(12).buffer(14)
+            zona = unary_union(linhas).simplify(12).buffer(45)
         except Exception:
             zona = None
     feitos: list = []
@@ -230,7 +218,7 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
         )
         pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
-            with urllib.request.urlopen(pedido, timeout=5) as resp:
+            with urllib.request.urlopen(pedido, timeout=3) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
             _TILE_RUIM.add(chave)
@@ -272,7 +260,6 @@ def renderizar_mapa(
     *,
     vias: str = "ambas",
     cor_traco: tuple[int, int, int] = (29, 78, 137),
-    camadas: list[dict[str, Any]] | None = None,
 ) -> bytes:
     moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or tracos
     caixa = _limites(moldura)
@@ -297,11 +284,11 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    zoom = 16
-    for candidato in range(17, 14, -1):
+    zoom = 15
+    for candidato in range(16, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 6:
+        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -316,8 +303,8 @@ def renderizar_mapa(
         comeco = max(0, meio - limite // 2)
         return comeco, comeco + limite - 1
 
-    tx0, tx1 = limitar(tx0, tx1, 8)
-    ty0, ty1 = limitar(ty0, ty1, 6)
+    tx0, tx1 = limitar(tx0, tx1, 5)
+    ty0, ty1 = limitar(ty0, ty1, 4)
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
     coords = [
@@ -356,7 +343,7 @@ def renderizar_mapa(
         velo.putalpha(fora)
         imagem.alpha_composite(velo)
     desenho = ImageDraw.Draw(imagem, "RGBA")
-    via_px = max(3, int(2.8 * escala))
+    via_px = max(2, int(2.2 * escala))
     for item in poligonos:
         grupos = []
         if vias in {"ambas", "abertas"}:
@@ -384,16 +371,13 @@ def renderizar_mapa(
                     fill=(255, 253, 248, 230),
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
-    traco_px = max(5, int(4.2 * escala))
-    faixas = camadas or [{"tracos": tracos, "cor": cor_traco}]
-    for faixa in faixas:
-        cor_faixa = faixa.get("cor") or cor_traco
-        for traco in faixa.get("tracos") or []:
-            coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
-            if len(coords) < 2:
-                continue
-            desenho.line(coords, fill=(255, 255, 255, 235), width=traco_px + 3, joint="curve")
-            desenho.line(coords, fill=(*cor_faixa, 255), width=traco_px, joint="curve")
+    traco_px = max(2, int(1.8 * escala))
+    for traco in tracos:
+        coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
+        if len(coords) < 2:
+            continue
+        desenho.line(coords, fill=(255, 255, 255, 230), width=traco_px + 2, joint="curve")
+        desenho.line(coords, fill=(*cor_traco, 255), width=traco_px, joint="curve")
     for coords in aneis_px:
         desenho.line(coords + [coords[0]], fill=(90, 68, 12, 255), width=max(2, int(1.6 * escala)))
     raio = max(4, int(3.2 * escala))
@@ -416,11 +400,11 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 2200:
-        altura = int(imagem.height * (2200 / imagem.width))
-        imagem = imagem.resize((2200, max(1, altura)), Image.Resampling.LANCZOS)
+    if imagem.width > 1600:
+        altura = int(imagem.height * (1600 / imagem.width))
+        imagem = imagem.resize((1600, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=92, optimize=True)
+    imagem.save(saida, format="JPEG", quality=80, optimize=True)
     return saida.getvalue()
 
 
@@ -476,7 +460,7 @@ def _pdf(
             )
             pdf.setFillColorRGB(0.11, 0.14, 0.19)
             pdf.setFont(fonte, 8)
-            pdf.drawString(16, 8, legenda[:240])
+            pdf.drawString(16, 8, legenda[:170])
             pdf.showPage()
     else:
         y = cabecalho()
@@ -540,132 +524,6 @@ def _preparar_vias(
     return _vias_no_poligono(dia, codigo, tracos)
 
 
-_CORES_TRACO = (
-    ((29, 78, 137), "Azul"),
-    ((15, 122, 68), "Verde"),
-    ((109, 40, 217), "Roxo"),
-    ((14, 116, 144), "Ciano"),
-    ((157, 23, 77), "Rosa"),
-)
-
-
-def _vias_oficiais(dia: date, codigo: str) -> list[list[list[float]]]:
-    from .mapa import TO_WGS
-
-    setor = next((item for item in _malha(dia) if str(item.get("codigo") or "") == codigo), None)
-    if setor is None:
-        return []
-    linhas = []
-    for rua in setor.get("ruas") or []:
-        coords = []
-        for coord in getattr(rua, "coords", ()):
-            if len(coord) < 2:
-                continue
-            lon, lat = TO_WGS.transform(float(coord[0]), float(coord[1]))
-            coords.append([lat, lon])
-        if len(coords) >= 2:
-            linhas.append(coords)
-    return linhas
-
-
-def _dentro_da_rota(pontos: list[dict[str, Any]], aneis: list) -> list[dict[str, Any]]:
-    from shapely.geometry import Point, Polygon
-
-    zonas = []
-    for anel in aneis or []:
-        if not anel or len(anel) < 4:
-            continue
-        poly = Polygon([(float(p[1]), float(p[0])) for p in anel])
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if not poly.is_empty:
-            zonas.append(poly.buffer(0.00022))
-    if not zonas:
-        return list(pontos or [])
-    saida = []
-    for ponto in pontos or []:
-        try:
-            marca = Point(float(ponto["longitude"]), float(ponto["latitude"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if any(zona.covers(marca) for zona in zonas):
-            saida.append(ponto)
-    return saida
-
-
-def _nome_caminhao(item: dict[str, Any]) -> str:
-    from .frota import prefixo_da_placa
-
-    placa = str(item.get("placa") or "").strip()
-    prefixo = str(item.get("prefixo") or "").strip() or prefixo_da_placa(placa)
-    partes = [prefixo, placa]
-    return " ".join(parte for parte in partes if parte) or "Caminhão"
-
-
-def _camadas_da_rota(
-    dia: date,
-    codigo: str,
-    aneis: list,
-    frota: list[dict[str, Any]],
-    pontos_por_placa: dict[str, list],
-) -> list[dict[str, Any]]:
-    from .config import ROOT, load_settings
-    from .relatorios import _gps_na_rota, _ler
-
-    settings = load_settings()
-    pasta = Path(settings.output_dir) / dia.isoformat()
-    if not pasta.is_dir():
-        pasta = ROOT / "output" / dia.isoformat()
-    resumo = _ler(pasta, "resumo.json") or {}
-    ordem = {"ATUANDO": 0, "APOIO": 1}
-    candidatos = []
-    for item in frota:
-        cob = next(
-            (
-                linha
-                for linha in (item.get("coberturas_inlog") or [])
-                if str(linha.get("codigo_rota") or "") == codigo
-                and str(linha.get("papel") or "") in {"ATUANDO", "APOIO"}
-            ),
-            None,
-        )
-        if cob is None:
-            continue
-        placa = str(item.get("placa") or "")
-        casado = _gps_na_rota(
-            dia,
-            codigo,
-            aneis,
-            placa,
-            pontos_por_placa,
-            pasta=pasta if pasta.is_dir() else None,
-            resumo=resumo,
-        )
-        tracos = list(casado.get("confirmado") or []) + list(casado.get("estimado") or [])
-        if not tracos:
-            continue
-        candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))
-    candidatos.sort(key=lambda linha: (linha[0], linha[1]))
-    camadas = []
-    for indice, (_ordem, _paradas, item, cob, tracos) in enumerate(candidatos):
-        cor, nome_cor = _CORES_TRACO[indice % len(_CORES_TRACO)]
-        papel = "atuou" if cob.get("papel") == "ATUANDO" else "apoio"
-        camadas.append(
-            {
-                "cor": cor,
-                "tracos": tracos,
-                "rotulo": f"{nome_cor}: {_nome_caminhao(item)} {papel}",
-            }
-        )
-    return camadas
-
-
-def _legenda_tracos(camadas: list[dict[str, Any]], vazio: str) -> str:
-    if not camadas:
-        return vazio
-    return " · ".join(str(item.get("rotulo") or "") for item in camadas) + ". Ponto: parada."
-
-
 def _mapa_da_rota(
     titulo: str,
     codigo: str,
@@ -674,18 +532,16 @@ def _mapa_da_rota(
     pontos: list,
     dia: date,
     frota: list[dict[str, Any]],
-    pontos_por_placa: dict[str, list] | None = None,
 ) -> tuple[str, bytes, str]:
-    camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {})
-    if camadas:
-        legenda = _legenda_tracos(camadas, "")
-        desenhos = camadas
+    feitos, _faltando = _preparar_vias(dia, codigo, tracos, frota)
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": []}
+    if feitos or tracos or pontos:
+        legenda = "Somente o executado. Verde: via feita. Azul: trajeto do caminhão. Ponto: parada."
     else:
-        legenda = "Programada para o dia. Nenhum caminhão coletou nesta rota."
-        desenhos = [{"tracos": tracos, "cor": (29, 78, 137)}]
+        legenda = "Programada para o dia. Nenhuma via foi executada neste turno."
     return (
         titulo,
-        renderizar_mapa([{"aneis": aneis, "rotulo": codigo}], [], pontos, aneis, vias="nenhuma", camadas=desenhos),
+        renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
         legenda,
     )
 
@@ -698,37 +554,21 @@ def _folhas_da_rota(
     pontos: list,
     dia: date,
     frota: list[dict[str, Any]],
-    pontos_por_placa: dict[str, list] | None = None,
-    pct: float | None = None,
 ) -> list[tuple[str, bytes, str]]:
     feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
     base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
-    camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {})
-    if pct is None:
-        titulo_feito = f"{titulo} · realizado"
-        titulo_aberto = f"{titulo} · em aberto"
-        falta_txt = ""
-    else:
-        feito, falta = _partes_da_conta(pct)
-        from .relatorios import _fmt_pct
-
-        titulo_feito = f"{titulo} · feito {_fmt_pct(feito)}"
-        titulo_aberto = f"{titulo} · em aberto · falta {_fmt_pct(falta)}"
-        falta_txt = f" Falta {_fmt_pct(falta)}."
     if faltando:
-        legenda_aberta = "Em aberto." + falta_txt + " A linha vermelha é a rua oficial que o trajeto casado não percorreu."
+        legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
     else:
-        legenda_aberta = "Em aberto." + falta_txt + " O trajeto casado cobriu as ruas oficiais desta rota."
-    if camadas:
-        realizado = renderizar_mapa([base], [], pontos, aneis, vias="nenhuma", camadas=camadas)
-        legenda_feita = _legenda_tracos(camadas, "")
-    else:
-        realizado = renderizar_mapa([base], tracos, pontos, aneis, vias="nenhuma")
-        legenda_feita = "Realizado. A linha é o trajeto do caminhão, na ordem dos pulsos. Ponto: parada."
+        legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
     return [
-        (titulo_feito, realizado, legenda_feita),
         (
-            titulo_aberto,
+            f"{titulo} · realizado",
+            renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
+            "Realizado. A linha verde é a via feita. Azul: por onde o caminhão passou. Ponto: parada.",
+        ),
+        (
+            f"{titulo} · em aberto",
             renderizar_mapa([base], [], [], aneis, vias="abertas"),
             legenda_aberta,
         ),
@@ -748,8 +588,6 @@ def _rotulo_andamento(row: dict[str, Any]) -> str:
         return "Feita"
     if row.get("situacao") == "Parcial":
         return f"Parcial · falta {falta}%"
-    if row.get("situacao") == "Incerta":
-        return f"Incerta · {pct:.0f}%"
     if pct > 0:
         return f"Não feita · falta {falta}%"
     return "Não feita"
@@ -768,7 +606,6 @@ def _barra_execucao(pdf: canvas.Canvas, x: float, y: float, largura: float, altu
 _COR_SITUACAO = {
     "Feita": (0.12, 0.45, 0.28),
     "Parcial": (0.62, 0.40, 0.02),
-    "Incerta": (0.45, 0.35, 0.12),
     "Não feita": (0.68, 0.16, 0.10),
 }
 
@@ -821,14 +658,13 @@ def _pdf_frota_fiscal(
 
     feitas = [r for r in balanco if r["situacao"] == "Feita"]
     parciais = [r for r in balanco if r["situacao"] == "Parcial"]
-    incertas = [r for r in balanco if r["situacao"] == "Incerta"]
     nao = [r for r in balanco if r["situacao"] == "Não feita"]
     y = cabecalho(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(fonte, 10)
     abertura = (
-        f"Período {periodo}. Verde = eixo confirmado; vermelho = faltando. "
-        "Feita só com casamento firme na malha (≥90%). Incerta = cobertura sem certeza do trajeto."
+        f"Período {periodo}. A barra verde é o executado e a vermelha é o que faltou. "
+        "Feita só a partir de 90%. De 45% a 89% é parcial."
     )
     for linha in _quebrar(abertura, fonte, 10, largura - 32):
         pdf.drawString(16, y, linha)
@@ -838,19 +674,18 @@ def _pdf_frota_fiscal(
         (str(len(balanco)), "programadas", (0.16, 0.20, 0.27)),
         (str(len(feitas)), "feitas", _COR_SITUACAO["Feita"]),
         (str(len(parciais)), "parciais", _COR_SITUACAO["Parcial"]),
-        (str(len(incertas)), "incertas", _COR_SITUACAO["Incerta"]),
         (str(len(nao)), "não feitas", _COR_SITUACAO["Não feita"]),
     ]
-    card_w = max(90.0, (largura - 32 - 8 * (len(cartoes) - 1)) / max(len(cartoes), 1))
+    card_w = 150
     for indice, (numero, rotulo, cor) in enumerate(cartoes):
-        x = 16 + indice * (card_w + 8)
+        x = 16 + indice * (card_w + 12)
         pdf.setFillColorRGB(*cor)
         pdf.roundRect(x, y - 54, card_w, 54, 6, fill=1, stroke=0)
         pdf.setFillColorRGB(1, 1, 1)
-        pdf.setFont(negrito, 18)
-        pdf.drawString(x + 10, y - 30, numero)
-        pdf.setFont(fonte, 8)
-        pdf.drawString(x + 10, y - 46, rotulo)
+        pdf.setFont(negrito, 20)
+        pdf.drawString(x + 12, y - 30, numero)
+        pdf.setFont(fonte, 9)
+        pdf.drawString(x + 12, y - 46, rotulo)
     y -= 74
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(negrito, 11)
@@ -991,7 +826,7 @@ def _pdf_frota_fiscal(
         )
         pdf.setFillColorRGB(0.11, 0.14, 0.19)
         pdf.setFont(fonte, 8)
-        pdf.drawString(16, 8, legenda[:240])
+        pdf.drawString(16, 8, legenda[:170])
     pdf.save()
     return buffer.getvalue()
 
@@ -1003,18 +838,20 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     resumo = _ler(pasta, "resumo.json")
     setores = _ler(pasta, "setores.json") or []
     frota = _ler(pasta, "frota.json") or []
-    from .relatorios import _aplicar_apoio
-
-    _aplicar_apoio(frota)
     if not resumo:
         return _sem_dia(dia), f"frota-{dia.isoformat()}.pdf"
     balanco = balanco_frota(setores, frota)
-    pontos_por_placa = _ler(pasta, "pontos.json") or {}
+    gps_por_placa = {
+        str(caminhao.get("placa") or ""): caminhao.get("gps") or []
+        for caminhao in (resumo.get("caminhoes") or [])
+    }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(100)
+    _abrir_prazo_mapa(40)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
+        placas = set(row.get("placas") or [])
+        tracos = [traco for placa in placas for traco in (gps_por_placa.get(placa) or [])]
         estado = _rotulo_andamento(row)
         titulo = (
             f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
@@ -1025,17 +862,15 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 titulo,
                 row["codigo"],
                 _aneis(row),
-                [],
+                tracos,
                 row.get("pontos") or [],
                 dia,
                 frota,
-                pontos_por_placa,
             )
         except Exception as exc:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
             continue
         mapas.append((folha_titulo, png, legenda, cor))
-        gc.collect()
     periodo = resumo.get("periodo") or _turno(dia)
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:
@@ -1148,7 +983,7 @@ def _pdf_leitura(
         )
         pdf.setFillColorRGB(0.11, 0.14, 0.19)
         pdf.setFont(fonte, 8)
-        pdf.drawString(16, 8, legenda[:240])
+        pdf.drawString(16, 8, legenda[:170])
     pdf.save()
     return buffer.getvalue()
 
@@ -1172,7 +1007,6 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     for caminhao in rel.get("caminhoes") or []:
         if caminhao.get("papel") in {"ATUANDO", "APOIO"}:
             tracos.extend(caminhao.get("gps") or [])
-            tracos.extend(caminhao.get("gps_estimado") or [])
             pontos.extend(caminhao.get("paradas_pontos") or [])
     tabela = [["Caminhão", "Papel", "Paradas", "Minutos", "%"]]
     for caminhao in rel.get("caminhoes") or []:
@@ -1192,13 +1026,8 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     if len(tabela) == 1:
         tabela.append(["—", "Passagem", "0", "0", "0%"])
     aneis = _aneis(setor)
-    titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao}".strip()
+    titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao} · {_fmt_pct(rel.get('percentual'))}"
     nome = f"rota-{codigo}-{dia.isoformat()}.pdf"
-    pasta = output_dir / dia.isoformat()
-    from .relatorios import _aplicar_apoio
-
-    frota_mapa = _ler(pasta, "frota.json") or []
-    _aplicar_apoio(frota_mapa)
     mapas = [
         (folha_titulo, png, legenda, cor)
         for folha_titulo, png, legenda in _folhas_da_rota(
@@ -1208,16 +1037,14 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             tracos,
             pontos,
             dia,
-            frota_mapa,
-            _ler(pasta, "pontos.json") or {},
-            pct=float(rel.get("percentual") or 0),
+            _ler(output_dir / dia.isoformat(), "frota.json") or [],
         )
     ]
     return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
 
 
 def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
-    from .relatorios import _aplicar_apoio, _conclusao, _fmt_pct, _nome_conclusao, montar
+    from .relatorios import _conclusao, _fmt_pct, _nome_conclusao, montar
 
     rel = montar(output_dir, dia, "placa", consulta)
     caminhoes = rel.get("caminhoes") or []
@@ -1225,8 +1052,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
         return _pdf("Segtrack · placa", list(rel.get("texto") or []), [], b""), "placa.pdf"
     caminhao = caminhoes[0]
     frota = _ler(output_dir / dia.isoformat(), "frota.json") or []
-    _aplicar_apoio(frota)
-    tracos = list(caminhao.get("gps") or []) + list(caminhao.get("gps_estimado") or [])
+    tracos = caminhao.get("gps") or []
     titulo = f"Segtrack · {rel.get('titulo') or caminhao.get('placa') or consulta}"
     tabela = [["Rota", "Situação", "Papel", "Paradas", "Minutos", "%"]]
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
@@ -1247,7 +1073,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             ]
         )
         codigo = str(linha.get("codigo") or "")
-        nome_setor = f"{codigo} {conclusao}"
+        nome_setor = f"{codigo} {conclusao} · {_fmt_pct(pct)}"
         for folha_titulo, png, legenda in _folhas_da_rota(
             nome_setor,
             codigo,
@@ -1256,8 +1082,6 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             linha.get("paradas_pontos") or [],
             dia,
             frota,
-            _ler(output_dir / dia.isoformat(), "pontos.json") or {},
-            pct=pct,
         ):
             mapas.append((folha_titulo, png, legenda, cor))
     if len(tabela) == 1:

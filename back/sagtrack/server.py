@@ -4,7 +4,6 @@ import json
 import mimetypes
 import os
 import threading
-import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,56 +37,24 @@ def _aplicar(settings: Settings, corpo: dict[str, Any]) -> Settings:
     return Cls(**{**settings.__dict__, **novo.__dict__})
 
 
-def _rodar(settings: Settings, com_pdf: bool = True, so_pulsos: bool = False) -> None:
+def _rodar(settings: Settings) -> None:
     def progresso(msg: str) -> None:
         with JOB["lock"]:
             JOB["mensagens"].append(msg)
             del JOB["mensagens"][:-40]
-        from .whatsapp import notificar_andamento_frota
-
-        notificar_andamento_frota(settings, msg)
 
     try:
-        resumo = executar(settings, on_progress=progresso, so_pulsos=so_pulsos)
-        from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
+        executar(settings, on_progress=progresso)
+        from .whatsapp import preparar_pdf_frota
 
-        if so_pulsos:
-            return
-        progresso("Conta gravada. Preparando envio no WhatsApp...")
-        if isinstance(resumo, dict) and resumo.get("falha_historico"):
-            avisar_coleta_pronta(
-                settings,
-                falha="A Segtrack não devolveu o histórico dos caminhões. Peça de novo em alguns minutos.",
-            )
-        else:
-            avisar_coleta_pronta(settings)
-            if com_pdf:
-                preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
+        preparar_pdf_frota(settings, settings.data_rota, on_progress=progresso)
     except Exception as exc:
         with JOB["lock"]:
             JOB["erro"] = str(exc)
             JOB["mensagens"].append(f"Falhou: {exc}")
-        from .whatsapp import avisar_coleta_pronta
-
-        avisar_coleta_pronta(settings, falha=str(exc))
     finally:
         with JOB["lock"]:
             JOB["rodando"] = False
-        from .whatsapp import _fechar_frota_do_coletor
-
-        _fechar_frota_do_coletor()
-
-
-def _rota_vista(caminho: str) -> tuple[str, str] | None:
-    import re
-
-    pagina = re.fullmatch(r"/r/([A-Za-z0-9_-]{8,}\.[A-Za-z0-9]{16,})", caminho)
-    if pagina:
-        return pagina.group(1), "pagina"
-    api = re.fullmatch(r"/api/r/([A-Za-z0-9_-]{8,}\.[A-Za-z0-9]{16,})(?:/(mapa|pdf))?", caminho)
-    if api:
-        return api.group(1), api.group(2) or "json"
-    return None
 
 
 def _origem_permitida(origem: str) -> bool:
@@ -135,45 +102,6 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-    def _bytes(self, codigo: int, dados: bytes, tipo: str, nome: str = "") -> None:
-        self.send_response(codigo)
-        self._cors()
-        self.send_header("Content-Type", tipo)
-        self.send_header("Content-Length", str(len(dados)))
-        self.send_header("Cache-Control", "no-store")
-        if nome:
-            self.send_header("Content-Disposition", f'attachment; filename="{nome}"')
-        self.end_headers()
-        self.wfile.write(dados)
-
-    def _vista(self, destino: tuple[str, str], url: Any) -> None:
-        from .vista import abrir, dados, html_pagina, mapa, pdf
-
-        token, modo = destino
-        if modo == "pagina":
-            self._bytes(200, html_pagina().encode("utf-8"), "text/html; charset=utf-8")
-            return
-        claims = abrir(token)
-        if claims is None:
-            self._json(410, {"erro": "Este link expirou. Peça o relatório de novo no grupo."})
-            return
-        if modo == "json":
-            self._json(200, dados(self.settings, claims))
-            return
-        if modo == "mapa":
-            codigo = (parse_qs(url.query).get("codigo") or [""])[0]
-            self._json(200, mapa(self.settings, claims, codigo))
-            return
-        try:
-            codigo, arquivo, nome = pdf(self.settings, claims)
-        except Exception as exc:
-            self._json(500, {"erro": str(exc)})
-            return
-        if codigo == 202:
-            self._json(202, {"estado": "montando"})
-            return
-        self._bytes(200, arquivo, "application/pdf", nome)
-
     def _arquivo(self, caminho: Path) -> None:
         if not caminho.is_file():
             self.send_error(404)
@@ -201,10 +129,6 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/health":
             self._json(200, {"status": "ok", "servico": "segtrack"})
-            return
-        vista = _rota_vista(url.path)
-        if vista is not None:
-            self._vista(vista, url)
             return
         if url.path == "/config.js":
             self._arquivo(FRONT / "config.js")
@@ -341,18 +265,12 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"erro": "JSON inválido"})
             return
-        from .whatsapp import conta_recente
-
-        settings = _aplicar(self.settings, corpo)
-        if conta_recente(settings, settings.data_rota):
-            self._json(200, {"ok": True, "reutilizado": True, "data": settings.data_rota.isoformat()})
-            return
         with JOB["lock"]:
             if JOB["rodando"]:
                 self._json(409, {"erro": "Já existe uma coleta em andamento."})
                 return
+            settings = _aplicar(self.settings, corpo)
             JOB["rodando"] = True
-            JOB["desde"] = time.time()
             JOB["erro"] = ""
             JOB["data"] = settings.data_rota.isoformat()
             JOB["mensagens"] = [f"Iniciando {JOB['data']}"]
@@ -370,24 +288,7 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
 
         manter()
 
-    def mapa_ao_vivo() -> None:
-        from .whatsapp import relogio_frota
-
-        print("Frota ao vivo: relógio ligado (pulsos a cada ~5 min).", flush=True)
-        relogio_frota(settings)
-
-    def aquecer_malha() -> None:
-        try:
-            from .gps import malha_oficial
-
-            n = len(malha_oficial().geoms)
-            print(f"Malha viária pronta · {n} vias", flush=True)
-        except Exception as exc:
-            print(f"Malha viária: {exc}", flush=True)
-
     threading.Thread(target=preparar_whatsapp, daemon=True).start()
-    threading.Thread(target=mapa_ao_vivo, daemon=True).start()
-    threading.Thread(target=aquecer_malha, daemon=True).start()
     servidor = ThreadingHTTPServer((host, porta), Handler)
     print(f"Sala técnica Segtrack em http://127.0.0.1:{porta}", flush=True)
     print(f"Configuração do grupo em http://127.0.0.1:{porta}/whatsapp", flush=True)

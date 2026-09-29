@@ -332,11 +332,16 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"erro": "JSON inválido"})
             return
+        from .whatsapp import conta_recente
+
+        settings = _aplicar(self.settings, corpo)
+        if conta_recente(settings, settings.data_rota):
+            self._json(200, {"ok": True, "reutilizado": True, "data": settings.data_rota.isoformat()})
+            return
         with JOB["lock"]:
             if JOB["rodando"]:
                 self._json(409, {"erro": "Já existe uma coleta em andamento."})
                 return
-            settings = _aplicar(self.settings, corpo)
             JOB["rodando"] = True
             JOB["desde"] = time.time()
             JOB["erro"] = ""

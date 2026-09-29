@@ -11,7 +11,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,8 @@ _GERANDO = threading.Lock()
 _CONFIG_LOCK = threading.Lock()
 _AVISO: dict[str, Any] | None = None
 _PENDENTES: list[dict[str, Any]] = []
+_ROTA_PEDIDA: dict[tuple[str, str, str], float] = {}
+_REUSO_S = 3600
 _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
 _ULTIMO_CONNECT = 0.0
@@ -674,6 +676,58 @@ def _chave_pdf(tipo: str, consulta: str) -> str:
     return f"{tipo}-{(consulta or '').strip().upper()}-ruas3.pdf"
 
 
+def conta_recente(settings: Settings, dia: date, segundos: int = _REUSO_S) -> bool:
+    """A conta do turno ainda vale. Nesse prazo ninguém busca os pulsos de novo."""
+    arquivo = settings.output_dir / dia.isoformat() / "resumo.json"
+    if not arquivo.is_file():
+        return False
+    try:
+        dados = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        dados = {}
+    marca = str((dados or {}).get("congelado_em") or "")
+    if len(marca) >= 19:
+        try:
+            quando = datetime.fromisoformat(marca[:19])
+            agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None)
+            return (agora - quando).total_seconds() < segundos
+        except ValueError:
+            pass
+    return time.time() - arquivo.stat().st_mtime < segundos
+
+
+def _rota_repetida(grupo: str, consulta: str, dia: date) -> bool:
+    """A mesma rota pedida outra vez, dentro da hora, pode atualizar o caminhão."""
+    chave = (grupo, (consulta or "").strip().upper(), dia.isoformat())
+    agora = time.time()
+    with _LOCK:
+        anterior = _ROTA_PEDIDA.get(chave)
+        _ROTA_PEDIDA[chave] = agora
+    return anterior is not None and agora - anterior < _REUSO_S
+
+
+def _entregar_guardado(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> None:
+    """Manda o PDF já gerado. Não abre coleta nem monta o mapa de novo."""
+    nome = _nome_pedido(tipo, consulta)
+    pasta = settings.output_dir / dia.isoformat()
+    pdf = _ultimo_pdf(pasta, _chave_pdf(tipo, consulta))
+    fresco = pdf is not None and time.time() - pdf.stat().st_mtime < _REUSO_S
+    if fresco and pdf is not None:
+        enviar_texto(
+            settings,
+            grupo,
+            f"A conta de {nome} desta hora já está pronta. Segue o mesmo PDF, sem buscar os pulsos de novo.",
+        )
+        nome_arquivo = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
+        enviar_pdf(settings, grupo, pdf.read_bytes(), nome_arquivo)
+        print(f"WhatsApp: PDF guardado · {tipo} {consulta}".strip(), flush=True)
+        return
+    _enviar_relatorio(settings, grupo, tipo, consulta, dia)
+    if pdf is None:
+        agendar_pdf(settings, dia, tipo, consulta, forcar=False)
+    print(f"WhatsApp: conta guardada · {tipo} {consulta}".strip(), flush=True)
+
+
 def _montar_pdf(settings: Settings, dia: date, tipo: str, consulta: str, *, forcar: bool) -> None:
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
@@ -738,6 +792,8 @@ def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tupl
     chave = _chave_pdf(tipo, consulta)
     nome = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
     pronto = _ultimo_pdf(pasta, chave)
+    if pronto is not None and time.time() - pronto.stat().st_mtime < _REUSO_S:
+        return 200, pronto.read_bytes(), nome
     if pronto is None or _pdf_atrasado(pasta, chave):
         agendar_pdf(settings, dia, tipo, consulta, forcar=pronto is not None)
     if pronto is None:
@@ -1051,6 +1107,12 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
+        recente = conta_recente(settings, dia)
+        atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
+        if recente and not atualizar_rota:
+            _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
+            _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})
+            return
         _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
         from .server import JOB
 

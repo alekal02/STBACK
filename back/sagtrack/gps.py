@@ -749,7 +749,7 @@ class Malha:
         x, y = TO_UTM.transform(float(coord[1]), float(coord[0]))
         ponto = Point(x, y)
         melhor: tuple[float, int, float, float] | None = None
-        for indice in self._arvore.query(ponto.buffer(raio_m)):
+        for indice in self._arvore.query(ponto.buffer(raio_m).envelope):
             aresta = int(indice)
             geom = self.geoms[aresta]
             dist = float(geom.distance(ponto))
@@ -783,7 +783,7 @@ class Malha:
         x, y = TO_UTM.transform(float(coord[1]), float(coord[0]))
         ponto = Point(x, y)
         achados: list[tuple[float, float, int, float]] = []
-        for indice in self._arvore.query(ponto.buffer(raio_m)):
+        for indice in self._arvore.query(ponto.buffer(raio_m).envelope):
             aresta = int(indice)
             geom = self.geoms[aresta]
             dist = float(geom.distance(ponto))
@@ -792,6 +792,8 @@ class Malha:
             along = float(geom.project(ponto))
             nota = dist + _penalidade_rumo(geom, along, rumo)
             achados.append((nota, dist, aresta, along))
+            if len(achados) >= limite * 8:
+                break
         achados.sort(key=lambda item: item[0])
         return [_Snap(aresta, along, dist) for _nota, dist, aresta, along in achados[:limite]]
 
@@ -823,6 +825,48 @@ class Malha:
                         vistos.add(outro)
                         fila.append(outro)
         return total
+
+    def recorte(self, pontos: list[Ponto], folga_m: float = 350.0) -> Malha:
+        """Submalha só nas vias perto dos pulsos. O relatório e a coleta usam isto para não varrer a cidade."""
+        from shapely.geometry import box
+        from shapely.strtree import STRtree
+
+        from .mapa import TO_UTM
+
+        if self._arvore is None or not pontos:
+            return self
+        xs: list[float] = []
+        ys: list[float] = []
+        for lat, lon in pontos:
+            x, y = TO_UTM.transform(float(lon), float(lat))
+            xs.append(x)
+            ys.append(y)
+        if not xs:
+            return self
+        zona = box(min(xs) - folga_m, min(ys) - folga_m, max(xs) + folga_m, max(ys) + folga_m)
+        indices = sorted({int(i) for i in self._arvore.query(zona)})
+        if not indices:
+            return self
+        if len(indices) >= len(self.geoms) * 0.55:
+            return self
+        nova = Malha()
+        mapa_aresta: dict[int, int] = {}
+        for velho in indices:
+            novo = len(nova.geoms)
+            mapa_aresta[velho] = novo
+            nova.geoms.append(self.geoms[velho])
+            nova.comp.append(self.comp[velho])
+            nova.custo_ida.append(self.custo_ida[velho])
+            nova.custo_volta.append(self.custo_volta[velho])
+            nova.no0.append(self.no0[velho])
+            nova.no1.append(self.no1[velho])
+        for velho, novo in mapa_aresta.items():
+            no_a, no_b = nova.no0[novo], nova.no1[novo]
+            nova.adj.setdefault(no_a, []).append((no_b, novo, True))
+            nova.adj.setdefault(no_b, []).append((no_a, novo, False))
+        if nova.geoms:
+            nova._arvore = STRtree(nova.geoms)
+        return nova
 
     def caminho(self, origem: _Snap, destino: _Snap, limite_m: float) -> tuple[list[Ponto], float] | None:
         import heapq
@@ -1322,7 +1366,7 @@ def _viterbi(
     camadas = []
     for indice, (_momento, coord, _vel, _sigma) in enumerate(grupo):
         rumo = _rumo_utm(grupo[indice - 1][1], coord) if indice else None
-        camadas.append(malha.candidatos(coord, _RAIO_CASAMENTO_M, rumo=rumo, limite=4))
+        camadas.append(malha.candidatos(coord, _RAIO_CASAMENTO_M, rumo=rumo, limite=3))
     neg = -1e12
     dp: list[list[float]] = []
     anterior: list[list[int]] = []
@@ -1561,6 +1605,8 @@ def _nucleo_casamento(
         malha = Malha.de_wgs(vias) if vias is not None else malha_oficial()
     if not malha.geoms:
         return vazio
+    if vias is None and len(seguidos) >= 2 and len(malha.geoms) > 2500:
+        malha = malha.recorte([coord for _m, coord, _v, _s in seguidos], folga_m=420.0)
 
     confirmado: list[list[list[float]]] = []
     estimado: list[list[list[float]]] = []

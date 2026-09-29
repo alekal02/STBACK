@@ -791,19 +791,93 @@ def _achar_caminhao(frota: list[dict[str, Any]], consulta: str) -> dict[str, Any
     return None
 
 
+def _traco_dentro(tracos: list, aneis: list) -> list[list[list[float]]]:
+    """Mantém só o trecho do trajeto casado que entra no polígono da rota."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    zonas = []
+    for anel in aneis or []:
+        coords = [(float(p[1]), float(p[0])) for p in anel if len(p) >= 2]
+        if len(coords) < 4:
+            continue
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+        poly = Polygon(coords)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        zonas.append(poly.buffer(0.00035))
+    if not zonas:
+        return list(tracos or [])
+    zona = unary_union(zonas)
+    saida: list[list[list[float]]] = []
+    for trecho in tracos or []:
+        if not trecho or len(trecho) < 2:
+            continue
+        atual: list[list[float]] = []
+        for ponto in trecho:
+            if len(ponto) < 2:
+                continue
+            dentro = zona.covers(Point(float(ponto[1]), float(ponto[0])))
+            if dentro:
+                atual.append([float(ponto[0]), float(ponto[1])])
+                continue
+            if len(atual) >= 2:
+                saida.append(atual)
+            atual = []
+        if len(atual) >= 2:
+            saida.append(atual)
+        if not saida and len(trecho) >= 2:
+            # trecho atravessa a rota sem vértice dentro: corta a linha
+            try:
+                linha = LineString([(float(p[1]), float(p[0])) for p in trecho if len(p) >= 2])
+                inter = linha.intersection(zona)
+            except Exception:
+                continue
+            partes = [inter] if inter.geom_type == "LineString" else list(getattr(inter, "geoms", []) or [])
+            for parte in partes:
+                if parte.geom_type != "LineString" or len(parte.coords) < 2:
+                    continue
+                saida.append([[float(y), float(x)] for x, y in parte.coords])
+    return saida
+
+
 def _gps_na_rota(
     dia: date,
     codigo: str,
     aneis: list,
     placa: str,
     pontos_por_placa: dict[str, list],
+    *,
+    pasta: Path | None = None,
+    resumo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .gps import casar_tracos
     from .pdfmapa import _dentro_da_rota
 
     del codigo
+    # Trajeto do dia já casado: só recorta no polígono. Evita HMM de novo na busca.
+    if resumo:
+        folha = next(
+            (c for c in (resumo.get("caminhoes") or []) if str(c.get("placa") or "") == placa),
+            None,
+        )
+        if folha and (folha.get("gps") or folha.get("gps_estimado")):
+            return {
+                "confirmado": _traco_dentro(folha.get("gps") or [], aneis),
+                "estimado": _traco_dentro(folha.get("gps_estimado") or [], aneis),
+                "deslocamento": _traco_dentro(folha.get("gps_deslocamento") or [], aneis),
+                "original": _traco_dentro(folha.get("gps_original") or [], aneis),
+                "disponivel": True,
+                "resumo": folha.get("casamento") or {},
+            }
     brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-    return casar_tracos(brutos, dia=dia)
+    return casar_tracos(
+        brutos,
+        dia=dia,
+        placa=placa,
+        pasta_cache=(pasta / "casamento") if pasta else None,
+    )
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:
@@ -839,6 +913,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
         }
     codigo = str(setor.get("codigo") or "")
     pontos_salvos = _ler(pasta, "pontos.json") or {}
+    resumo = _ler(pasta, "resumo.json") or {}
     presentes = []
     feitos_rota: list = []
     faltando_rota: list = []
@@ -861,7 +936,15 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
                 melhor_faltando = pct_cob
                 faltando_rota = faltando
         casado = (
-            _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
+            _gps_na_rota(
+                dia,
+                codigo,
+                setor.get("poligonos") or [],
+                str(item.get("placa") or ""),
+                pontos_salvos,
+                pasta=pasta,
+                resumo=resumo,
+            )
             if com_gps and papel in {"ATUANDO", "APOIO"}
             else {}
         )

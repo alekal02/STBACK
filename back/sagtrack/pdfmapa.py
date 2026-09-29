@@ -607,8 +607,14 @@ def _camadas_da_rota(
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list],
 ) -> list[dict[str, Any]]:
-    from .gps import casar_tracos
+    from .config import ROOT, load_settings
+    from .relatorios import _gps_na_rota, _ler
 
+    settings = load_settings()
+    pasta = Path(settings.output_dir) / dia.isoformat()
+    if not pasta.is_dir():
+        pasta = ROOT / "output" / dia.isoformat()
+    resumo = _ler(pasta, "resumo.json") or {}
     ordem = {"ATUANDO": 0, "APOIO": 1}
     candidatos = []
     for item in frota:
@@ -624,9 +630,16 @@ def _camadas_da_rota(
         if cob is None:
             continue
         placa = str(item.get("placa") or "")
-        brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-        casado = casar_tracos(brutos, dia=dia)
-        tracos = list(casado["confirmado"]) + list(casado["estimado"])
+        casado = _gps_na_rota(
+            dia,
+            codigo,
+            aneis,
+            placa,
+            pontos_por_placa,
+            pasta=pasta if pasta.is_dir() else None,
+            resumo=resumo,
+        )
+        tracos = list(casado.get("confirmado") or []) + list(casado.get("estimado") or [])
         if not tracos:
             continue
         candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))

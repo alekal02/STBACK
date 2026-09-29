@@ -21,8 +21,8 @@ RAIO_PARADA_M = 35.0
 PARADA_MIN_S = 50.0
 PARADA_COLETA_MAX_S = 15 * 60
 VEL_PARADA = 6.0
-FEITA_MIN = 90.0
-PARCIAL_MIN = 45.0
+FEITA_MIN = 70.0
+PARCIAL_MIN = 20.0
 # O mapa marca diurno e noturno. A coleta do dia acaba às 16:00; o noturno segue até 05:59.
 MINUTO_DIURNO_INI = 6 * 60
 MINUTO_DIURNO_FIM = 16 * 60
@@ -496,7 +496,7 @@ def _texto_decisao(dia: date, balanco: list[dict[str, Any]]) -> list[str]:
             f"{_conta(len(parciais), 'parcial', 'parciais')}, "
             f"{_conta(len(nao), 'não feita', 'não feitas')}."
         ),
-        "Feita é cobertura de pelo menos 90% das ruas oficiais, com parada de coleta dentro do polígono e no turno da rota.",
+        "Feita a partir de 70% das ruas. De 20% a 69% é parcial. Abaixo de 20% conta como apoio ou passagem.",
     ]
     for faixa in ("Diurno", "Noturno", "Noturno diário", "Sem turno"):
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
@@ -557,7 +557,7 @@ def relatorio_frota(output_dir: Path, dia: date) -> dict[str, Any]:
     texto = _texto_decisao(dia, balanco)
     texto.append(
         f"{len(caminhoes)} caminhão(ões) com pulso na cidade. "
-        "Apoio só entra se a segunda rota teve coleta: pelo menos 45% das ruas e 15 minutos parado. Cruzar o polígono não é apoio."
+        "Apoio só entra se a segunda rota teve coleta: pelo menos 20% das ruas e 15 minutos parado. Abaixo disso é passagem."
     )
     codigos_coleta = {
         str(linha.get("codigo") or "")
@@ -767,7 +767,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
             )
     linhas.append(
         "O percentual conta só quem atuou ou fez apoio nesta rota. "
-        "Apoio exige 45% das ruas e 15 minutos parado. Passagem fica de fora."
+        "Apoio exige 20% das ruas e 15 minutos parado. Abaixo de 20% fica como passagem."
     )
     return {
         "tipo": "rota",

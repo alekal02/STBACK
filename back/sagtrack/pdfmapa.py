@@ -60,11 +60,13 @@ def _turno(dia: date) -> str:
 
 
 def _conclusao(pct: float, teve: bool) -> str:
+    from .cobertura import FEITA_MIN, PARCIAL_MIN
+
     if not teve:
         return "Sem coleta"
-    if pct >= 90:
+    if pct >= FEITA_MIN:
         return "Feita"
-    if pct >= 45:
+    if pct >= PARCIAL_MIN:
         return "Parcial"
     return "Não feita"
 
@@ -1082,7 +1084,7 @@ def _pdf_frota_fiscal(
     pdf.setFont(fonte, 10)
     abertura = (
         f"Período {periodo}. A barra verde é o executado e a vermelha é o que faltou. "
-        "Feita só a partir de 90%. De 45% a 89% é parcial."
+        "Feita a partir de 70%. De 20% a 69% é parcial. Abaixo de 20%: apoio ou passagem."
     )
     for linha in _quebrar(abertura, fonte, 10, largura - 32):
         pdf.drawString(16, y, linha)
@@ -1178,7 +1180,7 @@ def _pdf_frota_fiscal(
         pdf.drawString(
             16,
             yy,
-            "Verde: executado. Vermelho: o que faltou. Feita a partir de 90%. De 45% a 89% é parcial.",
+            "Verde: executado. Vermelho: o que faltou. Feita ≥70%. Parcial 20–69%. Abaixo: apoio/passagem.",
         )
         yy -= 14
         pdf.setFillColorRGB(0.11, 0.14, 0.19)

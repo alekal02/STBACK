@@ -30,6 +30,7 @@ _ULTIMO_ENVIO: dict[str, Any] = {}
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
 _PACOTE_MIN = max(5, int(os.getenv("WHATSAPP_PACOTE_MIN", "30") or "30"))
+_REGRAS_SITUACAO = "70/20"
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -663,6 +664,8 @@ def _pacote_ativo(pasta: Path) -> dict[str, Any] | None:
     pac = _ler_pacote(pasta)
     if not pac:
         return None
+    if str(pac.get("regras_situacao") or "") != _REGRAS_SITUACAO:
+        return None
     try:
         valido_ate = float(pac.get("valido_ate") or 0)
     except (TypeError, ValueError):
@@ -702,6 +705,7 @@ def _abrir_pacote(pasta: Path, *, congelado_em: str = "") -> dict[str, Any]:
         "criado_em": agora,
         "valido_ate": agora + _PACOTE_MIN * 60,
         "congelado_em": congelado_em,
+        "regras_situacao": _REGRAS_SITUACAO,
         "arquivos": {},
         "textos": {},
     }
@@ -847,7 +851,7 @@ def _texto_frota(settings: Settings, dia: date) -> str:
     linhas = [
         f"*Frota {dia.strftime('%d/%m/%Y')}*",
         f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · {nao} não feitas.",
-        "Feita só a partir de 90%. De 45% a 89% é parcial.",
+        "Feita a partir de 70%. De 20% a 69% é parcial. Abaixo de 20%: apoio ou passagem.",
     ]
     if len(corte) >= 16:
         linhas.append(f"Pulsos até {corte[11:16]}. Nenhum pulso depois desse horário entrou na conta.")
@@ -1070,24 +1074,40 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 return
 
             if tipo == "frota":
-                # Abre pacote novo: atualiza Segtrack, gera frota e congela por 30 min.
-                enviar_texto(
-                    settings,
-                    mensagem["grupo"],
-                    f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
-                    f"e montando o PDF. Pacote válido por {_PACOTE_MIN} min no grupo.",
+                # Abre pacote novo. Se a conta do turno ainda é fresca, só remonta o PDF.
+                resumo_arquivo = pasta_dia / "resumo.json"
+                idade_s = (
+                    time.time() - resumo_arquivo.stat().st_mtime
+                    if resumo_arquivo.is_file()
+                    else 10**9
                 )
-                try:
-                    _atualizar_conta(
+                if idade_s <= _PACOTE_MIN * 60:
+                    enviar_texto(
                         settings,
-                        dia,
-                        forcar=True,
-                        aviso=f"WhatsApp frota · {dia.isoformat()}",
+                        mensagem["grupo"],
+                        f"Recebi a frota. A conta de {_rotulo_turno(dia)} já está atualizada. "
+                        f"Montando o PDF com as regras atuais (pacote de {_PACOTE_MIN} min).",
                     )
-                except RuntimeError as exc:
-                    enviar_texto(settings, mensagem["grupo"], str(exc))
-                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
-                    return
+                    _invalidar_cache_pdf(pasta_dia, "frota")
+                    _invalidar_pacote(pasta_dia)
+                else:
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
+                        f"e montando o PDF. Pacote válido por {_PACOTE_MIN} min no grupo.",
+                    )
+                    try:
+                        _atualizar_conta(
+                            settings,
+                            dia,
+                            forcar=True,
+                            aviso=f"WhatsApp frota · {dia.isoformat()}",
+                        )
+                    except RuntimeError as exc:
+                        enviar_texto(settings, mensagem["grupo"], str(exc))
+                        _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                        return
                 _ULTIMO_ENVIO["fase"] = "resumo"
                 resumo = _texto_frota(settings, dia)
                 if resumo:
@@ -1103,7 +1123,6 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 _ULTIMO_ENVIO["resumo_s"] = resumo_s
                 arquivo, nome = _gerar(settings, tipo, consulta, dia)
                 congelado = ""
-                resumo_dia = {}
                 try:
                     resumo_dia = json.loads((pasta_dia / "resumo.json").read_text(encoding="utf-8"))
                     congelado = str(resumo_dia.get("congelado_em") or "")

@@ -16,8 +16,8 @@ TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
 RAIO_M = 25.0
 PASSO_M = 35.0
 SALTO_GPS_M = 160.0
-FEITA_MIN = 90.0
-PARCIAL_MIN = 45.0
+FEITA_MIN = 70.0
+PARCIAL_MIN = 20.0
 
 
 def _trecho_coberto(trecho: LineString, gps_geom, raio_m: float) -> bool:

@@ -203,13 +203,13 @@ def _abrir_prazo_mapa(segundos: float) -> None:
 
 
 def _provedor_mapa() -> str:
-    """Base do mapa: carto/osm (OpenStreetMap), google (API key) ou esri."""
-    bruto = (os.getenv("SAGTRACK_MAPA_BASE") or "carto").strip().lower()
+    """Base do mapa: osm (padrão), carto, google (API key) ou esri."""
+    bruto = (os.getenv("SAGTRACK_MAPA_BASE") or "osm").strip().lower()
     if bruto == "google" and not (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip():
-        return "carto"
+        return "osm"
     if bruto in {"osm", "carto", "google", "esri"}:
         return bruto
-    return "carto"
+    return "osm"
 
 
 def _url_tile(provedor: str, zoom: int, x: int, y: int) -> str:
@@ -220,8 +220,8 @@ def _url_tile(provedor: str, zoom: int, x: int, y: int) -> str:
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
         )
-    # OpenStreetMap
-    return f"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
+    # OpenStreetMap (mirror FR — sem API key)
+    return f"https://a.tile.openstreetmap.fr/osmfr/{zoom}/{x}/{y}.png"
 
 
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:

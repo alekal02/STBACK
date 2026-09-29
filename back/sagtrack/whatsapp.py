@@ -1161,12 +1161,13 @@ def notificar_andamento_frota(settings: Settings, msg: str) -> None:
 
 
 def relogio_frota(settings: Settings) -> None:
-    """A cada ~2 min guarda pulsos novos e atualiza o mapa. O PDF só nasce no pedido."""
+    """Guarda pulsos a cada ~5 min. Casamento completo a cada 3 ciclos (~15 min). PDF só no pedido."""
     from .config import aplicar_periodo, dia_operacional, janela_datetime
     from .server import JOB, _rodar
 
     # Deixa a thread de aquecimento carregar a malha antes da primeira coleta.
     time.sleep(45)
+    ciclos = 0
     while True:
         try:
             if _coleta_grupo_pendente():
@@ -1177,15 +1178,28 @@ def relogio_frota(settings: Settings) -> None:
             inicio, fim = janela_datetime(dia, ajustado.hora_inicio, ajustado.hora_fim, ajustado.data_fim)
             agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
             if inicio <= agora <= fim + timedelta(minutes=20):
-                if _reservar_coleta(dia.isoformat(), f"Mapa ao vivo · {dia.isoformat()}"):
-                    print("Frota ao vivo: puxando pulsos novos.", flush=True)
-                    _rodar(ajustado, com_pdf=False)
+                tem_resumo = (ajustado.output_dir / dia.isoformat() / "resumo.json").is_file()
+                ciclos += 1
+                # Com conta já gravada: na maioria dos ciclos só guarda pulso (rápido).
+                # A cada 3º ciclo refaz o mapa. Sem resumo, sempre completo.
+                so_pulsos = tem_resumo and (ciclos % 3 != 0)
+                aviso = (
+                    f"Mapa ao vivo · pulsos · {dia.isoformat()}"
+                    if so_pulsos
+                    else f"Mapa ao vivo · {dia.isoformat()}"
+                )
+                if _reservar_coleta(dia.isoformat(), aviso):
+                    print(
+                        "Frota ao vivo: "
+                        + ("só pulsos." if so_pulsos else "atualização completa do mapa."),
+                        flush=True,
+                    )
+                    _rodar(ajustado, com_pdf=False, so_pulsos=so_pulsos)
         except Exception as exc:
             print(f"Frota ao vivo: {exc}", flush=True)
             with JOB["lock"]:
                 JOB["rodando"] = False
-        # Intervalo maior que o casamento típico, para o pedido de frota achar a conta livre.
-        time.sleep(120)
+        time.sleep(300)
 
 
 def _disparar_coleta(settings: Settings, dia: date) -> bool:

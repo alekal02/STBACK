@@ -38,7 +38,7 @@ def _aplicar(settings: Settings, corpo: dict[str, Any]) -> Settings:
     return Cls(**{**settings.__dict__, **novo.__dict__})
 
 
-def _rodar(settings: Settings, com_pdf: bool = True) -> None:
+def _rodar(settings: Settings, com_pdf: bool = True, so_pulsos: bool = False) -> None:
     def progresso(msg: str) -> None:
         with JOB["lock"]:
             JOB["mensagens"].append(msg)
@@ -48,9 +48,11 @@ def _rodar(settings: Settings, com_pdf: bool = True) -> None:
         notificar_andamento_frota(settings, msg)
 
     try:
-        resumo = executar(settings, on_progress=progresso)
+        resumo = executar(settings, on_progress=progresso, so_pulsos=so_pulsos)
         from .whatsapp import avisar_coleta_pronta, preparar_pdf_frota
 
+        if so_pulsos:
+            return
         progresso("Conta gravada. Preparando envio no WhatsApp...")
         if isinstance(resumo, dict) and resumo.get("falha_historico"):
             avisar_coleta_pronta(
@@ -371,7 +373,7 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     def mapa_ao_vivo() -> None:
         from .whatsapp import relogio_frota
 
-        print("Frota ao vivo: relógio ligado (pulsos a cada ~2 min).", flush=True)
+        print("Frota ao vivo: relógio ligado (pulsos a cada ~5 min).", flush=True)
         relogio_frota(settings)
 
     def aquecer_malha() -> None:

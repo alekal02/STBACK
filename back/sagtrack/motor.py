@@ -303,7 +303,12 @@ def _reaproveitar_conta(item: dict[str, Any], anterior: dict[str, Any] | None) -
     return True
 
 
-def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[str, Any]:
+def executar(
+    settings: Settings,
+    on_progress: Progresso | None = None,
+    *,
+    so_pulsos: bool = False,
+) -> dict[str, Any]:
     def progress(msg: str) -> None:
         print(msg, flush=True)
         if on_progress:
@@ -365,6 +370,21 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
             return guardado
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
+
+    # Relógio ao vivo: só guarda pulsos. O casamento completo fica para o pedido/ciclo completo.
+    if so_pulsos and (pasta / "resumo.json").is_file():
+        novos = sum(1 for item in rotas if str(item.get("origem_pulso") or "") != "salvo")
+        (pasta / "pontos.json").write_text(
+            json.dumps(pontos_leves(rotas), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
+        progress(
+            f"Ao vivo: pulsos guardados"
+            + (f" ({novos} caminhão(ões) com trecho novo)" if novos else "")
+            + ". Conta do mapa na próxima atualização completa."
+        )
+        return json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
 
     contas = _contas_salvas(pasta)
     refazer = []

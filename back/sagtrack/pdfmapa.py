@@ -218,7 +218,7 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
         )
         pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
         try:
-            with urllib.request.urlopen(pedido, timeout=3) as resp:
+            with urllib.request.urlopen(pedido, timeout=6) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
             _TILE_RUIM.add(chave)
@@ -261,13 +261,14 @@ def renderizar_mapa(
     vias: str = "ambas",
     cor_traco: tuple[int, int, int] = (29, 78, 137),
 ) -> bytes:
+    del pontos  # Relatório mostra só a trajetória — paradas de coleta não entram no mapa.
     moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or tracos
     caixa = _limites(moldura)
     if caixa is None:
         caixa = (-16.98, -16.68, -49.42, -49.05)
     sul, norte, oeste, leste = caixa
-    folga_lat = max((norte - sul) * 0.08, 0.002)
-    folga_lon = max((leste - oeste) * 0.08, 0.002)
+    folga_lat = max((norte - sul) * 0.06, 0.0015)
+    folga_lon = max((leste - oeste) * 0.06, 0.0015)
     sul -= folga_lat
     norte += folga_lat
     oeste -= folga_lon
@@ -284,11 +285,12 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
+    # Zoom alto (até 17) e mais tiles → mapa nítido no PDF / WhatsApp.
     zoom = 15
-    for candidato in range(16, 14, -1):
+    for candidato in range(17, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 5 and math.floor(y1) - math.floor(y0) <= 4:
+        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 7:
             zoom = candidato
             break
     x0, y1 = _tile_xy(sul, oeste, zoom)
@@ -303,8 +305,8 @@ def renderizar_mapa(
         comeco = max(0, meio - limite // 2)
         return comeco, comeco + limite - 1
 
-    tx0, tx1 = limitar(tx0, tx1, 5)
-    ty0, ty1 = limitar(ty0, ty1, 4)
+    tx0, tx1 = limitar(tx0, tx1, 8)
+    ty0, ty1 = limitar(ty0, ty1, 7)
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
     base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
     coords = [
@@ -317,12 +319,12 @@ def renderizar_mapa(
         ix, iy, tile_x, tile_y = item
         return ix, iy, _baixar_tile(zoom, tile_x, tile_y)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         for ix, iy, tile in pool.map(baixar, coords):
             if tile is not None:
                 base.paste(tile, (ix * 256, iy * 256))
     imagem = base.convert("RGBA")
-    escala = max(1.0, imagem.width / 1700)
+    escala = max(1.0, imagem.width / 2000)
 
     def px(lat: float, lon: float) -> tuple[int, int]:
         xf, yf = _tile_xy(lat, lon, zoom)
@@ -335,7 +337,7 @@ def renderizar_mapa(
             if len(coords) >= 4:
                 aneis_px.append(coords)
     if aneis_px:
-        fora = Image.new("L", imagem.size, 70)
+        fora = Image.new("L", imagem.size, 55)
         desenho_fora = ImageDraw.Draw(fora)
         for coords in aneis_px:
             desenho_fora.polygon(coords, fill=0)
@@ -343,13 +345,15 @@ def renderizar_mapa(
         velo.putalpha(fora)
         imagem.alpha_composite(velo)
     desenho = ImageDraw.Draw(imagem, "RGBA")
-    via_px = max(2, int(2.2 * escala))
+    via_px = max(2, int(2.0 * escala))
     for item in poligonos:
         grupos = []
         if vias in {"ambas", "abertas"}:
             grupos.append((item.get("faltando") or [], (176, 28, 18)))
         if vias in {"ambas", "feitas"}:
-            grupos.append((item.get("feitos") or [], (15, 122, 68)))
+            # Feitas entram só quando não viraram o trajeto azul (evita linha dupla).
+            if not tracos:
+                grupos.append((item.get("feitos") or [], (15, 122, 68)))
         for grupo, cor_via in grupos:
             for trilha in grupo:
                 coords = [px(float(p[0]), float(p[1])) for p in trilha if len(p) >= 2]
@@ -364,34 +368,26 @@ def renderizar_mapa(
             lons = [float(p[1]) for anel in aneis for p in anel if len(p) >= 2]
             if lats and lons:
                 canto = px(max(lats), min(lons))
-                fonte = _fonte_imagem(max(22, int(18 * escala)))
+                fonte = _fonte_imagem(max(24, int(20 * escala)))
                 caixa = desenho.textbbox(canto, rotulo, font=fonte)
                 desenho.rectangle(
                     (caixa[0] - 4, caixa[1] - 2, caixa[2] + 4, caixa[3] + 2),
                     fill=(255, 253, 248, 230),
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
-    traco_px = max(2, int(1.8 * escala))
+    # Trajetória grossa no eixo (via oficial ou GPS suavizado) — visual da referência.
+    traco_px = max(5, int(4.2 * escala))
     for traco in tracos:
         coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
         if len(coords) < 2:
             continue
-        desenho.line(coords, fill=(255, 255, 255, 230), width=traco_px + 2, joint="curve")
+        desenho.line(coords, fill=(255, 255, 255, 240), width=traco_px + 3, joint="curve")
         desenho.line(coords, fill=(*cor_traco, 255), width=traco_px, joint="curve")
     for coords in aneis_px:
-        desenho.line(coords + [coords[0]], fill=(90, 68, 12, 255), width=max(2, int(1.6 * escala)))
-    raio = max(4, int(3.2 * escala))
-    for ponto in pontos:
-        try:
-            centro = px(float(ponto["latitude"]), float(ponto["longitude"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        cor = ponto.get("cor") or (194, 65, 12)
-        desenho.ellipse(
-            (centro[0] - raio, centro[1] - raio, centro[0] + raio, centro[1] + raio),
-            fill=(*cor, 255),
-            outline=(255, 255, 255, 255),
-            width=2,
+        desenho.line(
+            coords + [coords[0]],
+            fill=(194, 65, 12, 255),
+            width=max(3, int(2.4 * escala)),
         )
     canto_no = px(norte, oeste)
     canto_sl = px(sul, leste)
@@ -400,11 +396,12 @@ def renderizar_mapa(
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
     imagem = imagem.convert("RGB")
-    if imagem.width > 1600:
-        altura = int(imagem.height * (1600 / imagem.width))
-        imagem = imagem.resize((1600, max(1, altura)), Image.Resampling.LANCZOS)
+    # Mantém resolução alta no PDF (antes encolhia para 1600 px e perdia nitidez).
+    if imagem.width > 2600:
+        altura = int(imagem.height * (2600 / imagem.width))
+        imagem = imagem.resize((2600, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=80, optimize=True)
+    imagem.save(saida, format="JPEG", quality=92, optimize=True, subsampling=0)
     return saida.getvalue()
 
 
@@ -435,7 +432,7 @@ def _pdf(
             (
                 titulo,
                 png,
-                "Verde: via feita. Vermelho: via em aberto. Azul: trajeto. Ponto: parada dentro do polígono.",
+                "Verde: via feita. Vermelho: via em aberto. Azul: trajetória no eixo da rua.",
             )
         ]
     if folhas:
@@ -524,6 +521,17 @@ def _preparar_vias(
     return _vias_no_poligono(dia, codigo, tracos)
 
 
+def _trajeto_no_eixo(
+    feitos: list[list[list[float]]],
+    tracos: list[list[list[float]]],
+) -> list[list[list[float]]]:
+    """Prefere a via oficial coberta (já no meio da rua). GPS só entra se não houver eixo."""
+    limpos = [linha for linha in (feitos or []) if isinstance(linha, list) and len(linha) >= 2]
+    if limpos:
+        return limpos
+    return [traco for traco in (tracos or []) if isinstance(traco, list) and len(traco) >= 2]
+
+
 def _mapa_da_rota(
     titulo: str,
     codigo: str,
@@ -533,15 +541,17 @@ def _mapa_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
 ) -> tuple[str, bytes, str]:
+    del pontos
     feitos, _faltando = _preparar_vias(dia, codigo, tracos, frota)
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": []}
-    if feitos or tracos or pontos:
-        legenda = "Somente o executado. Verde: via feita. Azul: trajeto do caminhão. Ponto: parada."
+    trajeto = _trajeto_no_eixo(feitos, tracos)
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
+    if trajeto:
+        legenda = "Somente o executado. Azul: trajetória no eixo da rua. Sem pontos de coleta."
     else:
         legenda = "Programada para o dia. Nenhuma via foi executada neste turno."
     return (
         titulo,
-        renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
+        renderizar_mapa([base], trajeto, [], aneis, vias="feitas"),
         legenda,
     )
 
@@ -555,8 +565,11 @@ def _folhas_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
 ) -> list[tuple[str, bytes, str]]:
+    del pontos
     feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
+    trajeto = _trajeto_no_eixo(feitos, tracos)
+    base_feito = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
+    base_aberto = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": faltando}
     if faltando:
         legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
     else:
@@ -564,12 +577,12 @@ def _folhas_da_rota(
     return [
         (
             f"{titulo} · realizado",
-            renderizar_mapa([base], tracos, pontos, aneis, vias="feitas"),
-            "Realizado. A linha verde é a via feita. Azul: por onde o caminhão passou. Ponto: parada.",
+            renderizar_mapa([base_feito], trajeto, [], aneis, vias="feitas"),
+            "Realizado. Azul: trajetória no eixo da rua. Sem pontos de coleta.",
         ),
         (
             f"{titulo} · em aberto",
-            renderizar_mapa([base], [], [], aneis, vias="abertas"),
+            renderizar_mapa([base_aberto], [], [], aneis, vias="abertas"),
             legenda_aberta,
         ),
     ]
@@ -846,7 +859,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         for caminhao in (resumo.get("caminhoes") or [])
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(40)
+    _abrir_prazo_mapa(90)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue

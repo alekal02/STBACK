@@ -255,10 +255,11 @@ def _rdp(pontos: list[Ponto], tolerancia_m: float) -> list[Ponto]:
 
 def tracos_realistas(
     pontos: list[dict[str, Any]],
-    salto_max_m: float = 380,
-    tolerancia_m: float = 11,
-    jitter_m: float = 4,
+    salto_max_m: float = 280,
+    tolerancia_m: float = 7,
+    jitter_m: float = 3,
 ) -> list[list[list[float]]]:
+    """Trajeto contínuo e mais aderente à rua: menos jitter, cortes só em saltos grandes."""
     pares: list[Ponto] = []
     for ponto in pontos or []:
         lat = ponto.get("latitude")

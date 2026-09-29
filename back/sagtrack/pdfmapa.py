@@ -252,6 +252,32 @@ def _fonte_imagem(tamanho: int):
     return ImageFont.load_default()
 
 
+# Uma cor estável por placa, para separar trajetos no mesmo mapa.
+CORES_CAMINHAO: list[tuple[int, int, int]] = [
+    (29, 78, 217),
+    (180, 35, 24),
+    (15, 122, 68),
+    (124, 58, 237),
+    (180, 83, 9),
+    (15, 118, 110),
+    (190, 24, 93),
+    (67, 56, 202),
+    (2, 132, 199),
+    (124, 45, 18),
+    (22, 163, 74),
+    (217, 119, 6),
+    (14, 165, 233),
+    (127, 29, 29),
+]
+
+
+def _cor_placa(placa: str) -> tuple[int, int, int]:
+    texto = (placa or "").strip().upper()
+    if not texto:
+        return CORES_CAMINHAO[0]
+    return CORES_CAMINHAO[sum(ord(c) for c in texto) % len(CORES_CAMINHAO)]
+
+
 def renderizar_mapa(
     poligonos: list[dict[str, Any]],
     tracos: list[list[list[float]]],
@@ -260,9 +286,13 @@ def renderizar_mapa(
     *,
     vias: str = "ambas",
     cor_traco: tuple[int, int, int] = (29, 78, 137),
+    tracos_cor: list[tuple[list[list[float]], tuple[int, int, int]]] | None = None,
+    legenda_placas: list[tuple[str, tuple[int, int, int]]] | None = None,
 ) -> bytes:
     del pontos  # Relatório mostra só a trajetória — paradas de coleta não entram no mapa.
-    moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or tracos
+    pintados = tracos_cor or [(traco, cor_traco) for traco in (tracos or [])]
+    linhas_base = [traco for traco, _cor in pintados]
+    moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or linhas_base
     caixa = _limites(moldura)
     if caixa is None:
         caixa = (-16.98, -16.68, -49.42, -49.05)
@@ -351,8 +381,8 @@ def renderizar_mapa(
         if vias in {"ambas", "abertas"}:
             grupos.append((item.get("faltando") or [], (176, 28, 18)))
         if vias in {"ambas", "feitas"}:
-            # Feitas entram só quando não viraram o trajeto azul (evita linha dupla).
-            if not tracos:
+            # Feitas entram só quando não há trajeto do caminhão (evita linha dupla).
+            if not pintados:
                 grupos.append((item.get("feitos") or [], (15, 122, 68)))
         for grupo, cor_via in grupos:
             for trilha in grupo:
@@ -375,14 +405,14 @@ def renderizar_mapa(
                     fill=(255, 253, 248, 230),
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
-    # Trajetória grossa no eixo (via oficial ou GPS suavizado) — visual da referência.
+    # Trajetória grossa — cada caminhão com a própria cor.
     traco_px = max(5, int(4.2 * escala))
-    for traco in tracos:
+    for traco, cor in pintados:
         coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
         if len(coords) < 2:
             continue
         desenho.line(coords, fill=(255, 255, 255, 240), width=traco_px + 3, joint="curve")
-        desenho.line(coords, fill=(*cor_traco, 255), width=traco_px, joint="curve")
+        desenho.line(coords, fill=(*cor, 255), width=traco_px, joint="curve")
     for coords in aneis_px:
         desenho.line(
             coords + [coords[0]],
@@ -395,6 +425,22 @@ def renderizar_mapa(
     direita, baixo = min(imagem.width, max(canto_no[0], canto_sl[0])), min(imagem.height, max(canto_no[1], canto_sl[1]))
     if direita - esquerda > 80 and baixo - topo > 80:
         imagem = imagem.crop((esquerda, topo, direita, baixo))
+    if legenda_placas:
+        desenho = ImageDraw.Draw(imagem, "RGBA")
+        fonte_leg = _fonte_imagem(max(18, int(16 * escala)))
+        x0, y0 = 12, 12
+        for placa, cor in legenda_placas[:8]:
+            texto = str(placa or "").strip()
+            if not texto:
+                continue
+            caixa = desenho.textbbox((x0 + 22, y0), texto, font=fonte_leg)
+            desenho.rectangle(
+                (x0 - 4, y0 - 2, caixa[2] + 8, caixa[3] + 4),
+                fill=(255, 253, 248, 220),
+            )
+            desenho.ellipse((x0, y0 + 2, x0 + 14, y0 + 16), fill=(*cor, 255), outline=(255, 255, 255, 255))
+            desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
+            y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
     # Mantém resolução alta no PDF (antes encolhia para 1600 px e perdia nitidez).
     if imagem.width > 2600:
@@ -667,6 +713,25 @@ def _trajeto_do_caminhao(
     return dentro
 
 
+def _pintar_por_placa(
+    aneis: list,
+    gps_por_placa: dict[str, list],
+    malha_rota: list,
+) -> tuple[list[tuple[list[list[float]], tuple[int, int, int]]], list[tuple[str, tuple[int, int, int]]]]:
+    pintados: list[tuple[list[list[float]], tuple[int, int, int]]] = []
+    legendas: list[tuple[str, tuple[int, int, int]]] = []
+    for placa in sorted(gps_por_placa.keys()):
+        gps = gps_por_placa.get(placa) or []
+        trajeto = _trajeto_do_caminhao(aneis, gps, malha_rota)
+        if not trajeto:
+            continue
+        cor = _cor_placa(placa)
+        legendas.append((placa, cor))
+        for trecho in trajeto:
+            pintados.append((trecho, cor))
+    return pintados, legendas
+
+
 def _mapa_da_rota(
     titulo: str,
     codigo: str,
@@ -675,20 +740,45 @@ def _mapa_da_rota(
     pontos: list,
     dia: date,
     frota: list[dict[str, Any]],
+    *,
+    gps_por_placa: dict[str, list] | None = None,
 ) -> tuple[str, bytes, str]:
     del pontos
-    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    # Cola o GPS em qualquer via da rota (feita ou em aberto), sem trocar o caminho por cobertura.
+    feitos, faltando = _preparar_vias(
+        dia,
+        codigo,
+        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
+        frota,
+    )
     malha_rota = list(feitos or []) + list(faltando or [])
-    trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
+    if gps_por_placa:
+        pintados, legendas = _pintar_por_placa(aneis, gps_por_placa, malha_rota)
+    else:
+        trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
+        pintados = [(t, (29, 78, 217)) for t in trajeto]
+        legendas = []
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
-    if trajeto:
-        legenda = "Azul: caminho real do caminhão dentro da rota (GPS), colado no eixo da rua. Sem pontos de coleta."
+    if pintados:
+        if len(legendas) > 1:
+            nomes = ", ".join(p for p, _c in legendas)
+            legenda = f"Cada cor é um caminhão ({nomes}). Caminho real do GPS na rota."
+        elif legendas:
+            legenda = f"{legendas[0][0]}: caminho real do caminhão na rota (GPS). Sem pontos de coleta."
+        else:
+            legenda = "Caminho real do caminhão dentro da rota (GPS). Sem pontos de coleta."
     else:
         legenda = "Programada para o dia. Nenhum pulso do caminhão entrou nesta rota."
     return (
         titulo,
-        renderizar_mapa([base], trajeto, [], aneis, vias="feitas"),
+        renderizar_mapa(
+            [base],
+            [],
+            [],
+            aneis,
+            vias="feitas",
+            tracos_cor=pintados,
+            legenda_placas=legendas,
+        ),
         legenda,
     )
 
@@ -701,22 +791,46 @@ def _folhas_da_rota(
     pontos: list,
     dia: date,
     frota: list[dict[str, Any]],
+    *,
+    gps_por_placa: dict[str, list] | None = None,
 ) -> list[tuple[str, bytes, str]]:
     del pontos
-    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
+    feitos, faltando = _preparar_vias(
+        dia,
+        codigo,
+        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
+        frota,
+    )
     malha_rota = list(feitos or []) + list(faltando or [])
-    trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
+    if gps_por_placa:
+        pintados, legendas = _pintar_por_placa(aneis, gps_por_placa, malha_rota)
+    else:
+        trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
+        pintados = [(t, (29, 78, 217)) for t in trajeto]
+        legendas = []
     base_feito = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     base_aberto = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": faltando}
     if faltando:
         legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
     else:
         legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
+    if len(legendas) > 1:
+        legenda_feito = "Realizado. Cada cor é um caminhão. Caminho real do GPS na rota."
+    else:
+        legenda_feito = "Realizado. Caminho real do caminhão na rota (GPS). Sem pontos de coleta."
     return [
         (
             f"{titulo} · realizado",
-            renderizar_mapa([base_feito], trajeto, [], aneis, vias="feitas"),
-            "Realizado. Azul: caminho real do caminhão na rota (GPS). Sem pontos de coleta.",
+            renderizar_mapa(
+                [base_feito],
+                [],
+                [],
+                aneis,
+                vias="feitas",
+                tracos_cor=pintados,
+                legenda_placas=legendas,
+            ),
+            legenda_feito,
         ),
         (
             f"{titulo} · em aberto",
@@ -1001,8 +1115,9 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
-        placas = set(row.get("placas") or [])
-        tracos = [traco for placa in placas for traco in (gps_por_placa.get(placa) or [])]
+        placas = [str(p) for p in (row.get("placas") or []) if str(p).strip()]
+        por_placa = {placa: gps_por_placa.get(placa) or [] for placa in placas}
+        tracos = [traco for gps in por_placa.values() for traco in gps]
         estado = _rotulo_andamento(row)
         titulo = (
             f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
@@ -1017,6 +1132,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 row.get("pontos") or [],
                 dia,
                 frota,
+                gps_por_placa=por_placa,
             )
         except Exception as exc:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
@@ -1155,10 +1271,15 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     cor = _cor_da_conclusao(conclusao)
     pontos = []
     tracos = []
+    por_placa: dict[str, list] = {}
     for caminhao in rel.get("caminhoes") or []:
         if caminhao.get("papel") in {"ATUANDO", "APOIO"}:
-            tracos.extend(caminhao.get("gps") or [])
+            placa = str(caminhao.get("placa") or "").strip()
+            gps = caminhao.get("gps") or []
+            tracos.extend(gps)
             pontos.extend(caminhao.get("paradas_pontos") or [])
+            if placa:
+                por_placa[placa] = gps
     tabela = [["Caminhão", "Papel", "Paradas", "Minutos", "%"]]
     for caminhao in rel.get("caminhoes") or []:
         tabela.append(
@@ -1189,6 +1310,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             pontos,
             dia,
             _ler(output_dir / dia.isoformat(), "frota.json") or [],
+            gps_por_placa=por_placa,
         )
     ]
     return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
@@ -1233,6 +1355,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             linha.get("paradas_pontos") or [],
             dia,
             frota,
+            gps_por_placa={str(caminhao.get("placa") or consulta): tracos},
         ):
             mapas.append((folha_titulo, png, legenda, cor))
     if len(tabela) == 1:

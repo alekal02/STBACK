@@ -321,23 +321,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path != "/api/coletar":
             self.send_error(404)
             return
-        try:
-            corpo = self._corpo()
-        except json.JSONDecodeError:
-            self._json(400, {"erro": "JSON inválido"})
-            return
-        with JOB["lock"]:
-            if JOB["rodando"]:
-                self._json(409, {"erro": "Já existe uma coleta em andamento."})
-                return
-            settings = _aplicar(self.settings, corpo)
-            JOB["rodando"] = True
-            JOB["desde"] = time.time()
-            JOB["erro"] = ""
-            JOB["data"] = settings.data_rota.isoformat()
-            JOB["mensagens"] = [f"Iniciando {JOB['data']}"]
-        threading.Thread(target=_rodar, args=(settings,), daemon=True).start()
-        self._json(202, {"ok": True, "data": settings.data_rota.isoformat()})
+        self._json(503, {"erro": "Consulta pausada. Nada está sendo pedido à Segtrack."})
 
 
 def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
@@ -346,12 +330,8 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     porta = porta or settings.porta
 
     def preparar_whatsapp() -> None:
-        from .whatsapp import manter, relogio_pdf
+        from .whatsapp import manter
 
-        threading.Thread(target=relogio_pdf, args=(settings,), daemon=True).start()
-        from .whatsapp import relogio_frota
-
-        threading.Thread(target=relogio_frota, args=(settings,), daemon=True).start()
         manter()
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()

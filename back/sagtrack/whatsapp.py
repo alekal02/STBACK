@@ -622,12 +622,7 @@ def mapear_mensagem(body: Any) -> dict[str, str] | None:
 
 
 def _garantir_coleta(settings: Settings, dia: date) -> None:
-    if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
-        return
-    from .config import aplicar_periodo
-    from .motor import executar
-
-    executar(aplicar_periodo(settings, dia))
+    return
 
 
 def _fontes_do_dia(pasta: Path) -> list[Path]:
@@ -943,14 +938,7 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
 
 
 def _disparar_coleta(settings: Settings, dia: date) -> None:
-    """A mesma atualização do botão, disparada pelo grupo."""
-    from .config import aplicar_periodo
-    from .server import _rodar
-
-    ajustado = aplicar_periodo(settings, data=dia.isoformat())
-    if not _reservar_coleta(dia.isoformat(), f"Pedido do grupo · {dia.isoformat()}"):
-        return
-    threading.Thread(target=_rodar, args=(ajustado,), kwargs={"com_pdf": False}, daemon=True).start()
+    return
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
@@ -1045,29 +1033,14 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 f"Turno de {_rotulo_turno(dia_pedido)}. Agora peça *frota*, a rota ou a placa.",
             )
             return
-        dia = dia_pedido or _DIAS.get(chave) or dia_operacional()
         if dia_pedido is not None:
             _DIAS[chave] = dia_pedido
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
-        _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
-        from .server import JOB
-
-        with JOB["lock"]:
-            desde = float(JOB.get("desde") or 0)
-            rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
         nome = _nome_pedido(tipo, consulta)
-        if rodando:
-            texto = (
-                f"Recebi {nome}. A conta já está fechando. "
-                "O link chega neste grupo assim que terminar."
-            )
-        else:
-            texto = f"Recebi {nome}. Fechando os pulsos até agora. O link chega neste grupo."
+        texto = f"Recebi {nome}. A consulta na Segtrack está pausada e nenhum pulso foi pedido."
         enviar_texto(settings, mensagem["grupo"], texto)
-        if not rodando:
-            _disparar_coleta(settings, dia)
         _ULTIMO_ENVIO.update({"fase": "coleta", "total_s": round(time.perf_counter() - inicio, 1)})
     except Exception as exc:
         _ULTIMO_ENVIO["fase"] = "erro"

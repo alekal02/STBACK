@@ -21,10 +21,15 @@ _VISTOS: set[str] = set()
 _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
+_PRIORIDADE = threading.Event()
+_AUTO_PROC: Any = None
+_ADIAR_AUTO = False
+_ULTIMA_FROTA_GRUPO = 0.0
+_FUSO_BRT = timezone(timedelta(hours=-3))
+_HORAS_FISCAL = (10, 12, 14, 16, 18, 20)
 _CONFIG_LOCK = threading.Lock()
 _AVISO: dict[str, Any] | None = None
 _PENDENTES: list[dict[str, Any]] = []
-_ROTA_PEDIDA: dict[tuple[str, str, str], float] = {}
 _REUSO_S = 3600
 _NOME_USUARIO = "sagtrack"
 _WEBHOOK_URL = ""
@@ -48,11 +53,18 @@ def _norm(texto: str) -> str:
 def _comando_simples(cmd: str) -> tuple[str, str] | None:
     if cmd in {"MENU", "AJUDA", "COMANDOS", "OI", "OLA", "INICIO"}:
         return "menu", ""
-    if cmd in {"FROTA", "RELATORIO", "RELATORIO FROTA", "RELATORIO DA FROTA"}:
+    if cmd in {"FROTA", "RELATORIO", "RELATORIO FROTA", "RELATORIO DA FROTA", "RELATORIO DE FROTA"}:
         return "frota", ""
     rota = re.fullmatch(r"(?:RELATORIO\s+)?ROTA\s+(.+)", cmd)
     if rota:
         return "rota", rota.group(1).strip()
+    if cmd in {"ROTA", "RELATORIO ROTA", "RELATORIO DA ROTA", "RELATORIO DE ROTA"}:
+        return "frota", ""
+    placa = re.fullmatch(r"(?:RELATORIO\s+)?(?:PLACA|CAMINHAO)\s+(.+)", cmd)
+    if placa:
+        return "placa", placa.group(1).strip()
+    if cmd in {"PLACA", "CAMINHAO", "RELATORIO PLACA"}:
+        return "erro", "Diga a placa, como *SDG-1J76* ou *placa SDG-1J76*."
     placa = re.fullmatch(r"(?:RELATORIO\s+)?(?:PLACA|CAMINHAO)\s+(.+)", cmd)
     if placa:
         return "placa", placa.group(1).strip()
@@ -576,10 +588,11 @@ def _menu() -> str:
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
         "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
         "*dia 26* — marca o turno; depois peça o relatório\n"
-        "*dia 26 frota* ou *26/09 frota* — link do relatório da frota nesse turno\n"
-        "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
-        "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n"
-        "frota, a rota ou a placa fecham a conta e mandam o link neste grupo.\n\n"
+        "*rota* — resumo e PDF de todas as rotas\n"
+        "*04AD* ou *rota 04AD* — PDF dessa rota, com o descritivo acima\n"
+        "*SDG-1J76* ou *placa SDG-1J76* — PDF do caminhão, com o descritivo acima\n"
+        "*frota* — o mesmo relatório completo das rotas\n"
+        "A partir das *10:00*, o relatório das rotas segue de *2 em 2 horas* até as *20:00*.\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -662,6 +675,15 @@ def _ultimo_pdf(pasta: Path, chave: str) -> Path | None:
     return None
 
 
+def _pulso_novo_desde_pdf(pasta: Path, chave: str) -> bool:
+    """A conta salva mudou depois do último PDF. A idade do arquivo, sozinha, não conta."""
+    destino = _ultimo_pdf(pasta, chave)
+    if destino is None:
+        return True
+    fontes = [item for item in _fontes_do_dia(pasta) if item.is_file()]
+    return any(item.stat().st_mtime > destino.stat().st_mtime for item in fontes)
+
+
 def _pdf_atrasado(pasta: Path, chave: str, segundos: int = 3600) -> bool:
     destino = _ultimo_pdf(pasta, chave)
     if destino is None:
@@ -670,6 +692,16 @@ def _pdf_atrasado(pasta: Path, chave: str, segundos: int = 3600) -> bool:
         return True
     fontes = [item for item in _fontes_do_dia(pasta) if item.is_file()]
     return any(item.stat().st_mtime > destino.stat().st_mtime for item in fontes)
+
+
+def _pdf_reutilizavel(pasta: Path, chave: str, segundos: int = _REUSO_S) -> bool:
+    """O PDF desta hora segue no grupo. A idade sozinha não manda desenhar de novo."""
+    destino = _ultimo_pdf(pasta, chave)
+    if destino is None:
+        return False
+    if time.time() - destino.stat().st_mtime < segundos:
+        return True
+    return not _pulso_novo_desde_pdf(pasta, chave)
 
 
 def _chave_pdf(tipo: str, consulta: str) -> str:
@@ -696,36 +728,148 @@ def conta_recente(settings: Settings, dia: date, segundos: int = _REUSO_S) -> bo
     return time.time() - arquivo.stat().st_mtime < segundos
 
 
-def _rota_repetida(grupo: str, consulta: str, dia: date) -> bool:
-    """A mesma rota pedida outra vez, dentro da hora, pode atualizar o caminhão."""
-    chave = (grupo, (consulta or "").strip().upper(), dia.isoformat())
-    agora = time.time()
-    with _LOCK:
-        anterior = _ROTA_PEDIDA.get(chave)
-        _ROTA_PEDIDA[chave] = agora
-    return anterior is not None and agora - anterior < _REUSO_S
+def _nome_arquivo(tipo: str, consulta: str, dia: date) -> str:
+    if tipo == "frota":
+        return f"frota-{dia.isoformat()}.pdf"
+    return f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
+
+
+def _interromper_automatico() -> None:
+    """O pedido do grupo passa na frente do PDF das 10h."""
+    proc = _AUTO_PROC
+    if proc is not None and getattr(proc, "is_alive", lambda: False)():
+        print("PDF automático interrompido: o grupo pediu um relatório.", flush=True)
+        proc.terminate()
+        proc.join(15)
+
+
+def _construir_pdf(
+    settings: Settings,
+    dia: date,
+    tipo: str,
+    consulta: str,
+    *,
+    forcar: bool,
+    automatico: bool = False,
+) -> Path | None:
+    """Monta um PDF por vez, fora do processo do site. Não busca pulso na Fulltrack."""
+    global _AUTO_PROC, _ADIAR_AUTO
+    pasta = settings.output_dir / dia.isoformat()
+    chave = _chave_pdf(tipo, consulta)
+    if not forcar:
+        guardado = _ultimo_pdf(pasta, chave)
+        if guardado is not None:
+            return guardado
+    if not (pasta / "resumo.json").is_file():
+        return None
+    if automatico and _PRIORIDADE.is_set():
+        _ADIAR_AUTO = True
+        print("PDF automático adiado: pedido do grupo em andamento.", flush=True)
+        return None
+    if not automatico:
+        _PRIORIDADE.set()
+        _interromper_automatico()
+    if not _GERANDO.acquire(timeout=0 if automatico else 180):
+        if not automatico:
+            _PRIORIDADE.clear()
+        if automatico:
+            _ADIAR_AUTO = True
+            print("PDF automático adiado: outro PDF está sendo montado.", flush=True)
+            return None
+        return _ultimo_pdf(pasta, chave)
+    try:
+        if automatico and _PRIORIDADE.is_set():
+            _ADIAR_AUTO = True
+            return None
+        proc = multiprocessing.get_context("spawn").Process(
+            target=_pdf_em_processo,
+            args=(str(settings.output_dir), dia.isoformat(), tipo, consulta, bool(forcar)),
+        )
+        if automatico:
+            _AUTO_PROC = proc
+        proc.start()
+        proc.join(420)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(10)
+            print(f"PDF {tipo} {consulta} passou de 7 minutos e foi interrompido.", flush=True)
+            return None
+        if proc.exitcode not in (0, None):
+            print(f"PDF {tipo} {consulta} encerrou com código {proc.exitcode}.", flush=True)
+            return None
+    except Exception as exc:
+        print(f"PDF {tipo} {consulta}: {exc}", flush=True)
+        return None
+    finally:
+        if automatico:
+            _AUTO_PROC = None
+        _GERANDO.release()
+        if not automatico:
+            _PRIORIDADE.clear()
+    return _ultimo_pdf(pasta, chave)
+
+
+def _resumo_do_pedido(settings: Settings, tipo: str, consulta: str, dia: date) -> str:
+    if tipo == "frota":
+        corpo = _texto_frota(settings, dia)
+    else:
+        corpo = _texto_consulta(settings, tipo, consulta, dia)
+    return (corpo or f"Relatório de {_nome_pedido(tipo, consulta)}.").strip()[:4000]
+
+
+def _enviar_pdf_pedido(
+    settings: Settings,
+    grupo: str,
+    tipo: str,
+    consulta: str,
+    dia: date,
+    *,
+    titulo: str = "",
+    exigir_novo: bool = False,
+    automatico: bool = False,
+) -> str:
+    """Manda o resumo e, em seguida, o PDF. O automático não responde se o grupo acabou de pedir a frota."""
+    global _ADIAR_AUTO, _ULTIMA_FROTA_GRUPO
+    pasta = settings.output_dir / dia.isoformat()
+    chave = _chave_pdf(tipo, consulta)
+    anterior = _ultimo_pdf(pasta, chave)
+    selo = anterior.stat().st_mtime if anterior is not None else 0
+    forcar = _pulso_novo_desde_pdf(pasta, chave) if automatico else not _pdf_reutilizavel(pasta, chave)
+    if not automatico:
+        corpo = _resumo_do_pedido(settings, tipo, consulta, dia)
+        if titulo:
+            corpo = f"{titulo}\n\n{corpo}"[:4000]
+        enviar_texto(settings, grupo, corpo)
+    _ADIAR_AUTO = False
+    arquivo = _construir_pdf(settings, dia, tipo, consulta, forcar=forcar, automatico=automatico)
+    if automatico and _ADIAR_AUTO:
+        return "adiado"
+    if exigir_novo and (arquivo is None or arquivo.stat().st_mtime <= selo):
+        print("PDF automático: a frota não foi remontada. Fica para a próxima janela.", flush=True)
+        return "ok"
+    if arquivo is None:
+        if not automatico:
+            enviar_texto(
+                settings,
+                grupo,
+                f"O resumo acima está fechado. Não consegui anexar o PDF de {_nome_pedido(tipo, consulta)} agora.",
+            )
+        return "ok"
+    if automatico:
+        corpo = _resumo_do_pedido(settings, tipo, consulta, dia)
+        if titulo:
+            corpo = f"{titulo}\n\n{corpo}"[:4000]
+        enviar_texto(settings, grupo, corpo)
+    enviar_pdf(settings, grupo, arquivo.read_bytes(), _nome_arquivo(tipo, consulta, dia))
+    if not automatico and tipo == "frota":
+        _ULTIMA_FROTA_GRUPO = time.time()
+    print(f"WhatsApp: resumo e PDF enviados · {tipo} {consulta}".strip(), flush=True)
+    return "ok"
 
 
 def _entregar_guardado(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> None:
-    """Manda o PDF já gerado. Não abre coleta nem monta o mapa de novo."""
-    nome = _nome_pedido(tipo, consulta)
-    pasta = settings.output_dir / dia.isoformat()
-    pdf = _ultimo_pdf(pasta, _chave_pdf(tipo, consulta))
-    fresco = pdf is not None and time.time() - pdf.stat().st_mtime < _REUSO_S
-    if fresco and pdf is not None:
-        enviar_texto(
-            settings,
-            grupo,
-            f"A conta de {nome} desta hora já está pronta. Segue o mesmo PDF, sem buscar os pulsos de novo.",
-        )
-        nome_arquivo = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
-        enviar_pdf(settings, grupo, pdf.read_bytes(), nome_arquivo)
-        print(f"WhatsApp: PDF guardado · {tipo} {consulta}".strip(), flush=True)
-        return
-    _enviar_relatorio(settings, grupo, tipo, consulta, dia)
-    if pdf is None:
-        agendar_pdf(settings, dia, tipo, consulta, forcar=False)
-    print(f"WhatsApp: conta guardada · {tipo} {consulta}".strip(), flush=True)
+    """A conta desta hora já está salva. Manda o PDF sem buscar os pulsos de novo."""
+    _enviar_pdf_pedido(settings, grupo, tipo, consulta, dia)
 
 
 def _montar_pdf(settings: Settings, dia: date, tipo: str, consulta: str, *, forcar: bool) -> None:
@@ -787,36 +931,123 @@ def agendar_pdf(settings: Settings, dia: date, tipo: str = "frota", consulta: st
 
 
 def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[int, bytes, str]:
-    """Devolve o último PDF pronto e deixa o próximo sendo montado fora da requisição."""
+    """Devolve o PDF já gravado, sem montar outro."""
     pasta = settings.output_dir / dia.isoformat()
     chave = _chave_pdf(tipo, consulta)
     nome = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
     pronto = _ultimo_pdf(pasta, chave)
-    if pronto is not None and time.time() - pronto.stat().st_mtime < _REUSO_S:
-        return 200, pronto.read_bytes(), nome
-    if pronto is None or _pdf_atrasado(pasta, chave):
-        agendar_pdf(settings, dia, tipo, consulta, forcar=pronto is not None)
     if pronto is None:
         return 202, b"", nome
     return 200, pronto.read_bytes(), nome
 
 
-def relogio_pdf(settings: Settings) -> None:
-    """A cada hora grava de novo o PDF da frota do turno, sem esperar alguém baixar."""
+def _proxima_janela_fiscal(agora: datetime) -> datetime:
+    """10:00, 12:00, 14:00, 16:00, 18:00 e 20:00."""
+    melhor: datetime | None = None
+    for delta in (0, 1):
+        base = agora + timedelta(days=delta)
+        for hora in _HORAS_FISCAL:
+            marca = datetime(base.year, base.month, base.day, hora, 0, tzinfo=agora.tzinfo)
+            if marca <= agora:
+                continue
+            if melhor is None or marca < melhor:
+                melhor = marca
+    if melhor is None:
+        return agora + timedelta(hours=2)
+    return melhor
+
+
+def _carimbo_auto(settings: Settings, marca: datetime) -> Path:
     from .config import dia_operacional
 
-    time.sleep(20)
+    return settings.output_dir / dia_operacional().isoformat() / f"auto-{marca.strftime('%H%M')}.txt"
+
+
+def _slot_aberto(agora: datetime) -> datetime | None:
+    """O horário de hoje que já chegou e ainda vale pelas próximas 2 horas."""
+    aberto = None
+    for hora in _HORAS_FISCAL:
+        marca = datetime(agora.year, agora.month, agora.day, hora, 0, tzinfo=agora.tzinfo)
+        if marca <= agora < marca + timedelta(hours=2) and (aberto is None or marca > aberto):
+            aberto = marca
+    return aberto
+
+
+def _marcar_auto(settings: Settings, marca: datetime) -> None:
+    destino = _carimbo_auto(settings, marca)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(datetime.now(_FUSO_BRT).isoformat(timespec="seconds"), encoding="utf-8")
+
+
+def relogio_pdf(settings: Settings) -> None:
+    """A partir das 10:00, de 2 em 2 horas até as 20:00, manda o relatório das rotas."""
+    from .config import dia_operacional
+
+    agora = datetime.now(_FUSO_BRT)
+    aberto = _slot_aberto(agora)
+    if aberto is not None and not _carimbo_auto(settings, aberto).is_file():
+        _cumprir_slot(settings, aberto)
     while True:
+        agora = datetime.now(_FUSO_BRT)
+        alvo = _proxima_janela_fiscal(agora)
+        espera = (alvo - agora).total_seconds()
+        print(f"PDF automático: próxima frota às {alvo.strftime('%d/%m %H:%M')}.", flush=True)
+        if espera > 0:
+            time.sleep(espera)
+        _cumprir_slot(settings, alvo)
+        time.sleep(90)
+
+
+def _cumprir_slot(settings: Settings, marca: datetime) -> None:
+    from .config import dia_operacional
+
+    if _carimbo_auto(settings, marca).is_file():
+        return
+    for _tentativa in range(4):
         try:
-            dia = dia_operacional()
-            pasta = settings.output_dir / dia.isoformat()
-            chave = _chave_pdf("frota", "")
-            if (pasta / "resumo.json").is_file() and _pdf_atrasado(pasta, chave):
-                print("PDF horário: montando a frota do turno.", flush=True)
-                agendar_pdf(settings, dia, "frota", "", forcar=True)
+            estado = _fiscal_da_hora(settings, dia_operacional())
         except Exception as exc:
-            print(f"PDF horário: {exc}", flush=True)
-        time.sleep(3600)
+            print(f"PDF automático: {exc}", flush=True)
+            return
+        if estado == "adiado":
+            time.sleep(60)
+            continue
+        if estado == "sem-conta":
+            time.sleep(45)
+            continue
+        _marcar_auto(settings, marca)
+        return
+
+
+def _fiscal_da_hora(settings: Settings, dia: date) -> str:
+    """Das 10:00 às 20:00, de 2 em 2 horas, manda o relatório das rotas."""
+    from .server import JOB
+
+    grupo = grupo_configurado(settings)
+    pasta = settings.output_dir / dia.isoformat()
+    if not grupo or not (pasta / "resumo.json").is_file():
+        print("PDF automático: ainda não há conta salva neste turno.", flush=True)
+        return "sem-conta"
+    if time.time() - _ULTIMA_FROTA_GRUPO < 30 * 60:
+        print("PDF automático: o grupo já recebeu a frota nesta meia hora.", flush=True)
+        return "ok"
+    with JOB["lock"]:
+        if JOB["rodando"]:
+            print("PDF automático: a coleta está rodando. Tento de novo em instantes.", flush=True)
+            return "adiado"
+    hora = datetime.now(_FUSO_BRT).strftime("%H:%M")
+    titulo = f"Relatório das rotas · {hora}."
+    print("PDF automático: enviando a frota do turno.", flush=True)
+    return _enviar_pdf_pedido(
+        settings,
+        grupo,
+        "frota",
+        "",
+        dia,
+        titulo=titulo,
+        exigir_novo=False,
+        automatico=True,
+    )
 
 
 def _reservar_coleta(data_iso: str, aviso: str) -> bool:
@@ -836,7 +1067,7 @@ def _reservar_coleta(data_iso: str, aviso: str) -> bool:
 
 
 def relogio_frota(settings: Settings) -> None:
-    """A cada 15 minutos guarda só os pulsos novos. O relatório sai quando pedem no grupo."""
+    """A cada 15 minutos guarda só os pulsos novos. Não monta PDF nessa passagem."""
     from .config import aplicar_periodo, dia_operacional
     from .server import JOB, _rodar
 
@@ -902,37 +1133,6 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
     return "\n".join(linhas[:12])
 
 
-def _com_link(corpo: str, url: str) -> str:
-    rodape = (
-        f"\nAbra o relatório: {url}\n"
-        "A página abre na hora. O PDF baixa no botão da página."
-    )
-    base = (corpo or "Relatório do turno.").rstrip()
-    return (base[: 3900 - len(rodape)] + rodape).strip()
-
-
-def _enviar_relatorio(
-    settings: Settings,
-    grupo: str,
-    tipo: str,
-    consulta: str,
-    dia: date,
-    *,
-    proxima: bool = False,
-) -> str:
-    from .vista import emitir
-
-    url = emitir(settings, tipo, consulta, dia)
-    corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
-    if proxima:
-        corpo = (
-            (corpo or "Relatório do turno.").rstrip()
-            + "\n\nEsta é a última conta pronta. Uma nova já está sendo fechada para o próximo pedido."
-        )
-    enviar_texto(settings, grupo, _com_link(corpo, url))
-    return url
-
-
 def _retirar_pedidos() -> list[dict[str, Any]]:
     global _AVISO
     with _LOCK:
@@ -965,7 +1165,7 @@ def _nome_pedido(tipo: str, consulta: str) -> str:
 
 
 def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
-    """Manda o link de cada pedido do grupo assim que a conta fica gravada."""
+    """Manda o PDF de cada pedido do grupo assim que a conta fica gravada."""
     pedidos = _retirar_pedidos()
     if not pedidos:
         return
@@ -984,12 +1184,8 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
                     "Não consegui gravar os pulsos deste turno. Peça de novo neste grupo.",
                 )
                 continue
-            url = _enviar_relatorio(settings, grupo, str(pedido["tipo"]), str(pedido["consulta"]), dia)
-            _ULTIMO_ENVIO.update(
-                {"fase": "enviado", "link": url, "tipo": pedido["tipo"], "consulta": pedido["consulta"]}
-            )
-            print(f"WhatsApp: link enviado · {pedido['tipo']} {pedido['consulta']}".strip(), flush=True)
-            agendar_pdf(settings, dia, str(pedido["tipo"]), str(pedido["consulta"]), forcar=False)
+            _enviar_pdf_pedido(settings, grupo, str(pedido["tipo"]), str(pedido["consulta"]), dia)
+            _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": pedido["tipo"], "consulta": pedido["consulta"]})
         except Exception as exc:
             print(f"WhatsApp: {exc}", flush=True)
             try:
@@ -1044,7 +1240,7 @@ def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = 
             on_progress("Montando o PDF para o botão de download...")
         _montar_pdf(settings, dia, "frota", "", forcar=_pdf_atrasado(pasta, _chave_pdf("frota", "")))
         if on_progress:
-            on_progress("PDF pronto. No grupo, o link abre a página e o arquivo baixa por lá.")
+            on_progress("PDF pronto para download.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
@@ -1106,10 +1302,11 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             _DIAS[chave] = dia_pedido
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
-        _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
+        _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "pdf"})
         recente = conta_recente(settings, dia)
-        atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
-        if recente and not atualizar_rota:
+        conta_salva = (settings.output_dir / dia.isoformat() / "resumo.json").is_file()
+        turno_aberto = dia == dia_operacional()
+        if conta_salva and (not turno_aberto or recente):
             _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
             _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})
             return
@@ -1123,12 +1320,12 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         if rodando:
             texto = (
                 f"Recebi {nome}. A conta já está fechando. "
-                "O link chega neste grupo assim que terminar."
+                "O PDF chega neste grupo assim que terminar."
             )
         else:
             texto = (
-                f"Recebi {nome}. Buscando os pulsos na ordem do horário "
-                "e montando o trajeto na rota."
+                f"Recebi {nome}. Buscando só o pulso novo "
+                "e em seguida mando o PDF neste grupo."
             )
         enviar_texto(settings, mensagem["grupo"], texto)
         if not rodando:

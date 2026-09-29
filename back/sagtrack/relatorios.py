@@ -1,7 +1,7 @@
 """Três relatórios da Segtrack: frota, rota e placa.
 
 A conta é a mesma em todos: ruas oficiais do GeoPackage e os pulsos do dia.
-Parada de coleta = o caminhão ficou num raio de 35 m por pelo menos 50 s, a até 6 km/h.
+Ponto de coleta = dois ou mais pulsos no mesmo lugar, por 20 segundos a 2 minutos.
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ from .frota import norm_placa, prefixo_da_placa
 from .gps import _datetime_do_timestamp, haversine_m
 from .mapa import TO_UTM
 
-RAIO_PARADA_M = 35.0
-PARADA_MIN_S = 50.0
-PARADA_COLETA_MAX_S = 15 * 60
+RAIO_PARADA_M = 20.0
+PARADA_MIN_S = 20.0
+PARADA_COLETA_MAX_S = 2 * 60
+PULSOS_PARADA_MIN = 2
 VEL_PARADA = 6.0
 FEITA_MIN = 90.0
 PARCIAL_MIN = 45.0
@@ -69,6 +70,7 @@ def _sequencia(pontos: list[dict[str, Any]], dia: date) -> list[tuple[datetime, 
 
 
 def listar_paradas(pontos: list[dict[str, Any]], dia: date) -> list[dict[str, Any]]:
+    """Coleta = 2 ou mais pulsos empilhados no mesmo lugar, entre 20 s e 2 min."""
     seq = _sequencia(pontos, dia)
     paradas: list[dict[str, Any]] = []
     i = 0
@@ -76,23 +78,26 @@ def listar_paradas(pontos: list[dict[str, Any]], dia: date) -> list[dict[str, An
         j = i
         while j + 1 < len(seq):
             dist_ancora = haversine_m((seq[i][1], seq[i][2]), (seq[j + 1][1], seq[j + 1][2]))
-            vel = seq[j + 1][3]
-            if dist_ancora > RAIO_PARADA_M or (vel is not None and vel > VEL_PARADA):
+            if dist_ancora > RAIO_PARADA_M:
                 break
             j += 1
+        pulsos = j - i + 1
         duracao = (seq[j][0] - seq[i][0]).total_seconds()
-        if duracao >= PARADA_MIN_S and j > i:
+        if pulsos >= PULSOS_PARADA_MIN and PARADA_MIN_S <= duracao <= PARADA_COLETA_MAX_S:
             fatia = seq[i : j + 1]
+            meio = fatia[len(fatia) // 2]
             paradas.append(
                 {
-                    "latitude": round(sum(p[1] for p in fatia) / len(fatia), 6),
-                    "longitude": round(sum(p[2] for p in fatia) / len(fatia), 6),
+                    "latitude": round(meio[1], 6),
+                    "longitude": round(meio[2], 6),
                     "segundos": int(duracao),
+                    "pulsos": pulsos,
                     "inicio": fatia[0][0].strftime("%H:%M"),
                     "fim": fatia[-1][0].strftime("%H:%M"),
-                    "tipo": "coleta" if duracao <= PARADA_COLETA_MAX_S else "permanencia",
+                    "tipo": "coleta",
                 }
             )
+        if j > i:
             i = j + 1
         else:
             i += 1
@@ -753,11 +758,12 @@ def _gps_na_rota(
     placa: str,
     pontos_por_placa: dict[str, list],
 ) -> list[list[list[float]]]:
-    from .gps import tracos_na_ordem
+    from .gps import trajetoria_unica
+    from .mapa import vias_proximas
     from .pdfmapa import _dentro_da_rota
 
     brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-    return tracos_na_ordem(brutos)
+    return trajetoria_unica(brutos, vias_proximas(brutos), dia=dia).get("tracos") or []
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:

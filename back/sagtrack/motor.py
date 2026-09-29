@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, haversine_m, tracos_na_ordem
+from .gps import _datetime_do_timestamp, haversine_m
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
@@ -50,7 +50,20 @@ def _horas(pontos: list[dict[str, Any]]) -> tuple[str, str]:
     return marcas[0], marcas[-1]
 
 
-def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
+def _trajeto(pontos: list[dict[str, Any]], dia: date | None = None) -> list[list[list[float]]]:
+    """Uma linha só, da entrada à saída, ligando os pulsos na ordem da hora."""
+    from .gps import tracos_na_ordem, trajetoria_unica
+    from .mapa import vias_proximas
+
+    if len(pontos or []) < 2:
+        return []
+    linhas = trajetoria_unica(pontos, vias_proximas(pontos), dia=dia).get("tracos") or []
+    if linhas:
+        return linhas
+    return tracos_na_ordem(pontos, 1_000_000)
+
+
+def folha_caminhao(item: dict[str, Any], dia: date | None = None) -> dict[str, Any]:
     visiveis = coberturas_executadas(item, max_n=3)
     if not visiveis and (item.get("trechos_feitos") or item.get("trechos_faltando")):
         visiveis = [
@@ -120,7 +133,7 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "gps": tracos_na_ordem(pontos),
+        "gps": _trajeto(pontos, dia),
         "poligonos": poligonos[:3],
     }
 
@@ -261,8 +274,18 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         and all(str(item.get("origem_pulso") or "") == "salvo" for item in rotas)
     ):
         (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
+        guardado = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+        if isinstance(guardado, dict) and guardado.get("trajeto") != "unica":
+            progress("Ligando cada caminhão numa linha só, pela hora dos pulsos.")
+            por_placa = {str(item.get("placa") or ""): item.get("pontos") or [] for item in rotas}
+            for caminhao in guardado.get("caminhoes") or []:
+                pts = por_placa.get(str(caminhao.get("placa") or "")) or []
+                if len(pts) >= 2:
+                    caminhao["gps"] = _trajeto(pts, dia)
+            guardado["trajeto"] = "unica"
+            (pasta / "resumo.json").write_text(json.dumps(guardado, ensure_ascii=False), encoding="utf-8")
         progress("Nenhum pulso novo. A conclusão já salva continua valendo.")
-        return json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+        return guardado
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 
@@ -286,8 +309,9 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         medir_presenca(refazer, setores, dia)
     _aplicar_apoio(rotas)
 
-    folhas = [folha_caminhao(item) for item in rotas]
+    folhas = [folha_caminhao(item, dia) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
+    resumo["trajeto"] = "unica"
     resumo["congelado_em"] = congelado.isoformat(timespec="seconds")
     (pasta / "resumo.json").write_text(json.dumps(resumo, ensure_ascii=False), encoding="utf-8")
     (pasta / "setores.json").write_text(json.dumps(setores_leves(setores), ensure_ascii=False), encoding="utf-8")
@@ -450,8 +474,9 @@ def _gravar_trajeto_ao_vivo(
         if placa in {str(item.get("placa") or "") for item in atualizados}:
             continue
         folhas.append(folha)
-    folhas.extend(folha_caminhao(item) for item in atualizados)
+    folhas.extend(folha_caminhao(item, dia) for item in atualizados)
     resumo_novo = montar_resumo(dia, folhas, settings)
+    resumo_novo["trajeto"] = "unica"
     (pasta / "resumo.json").write_text(json.dumps(resumo_novo, ensure_ascii=False), encoding="utf-8")
     (pasta / "pontos.json").write_text(json.dumps(pontos_salvos, ensure_ascii=False), encoding="utf-8")
     (pasta / "frota.json").write_text(

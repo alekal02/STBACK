@@ -367,7 +367,7 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
     def mapa_ao_vivo() -> None:
         from .whatsapp import relogio_frota
 
-        print("Frota ao vivo: relógio ligado (pulsos a cada ~45 s).", flush=True)
+        print("Frota ao vivo: relógio ligado (pulsos a cada ~2 min).", flush=True)
         relogio_frota(settings)
 
     def aquecer_malha() -> None:

@@ -643,27 +643,71 @@ def aplicar_setores_oficiais(
 ) -> None:
     if not setores:
         return
-    from .cobertura import avaliar_cobertura, pecas_da_rua, recortar_pontos
+    from .cobertura import (
+        _dentro_da_zona,
+        avaliar_cobertura,
+        pecas_da_rua,
+        preparar_pontos,
+    )
     from .verificacao import coberturas_executadas
 
     for setor in setores:
         if "_pecas" not in setor:
             setor["_pecas"] = pecas_da_rua(setor.get("ruas") or [])
+        geom = setor.get("geom")
+        if geom is not None and "_bounds_buf" not in setor:
+            try:
+                setor["_bounds_buf"] = geom.buffer(120).bounds
+            except Exception:
+                setor["_bounds_buf"] = geom.bounds if geom is not None else None
     total = len(rotas)
-    n_setores = len(setores)
     for indice, item in enumerate(rotas, start=1):
         placa = item.get("placa") or item.get("veiculo")
         if on_progress:
             on_progress(f"Mapa oficial {indice}/{total} · {placa}")
         pontos = item.get("pontos_dia") or item.get("pontos") or []
+        pares = preparar_pontos(pontos)
         coberturas = []
         melhor = None
         melhor_cob: dict[str, Any] | None = None
         melhor_pct = -1.0
-        for ordem, setor in enumerate(setores, start=1):
-            if on_progress and (ordem == 1 or ordem % 8 == 0):
-                on_progress(f"Mapa oficial {indice}/{total} · {placa} · rota {ordem}/{n_setores}")
-            clip = recortar_pontos(pontos, setor["geom"], 120)
+        if not pares:
+            item["coberturas_inlog"] = []
+            item["percentual_concluido"] = 0.0
+            item["veredicto"] = "SEM RASTREIO"
+            item["confianca"] = "baixa"
+            item["poligonos"] = []
+            item["codigo_rota"] = None
+            continue
+        xs = [x for _p, x, _y in pares]
+        ys = [y for _p, _x, y in pares]
+        tminx, tmaxx = min(xs) - 150.0, max(xs) + 150.0
+        tminy, tmaxy = min(ys) - 150.0, max(ys) + 150.0
+        # Só setores que encostam no envelope do trajeto — evita 14×41 avaliações.
+        candidatos: list[tuple[int, dict[str, Any]]] = []
+        for setor in setores:
+            bounds = setor.get("_bounds_buf")
+            if not bounds:
+                continue
+            minx, miny, maxx, maxy = bounds
+            if maxx < tminx or minx > tmaxx or maxy < tminy or miny > tmaxy:
+                continue
+            n_bbox = 0
+            for _p, x, y in pares:
+                if minx <= x <= maxx and miny <= y <= maxy:
+                    n_bbox += 1
+            if n_bbox < 8:
+                continue
+            candidatos.append((n_bbox, setor))
+        candidatos.sort(key=lambda row: row[0], reverse=True)
+        if on_progress:
+            on_progress(
+                f"Mapa oficial {indice}/{total} · {placa} · "
+                f"{len(candidatos)} rota(s) no trajeto (de {len(setores)})"
+            )
+        for n_bbox, setor in candidatos:
+            zona = setor["geom"].buffer(120)
+            clip = _dentro_da_zona(pares, zona)
             if len(clip) < 8:
                 continue
             cob = avaliar_cobertura(

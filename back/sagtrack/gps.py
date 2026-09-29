@@ -1178,6 +1178,22 @@ _TETO_CASAMENTO_M = 6500.0
 _SILENCIO_S = 8 * 60
 
 
+def _cache_malha_casamento() -> Path:
+    """Pickle no disco persistente (Render: SAGTRACK_DATA_DIR), não só na imagem do deploy."""
+    import shutil
+
+    from .config import ROOT, pasta_dados
+
+    cache = pasta_dados() / "malha-casamento.v4.pkl"
+    legado = ROOT / "data" / "malha-casamento.v4.pkl"
+    if not cache.is_file() and legado.is_file():
+        try:
+            shutil.copy2(legado, cache)
+        except OSError:
+            pass
+    return cache
+
+
 def malha_oficial() -> Malha:
     """Rede pronta. Guarda em disco para a frota não remontar 26 mil vias a cada pedido."""
     global _MALHA
@@ -1185,11 +1201,10 @@ def malha_oficial() -> Malha:
         return _MALHA
     import pickle
 
-    from .config import ROOT
     from .mapa import caminho_gpkg
 
     gpkg = caminho_gpkg()
-    cache = ROOT / "data" / "malha-casamento.v4.pkl"
+    cache = _cache_malha_casamento()
     if gpkg and cache.is_file() and cache.stat().st_mtime >= gpkg.stat().st_mtime:
         try:
             _MALHA = pickle.loads(cache.read_bytes())

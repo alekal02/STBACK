@@ -392,6 +392,8 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         aplicar_setores_oficiais(refazer, setores, dia, on_progress=progress)
         progress("Medindo paradas de coleta...")
         medir_presenca(refazer, setores, dia)
+    else:
+        progress("Sem pulso novo nos caminhões: setores e paradas do turno permanecem como estavam.")
     _aplicar_apoio(rotas)
 
     folhas = [folha_caminhao(item) for item in rotas]

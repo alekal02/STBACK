@@ -1108,14 +1108,24 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
         _fechar_frota_do_coletor()
 
 
+def _coleta_grupo_pendente() -> bool:
+    """Pedido do WhatsApp ou painel aguardando conta — o relógio não compete."""
+    with _LOCK:
+        return bool(_PENDENTES)
+
+
 def relogio_frota(settings: Settings) -> None:
     """A cada ~2 min guarda pulsos novos e atualiza o mapa. O PDF só nasce no pedido."""
     from .config import aplicar_periodo, dia_operacional, janela_datetime
     from .server import JOB, _rodar
 
-    time.sleep(20)
+    # Deixa a thread de aquecimento carregar a malha antes da primeira coleta.
+    time.sleep(45)
     while True:
         try:
+            if _coleta_grupo_pendente():
+                time.sleep(20)
+                continue
             dia = dia_operacional()
             ajustado = aplicar_periodo(settings, data=dia.isoformat())
             inicio, fim = janela_datetime(dia, ajustado.hora_inicio, ajustado.hora_fim, ajustado.data_fim)

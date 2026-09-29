@@ -576,10 +576,10 @@ def _menu() -> str:
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
         "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
         "*dia 26* — marca o turno; depois peça o relatório\n"
-        "*dia 26 frota* ou *26/09 frota* — link do relatório da frota nesse turno\n"
+        "*dia 26 frota* ou *26/09 frota* — o PDF da frota nesse turno, neste grupo\n"
         "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n"
-        "frota, a rota ou a placa fecham a conta e mandam o link neste grupo.\n\n"
+        "frota, a rota ou a placa fecham a conta e mandam o PDF neste grupo.\n\n"
         "_Digite o comando neste grupo._"
     )
 
@@ -744,16 +744,33 @@ def _anexar_pdf(settings: Settings, grupo: str, tipo: str, consulta: str, dia: d
     return True
 
 
-def _entregar_guardado(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> None:
-    """Manda o PDF já gerado. Não abre coleta nem busca pulso de novo."""
-    nome = _nome_pedido(tipo, consulta)
-    enviar_texto(
-        settings,
-        grupo,
-        f"A conta de {nome} desta hora já está pronta. Segue o mesmo PDF, sem buscar os pulsos de novo.",
-    )
+def _texto_do_pedido(settings: Settings, tipo: str, consulta: str, dia: date) -> str:
+    if tipo == "frota":
+        return _texto_frota(settings, dia)
+    return _texto_consulta(settings, tipo, consulta, dia)
+
+
+def _enviar_no_grupo(
+    settings: Settings,
+    grupo: str,
+    tipo: str,
+    consulta: str,
+    dia: date,
+    *,
+    reutilizado: bool,
+) -> None:
+    """Descritivo e PDF na conversa. Nenhum endereço de página."""
+    corpo = (_texto_do_pedido(settings, tipo, consulta, dia) or "Relatório do turno.").rstrip()
+    if reutilizado:
+        corpo = "Conta desta hora, sem buscar os pulsos de novo.\n\n" + corpo
+    enviar_texto(settings, grupo, corpo)
     if not _anexar_pdf(settings, grupo, tipo, consulta, dia):
-        _enviar_relatorio(settings, grupo, tipo, consulta, dia)
+        enviar_texto(settings, grupo, "Não consegui anexar o PDF agora. Peça de novo daqui a pouco.")
+
+
+def _entregar_guardado(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> None:
+    """Manda o descritivo e o PDF já gerado. Não abre coleta nem busca pulso de novo."""
+    _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=True)
 
 
 def _montar_pdf(settings: Settings, dia: date, tipo: str, consulta: str, *, forcar: bool) -> None:
@@ -930,37 +947,6 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
     return "\n".join(linhas[:12])
 
 
-def _com_link(corpo: str, url: str) -> str:
-    rodape = (
-        f"\nAbra o relatório: {url}\n"
-        "A página abre na hora. O PDF baixa no botão da página."
-    )
-    base = (corpo or "Relatório do turno.").rstrip()
-    return (base[: 3900 - len(rodape)] + rodape).strip()
-
-
-def _enviar_relatorio(
-    settings: Settings,
-    grupo: str,
-    tipo: str,
-    consulta: str,
-    dia: date,
-    *,
-    proxima: bool = False,
-) -> str:
-    from .vista import emitir
-
-    url = emitir(settings, tipo, consulta, dia)
-    corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
-    if proxima:
-        corpo = (
-            (corpo or "Relatório do turno.").rstrip()
-            + "\n\nEsta é a última conta pronta. Uma nova já está sendo fechada para o próximo pedido."
-        )
-    enviar_texto(settings, grupo, _com_link(corpo, url))
-    return url
-
-
 def _retirar_pedidos() -> list[dict[str, Any]]:
     global _AVISO
     with _LOCK:
@@ -1014,10 +1000,7 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
                 continue
             tipo = str(pedido["tipo"])
             consulta = str(pedido["consulta"])
-            corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
-            enviar_texto(settings, grupo, (corpo or "Relatório do turno.").rstrip() + "\n\nO PDF segue nesta conversa.")
-            if not _anexar_pdf(settings, grupo, tipo, consulta, dia):
-                _enviar_relatorio(settings, grupo, tipo, consulta, dia)
+            _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=False)
             _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": tipo, "consulta": consulta})
         except Exception as exc:
             print(f"WhatsApp: {exc}", flush=True)

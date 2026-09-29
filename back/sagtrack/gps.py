@@ -1211,10 +1211,10 @@ def _afinar_para_casamento(
     pontos: list[dict[str, Any]],
     dia: date | None = None,
     *,
-    min_m: float = 18.0,
-    min_s: float = 10.0,
+    min_m: float = 40.0,
+    min_s: float = 25.0,
 ) -> list[dict[str, Any]]:
-    """Afina pulsos colados sem rarear demais. Densidade boa fecha o trajeto na via."""
+    """Afina pulsos colados. Em produção o Viterbi precisa de poucos pontos para fechar rápido."""
     ordenados = sorted(pontos or [], key=ordem_do_pulso)
     if len(ordenados) <= 2:
         return list(ordenados)
@@ -1238,6 +1238,13 @@ def _afinar_para_casamento(
     ultimo = ordenados[-1]
     if saida[-1] is not ultimo:
         saida.append(ultimo)
+    # Teto duro: Viterbi O(n) explode com milhares de pulsos no Render.
+    if len(saida) > 280:
+        passo = max(1, len(saida) // 280)
+        fino = saida[::passo]
+        if fino[-1] is not saida[-1]:
+            fino.append(saida[-1])
+        saida = fino
     return saida
 
 
@@ -1492,7 +1499,7 @@ def _viterbi(
     camadas = []
     for indice, (_momento, coord, _vel, _sigma) in enumerate(grupo):
         rumo = _rumo_utm(grupo[indice - 1][1], coord) if indice else None
-        camadas.append(malha.candidatos(coord, _RAIO_CASAMENTO_M, rumo=rumo, limite=3))
+        camadas.append(malha.candidatos(coord, _RAIO_CASAMENTO_M, rumo=rumo, limite=2))
     neg = -1e12
     dp: list[list[float]] = []
     anterior: list[list[int]] = []
@@ -1510,7 +1517,6 @@ def _viterbi(
         dist = haversine_m(grupo[i - 1][1], grupo[i][1])
         dt = abs((grupo[i][0] - grupo[i - 1][0]).total_seconds()) if grupo[i][0] and grupo[i - 1][0] else 0.0
         limite = _limite_do_salto(dist, dt)
-        limite_folga = min(_TETO_CASAMENTO_M, max(limite * 1.45, dist + 480.0))
         rumo = _rumo_utm(grupo[i - 1][1], grupo[i][1])
         for j, cand in enumerate(cands):
             emissao = _log_emissao(cand.dist, grupo[i][3])
@@ -1521,23 +1527,16 @@ def _viterbi(
                 if dp[i - 1][k] <= neg / 2:
                     continue
                 achado = malha.caminho(prev, cand, limite)
-                folga = False
-                if achado is None and limite_folga > limite:
-                    achado = malha.caminho(prev, cand, limite_folga)
-                    folga = achado is not None
                 if achado is None:
                     continue
                 geom, metros = achado
-                if not _caminho_plausivel(dist, metros, dt):
-                    if not _caminho_estimado(dist, metros, dt):
-                        continue
-                    folga = True
+                if not _caminho_plausivel(dist, metros, dt) and not _caminho_estimado(dist, metros, dt):
+                    continue
                 nota = (
                     dp[i - 1][k]
                     + _log_transicao(metros, dist)
                     + emissao
                     + _log_rumo_caminho(geom, rumo)
-                    - (3.5 if folga else 0.0)
                 )
                 if nota > melhor:
                     melhor = nota

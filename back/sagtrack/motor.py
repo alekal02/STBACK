@@ -276,10 +276,7 @@ def _casar_frota(
     for item in rotas:
         placa = str(item.get("placa") or "")
         if str(item.get("origem_pulso") or "") == "salvo" and _restaurar_tracos(item, por_placa.get(placa)):
-            # Trajeto frágil não fica preso no cache — recasa para fechar a certeza.
-            casa = float((item.get("_casamento") or {}).get("confianca") or 0)
-            if casa >= 0.55:
-                continue
+            continue
         pendentes.append(item)
     if not pendentes:
         return

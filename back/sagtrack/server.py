@@ -364,7 +364,17 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
 
         manter()
 
+    def aquecer_malha() -> None:
+        try:
+            from .gps import malha_oficial
+
+            n = len(malha_oficial().geoms)
+            print(f"Malha viária pronta · {n} vias", flush=True)
+        except Exception as exc:
+            print(f"Malha viária: {exc}", flush=True)
+
     threading.Thread(target=preparar_whatsapp, daemon=True).start()
+    threading.Thread(target=aquecer_malha, daemon=True).start()
     servidor = ThreadingHTTPServer((host, porta), Handler)
     print(f"Sala técnica Segtrack em http://127.0.0.1:{porta}", flush=True)
     print(f"Configuração do grupo em http://127.0.0.1:{porta}/whatsapp", flush=True)

@@ -207,14 +207,24 @@ def _contas_salvas(pasta: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def _guardar_casamento(item: dict[str, Any], dia: date, pasta: Path) -> None:
+def _guardar_casamento(
+    item: dict[str, Any],
+    dia: date,
+    pasta: Path,
+    *,
+    malha: Any | None = None,
+) -> None:
     from .cobertura import faixa_de_tracos
+    from .gps import _afinar_para_casamento
 
+    pontos = item.get("pontos") or []
+    afinados = _afinar_para_casamento(pontos, dia)
     casado = casar_tracos(
-        item.get("pontos") or [],
+        afinados,
         dia=dia,
         placa=str(item.get("placa") or ""),
         pasta_cache=pasta / "casamento",
+        malha=malha,
     )
     item["_tracos"] = casado.get("confirmado") or []
     item["_tracos_estimados"] = casado.get("estimado") or []
@@ -225,6 +235,59 @@ def _guardar_casamento(item: dict[str, Any], dia: date, pasta: Path) -> None:
         item["_faixa_confirmada"] = faixa_de_tracos(item["_tracos"])
         item["_faixa_estimada"] = faixa_de_tracos(item["_tracos_estimados"])
 
+
+def _restaurar_tracos(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
+    """Reaproveita o trajeto já casado do resumo quando não houve pulso novo."""
+    if not anterior:
+        return False
+    if not (anterior.get("gps") or anterior.get("gps_estimado")):
+        return False
+    if "confianca" not in (anterior.get("casamento") or {}):
+        return False
+    from .cobertura import faixa_de_tracos
+
+    item["_tracos"] = list(anterior.get("gps") or [])
+    item["_tracos_estimados"] = list(anterior.get("gps_estimado") or [])
+    item["_tracos_deslocamento"] = list(anterior.get("gps_deslocamento") or [])
+    item["_tracos_originais"] = list(anterior.get("gps_original") or [])
+    item["_casamento"] = dict(anterior.get("casamento") or {})
+    item["_faixa_confirmada"] = faixa_de_tracos(item["_tracos"])
+    item["_faixa_estimada"] = faixa_de_tracos(item["_tracos_estimados"])
+    return True
+
+
+def _casar_frota(
+    rotas: list[dict[str, Any]],
+    dia: date,
+    pasta: Path,
+    *,
+    resumo_anterior: dict[str, Any] | None,
+    on_progress: Progresso | None = None,
+) -> None:
+    """Casa os pulsos. Quem já tem trajeto salvo e sem pulso novo não recalcula."""
+    from .gps import malha_oficial
+
+    por_placa = {
+        str(c.get("placa") or ""): c
+        for c in ((resumo_anterior or {}).get("caminhoes") or [])
+        if isinstance(c, dict)
+    }
+    pendentes: list[dict[str, Any]] = []
+    for item in rotas:
+        placa = str(item.get("placa") or "")
+        if str(item.get("origem_pulso") or "") == "salvo" and _restaurar_tracos(item, por_placa.get(placa)):
+            continue
+        pendentes.append(item)
+    if not pendentes:
+        return
+    if on_progress:
+        on_progress(f"Preparando a malha viária para {len(pendentes)} caminhão(ões)...")
+    malha = malha_oficial()
+    total = len(pendentes)
+    for indice, item in enumerate(pendentes, start=1):
+        if on_progress:
+            on_progress(f"Trajeto na via {indice}/{total} · {item.get('placa') or ''}")
+        _guardar_casamento(item, dia, pasta, malha=malha)
 
 def _reaproveitar_conta(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
     """Mantém a rua já cruzada quando o caminhão não teve pulso novo."""
@@ -311,9 +374,14 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
             continue
         refazer.append(item)
 
-    progress("Montando a rede viária e casando os pulsos na ordem da hora.")
-    for item in rotas:
-        _guardar_casamento(item, dia, pasta)
+    progress("Casando os pulsos com a malha. Quem já tem trajeto salvo fica de fora.")
+    resumo_ant = None
+    if (pasta / "resumo.json").is_file():
+        try:
+            resumo_ant = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            resumo_ant = None
+    _casar_frota(rotas, dia, pasta, resumo_anterior=resumo_ant, on_progress=progress)
     progress("Lendo o mapa oficial de Aparecida...")
     setores = carregar_setores(dia)
     if refazer:

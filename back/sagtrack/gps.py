@@ -659,6 +659,7 @@ class Malha:
         self.no1: list[tuple[int, int]] = []
         self.adj: dict[tuple[int, int], list[tuple[tuple[int, int], int, bool]]] = {}
         self._arvore: Any = None
+        self._wgs: list[list[Ponto]] | None = None
 
     @classmethod
     def de_wgs(
@@ -732,6 +733,20 @@ class Malha:
         if malha.geoms:
             malha._arvore = STRtree(malha.geoms)
         return malha
+
+    def __getstate__(self) -> dict[str, Any]:
+        estado = dict(self.__dict__)
+        estado["_arvore"] = None
+        estado["_wgs"] = None
+        return estado
+
+    def __setstate__(self, estado: dict[str, Any]) -> None:
+        from shapely.strtree import STRtree
+
+        self.__dict__.update(estado)
+        if not hasattr(self, "_wgs"):
+            self._wgs = None
+        self._arvore = STRtree(self.geoms) if self.geoms else None
 
     def projetar(
         self,
@@ -960,22 +975,65 @@ class Malha:
         return saida
 
     def _fatia_wgs(self, aresta: int, inicio_m: float, fim_m: float) -> list[Ponto]:
-        from shapely.ops import substring
-
-        from .mapa import TO_WGS
-
         if abs(fim_m - inicio_m) < 0.4:
             return []
         inverter = fim_m < inicio_m
         a, b = (fim_m, inicio_m) if inverter else (inicio_m, fim_m)
-        trecho = substring(self.geoms[aresta], max(0.0, a), min(self.comp[aresta], b))
-        coords = [(float(x), float(y)) for x, y in trecho.coords]
-        if inverter:
-            coords.reverse()
+        a = max(0.0, a)
+        b = min(self.comp[aresta], b)
+        if getattr(self, "_wgs", None) is None:
+            self._wgs = [[] for _ in self.geoms]
+        if not self._wgs[aresta]:
+            from .mapa import TO_WGS
+
+            convertidos: list[Ponto] = []
+            for x, y in self.geoms[aresta].coords:
+                lon, lat = TO_WGS.transform(float(x), float(y))
+                convertidos.append((lat, lon))
+            self._wgs[aresta] = convertidos
+        wgs = self._wgs[aresta]
+        coords_utm = list(self.geoms[aresta].coords)
+        if len(wgs) != len(coords_utm) or len(wgs) < 2:
+            from shapely.ops import substring
+
+            from .mapa import TO_WGS
+
+            trecho = substring(self.geoms[aresta], a, b)
+            saida = []
+            for x, y in trecho.coords:
+                lon, lat = TO_WGS.transform(x, y)
+                saida.append((lat, lon))
+            if inverter:
+                saida.reverse()
+            return saida
         saida: list[Ponto] = []
-        for x, y in coords:
-            lon, lat = TO_WGS.transform(x, y)
-            saida.append((lat, lon))
+        percorrido = 0.0
+        for indice in range(len(coords_utm) - 1):
+            x0, y0 = coords_utm[indice]
+            x1, y1 = coords_utm[indice + 1]
+            comp = math.hypot(float(x1) - float(x0), float(y1) - float(y0))
+            if comp < 0.5:
+                continue
+            prox = percorrido + comp
+            if prox < a:
+                percorrido = prox
+                continue
+            if not saida:
+                t = 0.0 if comp <= 0 else max(0.0, min(1.0, (a - percorrido) / comp))
+                lat0, lon0 = wgs[indice]
+                lat1, lon1 = wgs[indice + 1]
+                saida.append((lat0 + (lat1 - lat0) * t, lon0 + (lon1 - lon0) * t))
+            if prox <= b:
+                saida.append(wgs[indice + 1])
+            else:
+                t = 0.0 if comp <= 0 else max(0.0, min(1.0, (b - percorrido) / comp))
+                lat0, lon0 = wgs[indice]
+                lat1, lon1 = wgs[indice + 1]
+                saida.append((lat0 + (lat1 - lat0) * t, lon0 + (lon1 - lon0) * t))
+                break
+            percorrido = prox
+        if inverter:
+            saida.reverse()
         return saida
 
 
@@ -1121,10 +1179,66 @@ _SILENCIO_S = 8 * 60
 
 
 def malha_oficial() -> Malha:
+    """Rede pronta. Guarda em disco para a frota não remontar 26 mil vias a cada pedido."""
     global _MALHA
-    if _MALHA is None:
-        _MALHA = Malha.oficial()
+    if _MALHA is not None:
+        return _MALHA
+    import pickle
+
+    from .config import ROOT
+    from .mapa import caminho_gpkg
+
+    gpkg = caminho_gpkg()
+    cache = ROOT / "data" / "malha-casamento.v4.pkl"
+    if gpkg and cache.is_file() and cache.stat().st_mtime >= gpkg.stat().st_mtime:
+        try:
+            _MALHA = pickle.loads(cache.read_bytes())
+            if getattr(_MALHA, "geoms", None):
+                return _MALHA
+        except Exception:
+            _MALHA = None
+    _MALHA = Malha.oficial()
+    if gpkg and _MALHA.geoms:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(pickle.dumps(_MALHA, protocol=pickle.HIGHEST_PROTOCOL))
+        except Exception:
+            pass
     return _MALHA
+
+
+def _afinar_para_casamento(
+    pontos: list[dict[str, Any]],
+    dia: date | None = None,
+    *,
+    min_m: float = 28.0,
+    min_s: float = 18.0,
+) -> list[dict[str, Any]]:
+    """Reduz pulsos colados. A cobertura segue o eixo; não precisa de todos os pontos."""
+    ordenados = sorted(pontos or [], key=ordem_do_pulso)
+    if len(ordenados) <= 2:
+        return list(ordenados)
+    ref = dia or date.today()
+    saida: list[dict[str, Any]] = [ordenados[0]]
+    for ponto in ordenados[1:-1]:
+        ant = saida[-1]
+        try:
+            a = (float(ant["latitude"]), float(ant["longitude"]))
+            b = (float(ponto["latitude"]), float(ponto["longitude"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        dist = haversine_m(a, b)
+        if dist < min_m:
+            continue
+        ta = _datetime_do_timestamp(str(ant.get("timestamp") or ""), ref)
+        tb = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), ref)
+        if ta and tb and abs((tb - ta).total_seconds()) < min_s and dist < min_m * 1.8:
+            continue
+        saida.append(ponto)
+    ultimo = ordenados[-1]
+    if saida[-1] is not ultimo:
+        saida.append(ultimo)
+    return saida
 
 
 def _rumo_utm(origem: Ponto, destino: Ponto) -> tuple[float, float] | None:
@@ -1641,7 +1755,6 @@ def _nucleo_casamento(
     confirmado, desloc_c = _separar_locais(confirmado)
     estimado, desloc_e = _separar_locais(estimado)
     contagem["confianca"] = _confianca_casamento(contagem)
-    contagem["componentes"] = malha.componentes()
     return {
         "confirmado": confirmado,
         "estimado": estimado,

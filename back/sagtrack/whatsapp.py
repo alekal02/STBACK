@@ -715,20 +715,28 @@ def _nome_arquivo_pdf(tipo: str, consulta: str, dia: date) -> str:
     return f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
 
 
-def _produzir_pdf(settings: Settings, dia: date, tipo: str, consulta: str) -> Path | None:
+def _produzir_pdf(
+    settings: Settings,
+    dia: date,
+    tipo: str,
+    consulta: str,
+    *,
+    forcar: bool = False,
+) -> Path | None:
     """Devolve o PDF da consulta. Se ainda não existir, monta e espera terminar."""
     pasta = settings.output_dir / dia.isoformat()
     chave = _chave_pdf(tipo, consulta)
-    pronto = _cache_pdf(pasta, chave)
-    if pronto is not None:
-        return pronto
+    if not forcar:
+        pronto = _cache_pdf(pasta, chave)
+        if pronto is not None:
+            return pronto
     if not (pasta / "resumo.json").is_file():
         return None
     print(f"WhatsApp: montando PDF {tipo} {consulta}".strip(), flush=True)
     if not _GERANDO.acquire(timeout=180):
         return _ultimo_pdf(pasta, chave)
     try:
-        _montar_pdf(settings, dia, tipo, consulta, forcar=False)
+        _montar_pdf(settings, dia, tipo, consulta, forcar=forcar)
     except Exception as exc:
         print(f"WhatsApp: PDF {tipo} falhou: {exc}", flush=True)
         return None
@@ -740,8 +748,16 @@ def _produzir_pdf(settings: Settings, dia: date, tipo: str, consulta: str) -> Pa
     return caminho
 
 
-def _anexar_pdf(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> bool:
-    caminho = _produzir_pdf(settings, dia, tipo, consulta)
+def _anexar_pdf(
+    settings: Settings,
+    grupo: str,
+    tipo: str,
+    consulta: str,
+    dia: date,
+    *,
+    forcar: bool = False,
+) -> bool:
+    caminho = _produzir_pdf(settings, dia, tipo, consulta, forcar=forcar)
     if caminho is None:
         return False
     try:
@@ -767,18 +783,60 @@ def _enviar_no_grupo(
     dia: date,
     *,
     reutilizado: bool,
+    forcar_pdf: bool = False,
+    cabecalho: str = "",
 ) -> None:
     """Descritivo e PDF na conversa. Nenhum endereço de página."""
     corpo = (_texto_do_pedido(settings, tipo, consulta, dia) or "Relatório do turno.").rstrip()
-    if reutilizado:
+    if cabecalho:
+        corpo = cabecalho.rstrip() + "\n\n" + corpo
+    elif reutilizado:
         corpo = "Conta desta hora, sem buscar os pulsos de novo.\n\n" + corpo
     enviar_texto(settings, grupo, corpo)
-    if not _anexar_pdf(settings, grupo, tipo, consulta, dia):
+    if not _anexar_pdf(settings, grupo, tipo, consulta, dia, forcar=forcar_pdf):
         enviar_texto(settings, grupo, "Não consegui anexar o PDF agora. Peça de novo daqui a pouco.")
+
+
+def entregar_frota_congelada(settings: Settings, grupo: str, dia: date) -> dict[str, Any]:
+    """Congela o último pulso do mapa ao vivo e manda o PDF sem buscar a Segtrack de novo."""
+    from .config import aplicar_periodo
+    from .motor import congelar_conta
+
+    inicio = time.perf_counter()
+    ajustado = aplicar_periodo(settings, data=dia.isoformat())
+    pasta = ajustado.output_dir / dia.isoformat()
+    if not (pasta / "resumo.json").is_file() or not (pasta / "frota.json").is_file():
+        raise FileNotFoundError("Ainda não há frota deste turno para congelar.")
+    resumo = congelar_conta(ajustado)
+    corte = str(resumo.get("congelado_em") or "")
+    hora = corte[11:16] if len(corte) >= 16 else ""
+    cabeca = (
+        f"Frota congelada no último pulso"
+        + (f" às {hora}" if hora else "")
+        + ". O mapa já estava atualizado; não busquei a Segtrack de novo."
+    )
+    _enviar_no_grupo(
+        settings,
+        grupo,
+        "frota",
+        "",
+        dia,
+        reutilizado=False,
+        forcar_pdf=True,
+        cabecalho=cabeca,
+    )
+    return {
+        "fase": "congelado",
+        "congelado_em": corte,
+        "total_s": round(time.perf_counter() - inicio, 2),
+    }
 
 
 def _entregar_guardado(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> None:
     """Manda o descritivo e o PDF já gerado. Não abre coleta nem busca pulso de novo."""
+    if tipo == "frota":
+        entregar_frota_congelada(settings, grupo, dia)
+        return
     _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=True)
 
 
@@ -923,23 +981,26 @@ def _reservar_coleta(data_iso: str, aviso: str) -> bool:
 
 
 def relogio_frota(settings: Settings) -> None:
-    """A cada 15 minutos guarda só os pulsos novos. O relatório sai quando pedem no grupo."""
-    from .config import aplicar_periodo, dia_operacional
+    """A cada 45 s guarda pulsos novos e atualiza o mapa. O PDF só nasce no pedido."""
+    from .config import aplicar_periodo, dia_operacional, janela_datetime
     from .server import JOB, _rodar
 
-    time.sleep(40)
+    time.sleep(15)
     while True:
         try:
             dia = dia_operacional()
             ajustado = aplicar_periodo(settings, data=dia.isoformat())
-            if _reservar_coleta(dia.isoformat(), f"Atualização automática · {dia.isoformat()}"):
-                print("Frota automática: conferindo pulsos novos.", flush=True)
-                _rodar(ajustado, com_pdf=False)
+            inicio, fim = janela_datetime(dia, ajustado.hora_inicio, ajustado.hora_fim, ajustado.data_fim)
+            agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
+            if inicio <= agora <= fim + timedelta(minutes=20):
+                if _reservar_coleta(dia.isoformat(), f"Mapa ao vivo · {dia.isoformat()}"):
+                    print("Frota ao vivo: puxando pulsos novos.", flush=True)
+                    _rodar(ajustado, com_pdf=False)
         except Exception as exc:
-            print(f"Frota automática: {exc}", flush=True)
+            print(f"Frota ao vivo: {exc}", flush=True)
             with JOB["lock"]:
                 JOB["rodando"] = False
-        time.sleep(15 * 60)
+        time.sleep(45)
 
 
 def _texto_frota(settings: Settings, dia: date) -> str:
@@ -952,13 +1013,17 @@ def _texto_frota(settings: Settings, dia: date) -> str:
     balanco = balanco_frota(_ler(pasta, "setores.json") or [], _ler(pasta, "frota.json") or [])
     feitas = sum(1 for row in balanco if row["situacao"] == "Feita")
     parciais = sum(1 for row in balanco if row["situacao"] == "Parcial")
+    incertas = sum(1 for row in balanco if row["situacao"] == "Incerta")
     nao = sum(1 for row in balanco if row["situacao"] == "Não feita")
     resumo_dia = _ler(pasta, "resumo.json") or {}
     corte = str(resumo_dia.get("congelado_em") or "")
     linhas = [
         f"*Frota {dia.strftime('%d/%m/%Y')}*",
-        f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · {nao} não feitas.",
-        "Feita só a partir de 90%. De 45% a 89% é parcial.",
+        (
+            f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · "
+            f"{incertas} incertas · {nao} não feitas."
+        ),
+        "Feita só com eixo confirmado na malha (≥90%). Incerta = cobertura alta, trajeto frágil.",
     ]
     if len(corte) >= 16:
         linhas.append(f"Pulsos até {corte[11:16]}. Nenhum pulso depois desse horário entrou na conta.")
@@ -1176,6 +1241,50 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
             recente = conta_recente(settings, dia)
             atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
+            pasta_dia = settings.output_dir / dia.isoformat()
+            tem_resumo = (pasta_dia / "resumo.json").is_file()
+            # Frota com mapa já atualizado: congela o último pulso e manda o PDF, sem nova coleta.
+            if tipo == "frota" and tem_resumo:
+                from .server import JOB
+
+                with JOB["lock"]:
+                    desde = float(JOB.get("desde") or 0)
+                    rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
+                if rodando:
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        "Recebi a frota. Esperando o pulso do mapa terminar e congelo em seguida.",
+                    )
+                    # Casamento da frota pode passar de 1 min; não congela no meio da gravação.
+                    limite = time.time() + 180
+                    while time.time() < limite:
+                        with JOB["lock"]:
+                            if not JOB["rodando"]:
+                                rodando = False
+                                break
+                        time.sleep(0.5)
+                    if rodando:
+                        enviar_texto(
+                            settings,
+                            mensagem["grupo"],
+                            "O mapa ainda está atualizando. Peça *frota* de novo em 1 minuto.",
+                        )
+                        return
+                enviar_texto(
+                    settings,
+                    mensagem["grupo"],
+                    "Recebi a frota. Congelando no último pulso do mapa e montando o PDF.",
+                )
+                info = entregar_frota_congelada(settings, mensagem["grupo"], dia)
+                _ULTIMO_ENVIO.update(
+                    {
+                        "fase": "congelado",
+                        "congelado_em": info.get("congelado_em"),
+                        "total_s": info.get("total_s"),
+                    }
+                )
+                return
             if recente and not atualizar_rota:
                 _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
                 _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})

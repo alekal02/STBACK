@@ -75,6 +75,8 @@ def _cor_situacao(situacao: str) -> tuple[int, int, int]:
         return (31, 122, 77)
     if situacao == "Parcial":
         return (165, 107, 0)
+    if situacao == "Incerta":
+        return (120, 90, 40)
     if situacao == "Não feita":
         return (180, 35, 24)
     return (148, 163, 184)
@@ -746,6 +748,8 @@ def _rotulo_andamento(row: dict[str, Any]) -> str:
         return "Feita"
     if row.get("situacao") == "Parcial":
         return f"Parcial · falta {falta}%"
+    if row.get("situacao") == "Incerta":
+        return f"Incerta · {pct:.0f}%"
     if pct > 0:
         return f"Não feita · falta {falta}%"
     return "Não feita"
@@ -764,6 +768,7 @@ def _barra_execucao(pdf: canvas.Canvas, x: float, y: float, largura: float, altu
 _COR_SITUACAO = {
     "Feita": (0.12, 0.45, 0.28),
     "Parcial": (0.62, 0.40, 0.02),
+    "Incerta": (0.45, 0.35, 0.12),
     "Não feita": (0.68, 0.16, 0.10),
 }
 
@@ -816,13 +821,14 @@ def _pdf_frota_fiscal(
 
     feitas = [r for r in balanco if r["situacao"] == "Feita"]
     parciais = [r for r in balanco if r["situacao"] == "Parcial"]
+    incertas = [r for r in balanco if r["situacao"] == "Incerta"]
     nao = [r for r in balanco if r["situacao"] == "Não feita"]
     y = cabecalho(f"Segtrack · decisão da frota · {dia.strftime('%d/%m/%Y')}")
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(fonte, 10)
     abertura = (
-        f"Período {periodo}. A barra verde é o executado e a vermelha é o que faltou. "
-        "Feita só a partir de 90%. De 45% a 89% é parcial."
+        f"Período {periodo}. Verde = eixo confirmado; vermelho = faltando. "
+        "Feita só com casamento firme na malha (≥90%). Incerta = cobertura sem certeza do trajeto."
     )
     for linha in _quebrar(abertura, fonte, 10, largura - 32):
         pdf.drawString(16, y, linha)
@@ -832,18 +838,19 @@ def _pdf_frota_fiscal(
         (str(len(balanco)), "programadas", (0.16, 0.20, 0.27)),
         (str(len(feitas)), "feitas", _COR_SITUACAO["Feita"]),
         (str(len(parciais)), "parciais", _COR_SITUACAO["Parcial"]),
+        (str(len(incertas)), "incertas", _COR_SITUACAO["Incerta"]),
         (str(len(nao)), "não feitas", _COR_SITUACAO["Não feita"]),
     ]
-    card_w = 150
+    card_w = max(90.0, (largura - 32 - 8 * (len(cartoes) - 1)) / max(len(cartoes), 1))
     for indice, (numero, rotulo, cor) in enumerate(cartoes):
-        x = 16 + indice * (card_w + 12)
+        x = 16 + indice * (card_w + 8)
         pdf.setFillColorRGB(*cor)
         pdf.roundRect(x, y - 54, card_w, 54, 6, fill=1, stroke=0)
         pdf.setFillColorRGB(1, 1, 1)
-        pdf.setFont(negrito, 20)
-        pdf.drawString(x + 12, y - 30, numero)
-        pdf.setFont(fonte, 9)
-        pdf.drawString(x + 12, y - 46, rotulo)
+        pdf.setFont(negrito, 18)
+        pdf.drawString(x + 10, y - 30, numero)
+        pdf.setFont(fonte, 8)
+        pdf.drawString(x + 10, y - 46, rotulo)
     y -= 74
     pdf.setFillColorRGB(0.11, 0.14, 0.19)
     pdf.setFont(negrito, 11)

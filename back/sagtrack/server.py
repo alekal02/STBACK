@@ -364,6 +364,12 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
 
         manter()
 
+    def mapa_ao_vivo() -> None:
+        from .whatsapp import relogio_frota
+
+        print("Frota ao vivo: relógio ligado (pulsos a cada ~45 s).", flush=True)
+        relogio_frota(settings)
+
     def aquecer_malha() -> None:
         try:
             from .gps import malha_oficial
@@ -374,6 +380,7 @@ def servir(porta: int | None = None, host: str = "0.0.0.0") -> None:
             print(f"Malha viária: {exc}", flush=True)
 
     threading.Thread(target=preparar_whatsapp, daemon=True).start()
+    threading.Thread(target=mapa_ao_vivo, daemon=True).start()
     threading.Thread(target=aquecer_malha, daemon=True).start()
     servidor = ThreadingHTTPServer((host, porta), Handler)
     print(f"Sala técnica Segtrack em http://127.0.0.1:{porta}", flush=True)

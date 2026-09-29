@@ -1211,10 +1211,10 @@ def _afinar_para_casamento(
     pontos: list[dict[str, Any]],
     dia: date | None = None,
     *,
-    min_m: float = 28.0,
-    min_s: float = 18.0,
+    min_m: float = 18.0,
+    min_s: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """Reduz pulsos colados. A cobertura segue o eixo; não precisa de todos os pontos."""
+    """Afina pulsos colados sem rarear demais. Densidade boa fecha o trajeto na via."""
     ordenados = sorted(pontos or [], key=ordem_do_pulso)
     if len(ordenados) <= 2:
         return list(ordenados)
@@ -1276,13 +1276,22 @@ def _caminho_plausivel(dist: float, comp: float, dt: float) -> bool:
     return comp <= max(dist * 3.8, dist + 340.0)
 
 
+def _caminho_estimado(dist: float, comp: float, dt: float) -> bool:
+    """Caminho na via com folga. Serve para desenhar o traço, não para confirmar a rua."""
+    if comp > _TETO_CASAMENTO_M or dt >= _SILENCIO_S:
+        return False
+    if dt > 0 and comp > (70 / 3.6) * dt + 280.0 and comp > dist + 80:
+        return False
+    return comp <= max(dist * 5.2, dist + 480.0)
+
+
 def _trecho_confirmado(dist: float, comp: float, da: float, db: float, dt: float) -> bool:
     """Confirmado só quando o caminho na via tem o tamanho do deslocamento medido."""
-    if da > 25 or db > 25:
+    if da > 22 or db > 22:
         return False
-    if abs(comp - dist) > max(50.0, 0.40 * max(dist, 1.0)):
+    if abs(comp - dist) > max(45.0, 0.35 * max(dist, 1.0)):
         return False
-    if dt > 0 and comp > (55 / 3.6) * dt + 90:
+    if dt > 0 and comp > (50 / 3.6) * dt + 80:
         return False
     return True
 
@@ -1356,11 +1365,14 @@ def _classe_do_salto(
     vel_b: float | None,
 ) -> str:
     if not _caminho_plausivel(dist, comp, dt):
+        # Ainda há eixo na malha, mas fora do critério firme → estimado, não buraco.
+        if _caminho_estimado(dist, comp, dt):
+            return "estimado"
         return "indeterminado"
     if dt > 1:
         vel_via = comp / dt * 3.6
         if vel_via > 72:
-            return "indeterminado"
+            return "indeterminado" if not _caminho_estimado(dist, comp, dt) else "estimado"
         if vel_a is not None and vel_b is not None:
             media = (vel_a + vel_b) / 2
             if abs(media - vel_via) > 38 and vel_via > 22:
@@ -1498,6 +1510,7 @@ def _viterbi(
         dist = haversine_m(grupo[i - 1][1], grupo[i][1])
         dt = abs((grupo[i][0] - grupo[i - 1][0]).total_seconds()) if grupo[i][0] and grupo[i - 1][0] else 0.0
         limite = _limite_do_salto(dist, dt)
+        limite_folga = min(_TETO_CASAMENTO_M, max(limite * 1.45, dist + 480.0))
         rumo = _rumo_utm(grupo[i - 1][1], grupo[i][1])
         for j, cand in enumerate(cands):
             emissao = _log_emissao(cand.dist, grupo[i][3])
@@ -1508,16 +1521,23 @@ def _viterbi(
                 if dp[i - 1][k] <= neg / 2:
                     continue
                 achado = malha.caminho(prev, cand, limite)
+                folga = False
+                if achado is None and limite_folga > limite:
+                    achado = malha.caminho(prev, cand, limite_folga)
+                    folga = achado is not None
                 if achado is None:
                     continue
                 geom, metros = achado
                 if not _caminho_plausivel(dist, metros, dt):
-                    continue
+                    if not _caminho_estimado(dist, metros, dt):
+                        continue
+                    folga = True
                 nota = (
                     dp[i - 1][k]
                     + _log_transicao(metros, dist)
                     + emissao
                     + _log_rumo_caminho(geom, rumo)
+                    - (3.5 if folga else 0.0)
                 )
                 if nota > melhor:
                     melhor = nota

@@ -78,6 +78,7 @@
     function cor(situacao) {
       if (situacao === "Feita") return "var(--verde)";
       if (situacao === "Parcial") return "var(--ambar)";
+      if (situacao === "Incerta") return "#8a6a28";
       return "var(--vermelho)";
     }
     function escapar(s) {
@@ -182,9 +183,10 @@
       if (balanco.length) {
         const feitas = balanco.filter((row) => row.situacao === "Feita").length;
         const parciais = balanco.filter((row) => row.situacao === "Parcial").length;
+        const incertas = balanco.filter((row) => row.situacao === "Incerta").length;
         const nao = balanco.filter((row) => row.situacao === "Não feita").length;
         nums.hidden = false;
-        nums.innerHTML = "<div class='feita'><b>" + feitas + "</b><span>feitas</span></div><div class='parcial'><b>" + parciais + "</b><span>parciais</span></div><div class='nao'><b>" + nao + "</b><span>não feitas</span></div>";
+        nums.innerHTML = "<div class='feita'><b>" + feitas + "</b><span>feitas</span></div><div class='parcial'><b>" + parciais + "</b><span>parciais</span></div><div class='parcial'><b>" + incertas + "</b><span>incertas</span></div><div class='nao'><b>" + nao + "</b><span>não feitas</span></div>";
         lista.hidden = false;
         lista.innerHTML = balanco.map((row) => {
           const largura = Math.max(0, Math.min(100, Number(row.percentual || 0)));

@@ -276,8 +276,13 @@ def _confianca(n_pts: int, km_rastreio: float, km_plano: float, n_gaps: int) -> 
 def _veredicto(pct: float, confianca: str, n_pts: int) -> str:
     if n_pts == 0:
         return "SEM RASTREIO"
-    if confianca == "baixa" and pct < FEITA_MIN:
-        return "INCERTA"
+    # Sem densidade mínima não dá para fechar Feita — marca incerteza.
+    if confianca == "baixa":
+        if pct >= FEITA_MIN:
+            return "INCERTA"
+        if pct >= PARCIAL_MIN:
+            return "INCERTA"
+        return "NÃO FEITA" if pct > 0 else "SEM RASTREIO"
     if pct >= FEITA_MIN:
         return "FEITA"
     if pct >= PARCIAL_MIN:

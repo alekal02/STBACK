@@ -547,10 +547,16 @@ def _tocados(item: dict[str, Any], *, oficiais: dict[str, list] | None = None) -
 
 
 def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Uma linha por rota programada no dia: feita, parcial ou não feita."""
+    """Uma linha por rota programada no dia: feita, parcial, incerta ou não feita.
+
+    Feita só com eixo confirmado na malha e casamento firme. Cobertura alta com
+    trajeto frágil vira Incerta — não fecha a conta no chute.
+    """
     por_codigo: dict[str, dict[str, Any]] = {}
     for item in frota:
         nome = _nome(item)
+        casa = float((item.get("_casamento") or item.get("casamento") or {}).get("confianca") or 0)
+        malha = bool(item.get("cobertura_malha"))
         for cob in item.get("coberturas_inlog") or []:
             codigo = str(cob.get("codigo_rota") or "")
             if not codigo or str(cob.get("papel") or "") not in {"ATUANDO", "APOIO"}:
@@ -562,13 +568,33 @@ def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) ->
                 continue
             linha = por_codigo.setdefault(
                 codigo,
-                {"percentual": 0.0, "paradas": 0, "caminhoes": [], "pontos": [], "placas": []},
+                {
+                    "percentual": 0.0,
+                    "paradas": 0,
+                    "caminhoes": [],
+                    "pontos": [],
+                    "placas": [],
+                    "casamento": 0.0,
+                    "malha": False,
+                    "conf_rastreio": "",
+                    "veredicto": "",
+                },
             )
             pct = float(cob.get("percentual") or 0)
             papel = "atuou" if cob.get("papel") == "ATUANDO" else "apoio"
             linha["caminhoes"].append(f"{nome} {papel}")
             linha["paradas"] += paradas
-            linha["percentual"] = max(linha["percentual"], pct)
+            # A confiança do casamento é a do caminhão que carrega o percentual, não o máximo.
+            if pct > float(linha["percentual"]) + 1e-9 or (
+                abs(pct - float(linha["percentual"])) <= 1e-9 and casa > float(linha["casamento"])
+            ):
+                linha["percentual"] = pct
+                linha["casamento"] = casa
+                linha["malha"] = malha or str(cob.get("metodo") or "") == "malha"
+                linha["conf_rastreio"] = str(cob.get("confianca") or "")
+                linha["veredicto"] = str(cob.get("veredicto") or cob.get("execucao") or "")
+            elif malha or str(cob.get("metodo") or "") == "malha":
+                linha["malha"] = True
             linha["pontos"].extend(cob.get("paradas_pontos") or [])
             placa = str(item.get("placa") or "")
             if placa:
@@ -581,14 +607,7 @@ def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) ->
         info = por_codigo.get(codigo)
         pct = float(info["percentual"]) if info else 0.0
         paradas = int(info["paradas"]) if info else 0
-        if info and pct >= FEITA_MIN:
-            situacao, detalhe = "Feita", "ruas oficiais cobertas"
-        elif info and pct >= PARCIAL_MIN:
-            situacao, detalhe = "Parcial", "parte das ruas ficou em aberto"
-        elif info:
-            situacao, detalhe = "Não feita", "parou na rota, mas cobriu pouco"
-        else:
-            situacao, detalhe = "Não feita", "nenhum caminhão coletou"
+        situacao, detalhe = _situacao_da_rota(info, pct)
         linhas.append(
             {
                 "codigo": codigo,
@@ -602,10 +621,11 @@ def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) ->
                 "caminhoes": info["caminhoes"] if info else [],
                 "pontos": info["pontos"] if info else [],
                 "placas": info["placas"] if info else [],
+                "casamento": round(float(info["casamento"]), 2) if info else 0.0,
                 "poligonos": setor.get("poligonos") or [],
             }
         )
-    ordem = {"Feita": 0, "Parcial": 1, "Não feita": 2}
+    ordem = {"Feita": 0, "Parcial": 1, "Incerta": 2, "Não feita": 3}
     linhas.sort(
         key=lambda row: (
             2 if row["diario"] else 0 if row["turno"] == "DIURNO" else 1,
@@ -614,6 +634,30 @@ def balanco_frota(setores: list[dict[str, Any]], frota: list[dict[str, Any]]) ->
         )
     )
     return linhas
+
+
+def _situacao_da_rota(info: dict[str, Any] | None, pct: float) -> tuple[str, str]:
+    if not info:
+        return "Não feita", "nenhum caminhão coletou"
+    casa = float(info.get("casamento") or 0)
+    malha = bool(info.get("malha"))
+    conf = str(info.get("conf_rastreio") or "").lower()
+    verd = str(info.get("veredicto") or "").upper()
+    # Feita: eixo na malha + casamento firme + densidade de pulso.
+    if pct >= FEITA_MIN:
+        if malha and conf != "baixa" and casa >= 0.55 and verd != "INCERTA":
+            return "Feita", "eixo confirmado na malha oficial"
+        return (
+            "Incerta",
+            "cobertura alta, mas o trajeto na via ainda não fecha a certeza",
+        )
+    if pct >= PARCIAL_MIN:
+        if casa < 0.40 or conf == "baixa" or verd == "INCERTA":
+            return "Incerta", "há passagem, porém o casamento GPS na via ficou frágil"
+        return "Parcial", "parte das ruas oficiais ficou em aberto"
+    if int(info.get("paradas") or 0) > 0:
+        return "Não feita", "parou na rota, mas cobriu pouco"
+    return "Não feita", "nenhum caminhão coletou"
 
 
 def _faixa_agenda(row: dict[str, Any]) -> str:
@@ -642,9 +686,11 @@ def _texto_decisao(dia: date, balanco: list[dict[str, Any]]) -> list[str]:
             f"{len(balanco)} rotas programadas neste dia. "
             f"{_conta(len(feitas), 'feita', 'feitas')}, "
             f"{_conta(len(parciais), 'parcial', 'parciais')}, "
+            f"{_conta(sum(1 for r in balanco if r['situacao'] == 'Incerta'), 'incerta', 'incertas')}, "
             f"{_conta(len(nao), 'não feita', 'não feitas')}."
         ),
-        "Feita é pelo menos 90% do eixo das ruas oficiais percorrido pelo trajeto casado na malha. Passar perto, sem entrar na via, não conta.",
+        "Feita só com eixo confirmado na malha (≥90%). Passar perto sem entrar na via não conta. "
+        "Incerta = cobertura sem certeza do trajeto.",
     ]
     for faixa in ("Diurno", "Noturno", "Noturno diário", "Sem turno"):
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
@@ -652,13 +698,15 @@ def _texto_decisao(dia: date, balanco: list[dict[str, Any]]) -> list[str]:
             continue
         n_feita = sum(1 for r in grupo if r["situacao"] == "Feita")
         n_parcial = sum(1 for r in grupo if r["situacao"] == "Parcial")
+        n_incerta = sum(1 for r in grupo if r["situacao"] == "Incerta")
         n_nao = sum(1 for r in grupo if r["situacao"] == "Não feita")
         linhas.append(
             f"{faixa}: {_conta(n_feita, 'feita', 'feitas')}, "
             f"{_conta(n_parcial, 'parcial', 'parciais')}, "
+            f"{_conta(n_incerta, 'incerta', 'incertas')}, "
             f"{_conta(n_nao, 'não feita', 'não feitas')}."
         )
-        pronto = [r for r in grupo if r["situacao"] in {"Feita", "Parcial"}]
+        pronto = [r for r in grupo if r["situacao"] in {"Feita", "Parcial", "Incerta"}]
         if pronto:
             linhas.append(
                 "Feito: "

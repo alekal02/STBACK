@@ -276,7 +276,10 @@ def _casar_frota(
     for item in rotas:
         placa = str(item.get("placa") or "")
         if str(item.get("origem_pulso") or "") == "salvo" and _restaurar_tracos(item, por_placa.get(placa)):
-            continue
+            # Trajeto frágil não fica preso no cache — recasa para fechar a certeza.
+            casa = float((item.get("_casamento") or {}).get("confianca") or 0)
+            if casa >= 0.55:
+                continue
         pendentes.append(item)
     if not pendentes:
         return
@@ -416,6 +419,71 @@ def carregar_resumo(pasta_output: Path, dia: date) -> dict[str, Any] | None:
     if not arquivo.is_file():
         return None
     return json.loads(arquivo.read_text(encoding="utf-8"))
+
+
+def _ultimo_pulso_salvo(pasta: Path, dia: date) -> datetime | None:
+    from .gps import _datetime_do_timestamp
+
+    arquivo = pasta / "pontos.json"
+    if not arquivo.is_file():
+        return None
+    try:
+        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    marcas: list[datetime] = []
+    for pontos in (bruto or {}).values():
+        if not isinstance(pontos, list):
+            continue
+        for ponto in pontos:
+            if not isinstance(ponto, dict):
+                continue
+            marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
+            if marca is not None:
+                marcas.append(marca)
+    return max(marcas) if marcas else None
+
+
+def congelar_conta(
+    settings: Settings,
+    *,
+    on_progress: Progresso | None = None,
+) -> dict[str, Any]:
+    """Trava o último pulso já salvo e devolve o resumo. Não busca Segtrack de novo."""
+
+    def progress(msg: str) -> None:
+        print(msg, flush=True)
+        if on_progress:
+            on_progress(msg)
+
+    dia = settings.data_rota
+    pasta = settings.output_dir / dia.isoformat()
+    arquivo = pasta / "resumo.json"
+    if not arquivo.is_file():
+        raise FileNotFoundError("Ainda não há frota deste turno para congelar.")
+    resumo = json.loads(arquivo.read_text(encoding="utf-8"))
+    if not isinstance(resumo, dict):
+        raise RuntimeError("Resumo da frota inválido.")
+    inicio, fim = janela_datetime(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)
+    agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
+    ultimo = _ultimo_pulso_salvo(pasta, dia)
+    if ultimo is not None:
+        congelado = min(max(ultimo, inicio), fim)
+    elif agora < inicio:
+        congelado = inicio
+    elif agora > fim:
+        congelado = fim
+    else:
+        congelado = agora
+    resumo["congelado_em"] = congelado.isoformat(timespec="seconds")
+    resumo["congelado_por_pedido"] = True
+    arquivo.write_text(json.dumps(resumo, ensure_ascii=False), encoding="utf-8")
+    (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
+    progress(
+        f"Conta congelada no último pulso às {congelado.strftime('%H:%M:%S')}. "
+        "Gerando o relatório com o que já estava no mapa."
+    )
+    return resumo
 
 
 _AO_VIVO = threading.Lock()

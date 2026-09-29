@@ -67,6 +67,9 @@ def _rodar(settings: Settings, com_pdf: bool = True) -> None:
     finally:
         with JOB["lock"]:
             JOB["rodando"] = False
+        from .whatsapp import _fechar_frota_do_coletor
+
+        _fechar_frota_do_coletor()
 
 
 def _rota_vista(caminho: str) -> tuple[str, str] | None:

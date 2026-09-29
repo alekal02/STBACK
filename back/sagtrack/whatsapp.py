@@ -21,6 +21,9 @@ _VISTOS: set[str] = set()
 _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
+_FROTA_ABERTA = False
+_FROTA_GERACAO = 0
+_FROTA_NO_COLETOR = 0
 _CONFIG_LOCK = threading.Lock()
 _AVISO: dict[str, Any] | None = None
 _PENDENTES: list[dict[str, Any]] = []
@@ -870,6 +873,39 @@ def relogio_pdf(settings: Settings) -> None:
         time.sleep(3600)
 
 
+def _abrir_frota() -> int | None:
+    """Marca a geração da frota. None quando outra já está aberta."""
+    global _FROTA_ABERTA, _FROTA_GERACAO
+    with _LOCK:
+        if _FROTA_ABERTA:
+            return None
+        _FROTA_GERACAO += 1
+        _FROTA_ABERTA = True
+        return _FROTA_GERACAO
+
+
+def _fechar_frota(geracao: int) -> None:
+    global _FROTA_ABERTA
+    with _LOCK:
+        if geracao and _FROTA_GERACAO == geracao:
+            _FROTA_ABERTA = False
+
+
+def _passar_frota_ao_coletor(geracao: int) -> None:
+    global _FROTA_NO_COLETOR
+    with _LOCK:
+        _FROTA_NO_COLETOR = geracao
+
+
+def _fechar_frota_do_coletor() -> None:
+    global _FROTA_ABERTA, _FROTA_NO_COLETOR
+    with _LOCK:
+        geracao = _FROTA_NO_COLETOR
+        _FROTA_NO_COLETOR = 0
+        if geracao and _FROTA_GERACAO == geracao:
+            _FROTA_ABERTA = False
+
+
 def _reservar_coleta(data_iso: str, aviso: str) -> bool:
     """Reserva a atualização da frota. Uma coleta parada há mais de 12 minutos não bloqueia a próxima."""
     from .server import JOB
@@ -985,46 +1021,50 @@ def _nome_pedido(tipo: str, consulta: str) -> str:
 
 
 def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
-    """Manda o link de cada pedido do grupo assim que a conta fica gravada."""
+    """Manda o descritivo e o PDF de cada pedido assim que a conta fica gravada."""
     pedidos = _retirar_pedidos()
-    if not pedidos:
-        return
-    for pedido in pedidos:
-        grupo = str(pedido["grupo"])
-        try:
-            if falha:
-                enviar_texto(settings, grupo, f"Não consegui fechar a conta agora: {falha}")
-                _ULTIMO_ENVIO.update({"fase": "erro", "erro": falha})
-                continue
-            dia = date.fromisoformat(str(pedido["dia"]))
-            if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
-                enviar_texto(
-                    settings,
-                    grupo,
-                    "Não consegui gravar os pulsos deste turno. Peça de novo neste grupo.",
-                )
-                continue
-            tipo = str(pedido["tipo"])
-            consulta = str(pedido["consulta"])
-            _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=False)
-            _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": tipo, "consulta": consulta})
-        except Exception as exc:
-            print(f"WhatsApp: {exc}", flush=True)
+    try:
+        if not pedidos:
+            return
+        for pedido in pedidos:
+            grupo = str(pedido["grupo"])
             try:
-                enviar_texto(settings, grupo, f"Não consegui enviar o relatório: {exc}")
-            except Exception:
-                pass
+                if falha:
+                    enviar_texto(settings, grupo, f"Não consegui fechar a conta agora: {falha}")
+                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": falha})
+                    continue
+                dia = date.fromisoformat(str(pedido["dia"]))
+                if not (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+                    enviar_texto(
+                        settings,
+                        grupo,
+                        "Não consegui gravar os pulsos deste turno. Peça de novo neste grupo.",
+                    )
+                    continue
+                tipo = str(pedido["tipo"])
+                consulta = str(pedido["consulta"])
+                _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=False)
+                _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": tipo, "consulta": consulta})
+            except Exception as exc:
+                print(f"WhatsApp: {exc}", flush=True)
+                try:
+                    enviar_texto(settings, grupo, f"Não consegui enviar o relatório: {exc}")
+                except Exception:
+                    pass
+    finally:
+        _fechar_frota_do_coletor()
 
 
-def _disparar_coleta(settings: Settings, dia: date) -> None:
-    """A mesma atualização do botão, disparada pelo grupo."""
+def _disparar_coleta(settings: Settings, dia: date) -> bool:
+    """A mesma atualização do painel, disparada pelo grupo."""
     from .config import aplicar_periodo
     from .server import _rodar
 
     ajustado = aplicar_periodo(settings, data=dia.isoformat())
     if not _reservar_coleta(dia.isoformat(), f"Pedido do grupo · {dia.isoformat()}"):
-        return
+        return False
     threading.Thread(target=_rodar, args=(ajustado,), kwargs={"com_pdf": False}, daemon=True).start()
+    return True
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
@@ -1122,36 +1162,56 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         dia = dia_pedido or _DIAS.get(chave) or dia_operacional()
         if dia_pedido is not None:
             _DIAS[chave] = dia_pedido
-        inicio = time.perf_counter()
-        _ULTIMO_ENVIO.clear()
-        _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
-        recente = conta_recente(settings, dia)
-        atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
-        if recente and not atualizar_rota:
-            _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
-            _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})
+        geracao_frota = _abrir_frota() if tipo == "frota" else 0
+        if tipo == "frota" and not geracao_frota:
+            enviar_texto(
+                settings,
+                mensagem["grupo"],
+                "O relatório da frota está sendo produzido. Precisa aguardar até terminar.",
+            )
             return
-        _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
-        from .server import JOB
+        try:
+            inicio = time.perf_counter()
+            _ULTIMO_ENVIO.clear()
+            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
+            recente = conta_recente(settings, dia)
+            atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
+            if recente and not atualizar_rota:
+                _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
+                _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})
+                return
+            _guardar_pedido(mensagem["grupo"], tipo, consulta, dia)
+            from .server import JOB
 
-        with JOB["lock"]:
-            desde = float(JOB.get("desde") or 0)
-            rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
-        nome = _nome_pedido(tipo, consulta)
-        if rodando:
-            texto = (
-                f"Recebi {nome}. A conta já está fechando. "
-                "O PDF chega neste grupo assim que terminar."
-            )
-        else:
-            texto = (
-                f"Recebi {nome}. Buscando os pulsos na ordem do horário. "
-                "O PDF chega neste grupo quando a conta fechar."
-            )
-        enviar_texto(settings, mensagem["grupo"], texto)
-        if not rodando:
-            _disparar_coleta(settings, dia)
-        _ULTIMO_ENVIO.update({"fase": "coleta", "total_s": round(time.perf_counter() - inicio, 1)})
+            with JOB["lock"]:
+                desde = float(JOB.get("desde") or 0)
+                rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
+            nome = _nome_pedido(tipo, consulta)
+            if rodando:
+                texto = (
+                    f"Recebi {nome}. A conta já está fechando. "
+                    "O PDF chega neste grupo assim que terminar."
+                )
+            else:
+                texto = (
+                    f"Recebi {nome}. Buscando os pulsos na ordem do horário. "
+                    "O PDF chega neste grupo quando a conta fechar."
+                )
+            enviar_texto(settings, mensagem["grupo"], texto)
+            if tipo == "frota":
+                _passar_frota_ao_coletor(geracao_frota)
+            if rodando:
+                seguiu = True
+            else:
+                seguiu = _disparar_coleta(settings, dia)
+            if tipo == "frota" and seguiu:
+                geracao_frota = 0
+            elif tipo == "frota":
+                _passar_frota_ao_coletor(0)
+            _ULTIMO_ENVIO.update({"fase": "coleta", "total_s": round(time.perf_counter() - inicio, 1)})
+        finally:
+            if geracao_frota:
+                _fechar_frota(geracao_frota)
     except Exception as exc:
         _ULTIMO_ENVIO["fase"] = "erro"
         _ULTIMO_ENVIO["erro"] = str(exc)

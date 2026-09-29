@@ -486,6 +486,7 @@ def trajetoria_uniforme(
     salto_max_m: float = 120.0,
     cola_m: float = 12.0,
     rua_m: float = 40.0,
+    teto_m: float = 1200.0,
 ) -> list[list[list[float]]]:
     """Liga os pulsos pela hora e, quando o pulso está na via oficial, segue o meio da rua."""
     marcas: list[tuple[datetime, Ponto]] = []
@@ -592,7 +593,7 @@ def trajetoria_uniforme(
         dt = abs((momento - anterior[3]).total_seconds())
         pela_forma = max(reta * 2.4, reta + 140.0)
         pela_hora = (42 / 3.6) * dt + 50 if dt > 0 else 80.0
-        limite = min(1200.0, pela_forma, pela_hora)
+        limite = min(teto_m, pela_forma, pela_hora)
         fatia = _ligar_na_rede(ruas, comps, adj, anterior[0], anterior[1], indice, along, limite)
         if fatia is None and reta <= 40:
             fatia = [anterior[2], ponto]
@@ -637,6 +638,72 @@ def ordem_do_pulso(ponto: dict[str, Any]) -> tuple[int, datetime | str]:
     if marca is None:
         return (1, texto)
     return (0, marca)
+
+
+def tracos_entre_pulsos(
+    pontos: list[dict[str, Any]],
+    salto_max_m: float = 160,
+    dia: date | None = None,
+    vias: list[list[list[float]]] | None = None,
+) -> list[list[list[float]]]:
+    """Liga os pulsos pela hora. Longe, segue a via até o próximo pulso. Sem via, não corta o mapa."""
+    ordenados = sorted(pontos or [], key=ordem_do_pulso)
+    marcas: list[tuple[datetime, dict[str, Any], Ponto]] = []
+    referencia = dia or date.today()
+    for ponto in ordenados:
+        lat = ponto.get("latitude")
+        lon = ponto.get("longitude")
+        if lat is None or lon is None:
+            continue
+        momento = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), referencia)
+        marcas.append((momento or datetime.min, ponto, (float(lat), float(lon))))
+    if len(marcas) < 2:
+        return []
+
+    def vias_do_salto(origem: Ponto, destino: Ponto, folga_m: float) -> list[list[list[float]]]:
+        if vias is not None:
+            return vias
+        from .mapa import vias_no_corredor
+
+        return vias_no_corredor(origem, destino, folga_m)
+
+    trechos: list[list[Ponto]] = []
+    atual: list[Ponto] = [marcas[0][2]]
+    anterior = marcas[0]
+    for momento, ponto, coord in marcas[1:]:
+        dist = haversine_m(anterior[2], coord)
+        if dist <= salto_max_m:
+            atual.append(coord)
+            anterior = (momento, ponto, coord)
+            continue
+        dt = abs((momento - anterior[0]).total_seconds()) if momento and anterior[0] else 0.0
+        pelo_tempo = (40 / 3.6) * dt + 120 if dt > 0 else dist * 1.8
+        teto = min(6000.0, max(dist * 1.8, pelo_tempo))
+        fatia: list[list[list[float]]] = []
+        if dist <= teto:
+            folga = min(700.0, max(180.0, dist * 0.45))
+            locais = vias_do_salto(anterior[2], coord, folga)
+            if locais:
+                fatia = trajetoria_uniforme(
+                    [anterior[1], ponto],
+                    locais,
+                    dia=referencia,
+                    salto_max_m=1,
+                    rua_m=50,
+                    teto_m=teto,
+                )
+        if fatia and fatia[0]:
+            _alongar(atual, [(float(p[0]), float(p[1])) for p in fatia[0]])
+            if haversine_m(atual[-1], coord) > 4:
+                atual.append(coord)
+        else:
+            if len(atual) >= 2:
+                trechos.append(atual)
+            atual = [coord]
+        anterior = (momento, ponto, coord)
+    if len(atual) >= 2:
+        trechos.append(atual)
+    return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(trecho) >= 2]
 
 
 def tracos_na_ordem(pontos: list[dict[str, Any]], salto_max_m: float = 160) -> list[list[list[float]]]:

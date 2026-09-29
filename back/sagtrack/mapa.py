@@ -167,6 +167,36 @@ def _codigo_setor(texto: str) -> str:
     return achado.group(1) if achado else ""
 
 
+_LINHAS_VIA: list[Any] | None = None
+_ARVORE_VIA: Any = None
+
+
+def vias_no_corredor(origem: tuple[float, float], destino: tuple[float, float], folga_m: float) -> list[list[list[float]]]:
+    """Ruas oficiais entre dois pulsos. A trajetória longa escolhe o caminho por aqui."""
+    global _LINHAS_VIA, _ARVORE_VIA
+    from shapely.geometry import box
+    from shapely.strtree import STRtree
+
+    if _LINHAS_VIA is None:
+        _LINHAS_VIA = carregar_vias()
+        _ARVORE_VIA = STRtree(_LINHAS_VIA) if _LINHAS_VIA else False
+    if not _ARVORE_VIA:
+        return []
+    ax, ay = TO_UTM.transform(float(origem[1]), float(origem[0]))
+    bx, by = TO_UTM.transform(float(destino[1]), float(destino[0]))
+    zona = box(min(ax, bx) - folga_m, min(ay, by) - folga_m, max(ax, bx) + folga_m, max(ay, by) + folga_m)
+    saida: list[list[list[float]]] = []
+    for indice in _ARVORE_VIA.query(zona):
+        linha = _LINHAS_VIA[int(indice)]
+        coords = []
+        for x, y in linha.coords:
+            lon, lat = TO_WGS.transform(float(x), float(y))
+            coords.append([lat, lon])
+        if len(coords) >= 2:
+            saida.append(coords)
+    return saida
+
+
 def carregar_vias() -> list[Any]:
     arquivo = _sincronizar_gpkg()
     if not arquivo:

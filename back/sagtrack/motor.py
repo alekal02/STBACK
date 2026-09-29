@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, haversine_m, tracos_na_ordem
+from .gps import _datetime_do_timestamp, haversine_m, tracos_entre_pulsos, tracos_na_ordem
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
@@ -120,7 +120,7 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "gps": tracos_na_ordem(pontos),
+        "gps": item.get("_tracos") or tracos_na_ordem(pontos),
         "poligonos": poligonos[:3],
     }
 
@@ -286,6 +286,9 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         medir_presenca(refazer, setores, dia)
     _aplicar_apoio(rotas)
 
+    progress("Ligando os pulsos pela hora. O salto longo segue a via.")
+    for item in rotas:
+        item["_tracos"] = tracos_entre_pulsos(item.get("pontos") or [], dia=dia)
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
     resumo["congelado_em"] = congelado.isoformat(timespec="seconds")

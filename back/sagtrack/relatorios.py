@@ -798,11 +798,11 @@ def _gps_na_rota(
     placa: str,
     pontos_por_placa: dict[str, list],
 ) -> list[list[list[float]]]:
-    from .gps import tracos_na_ordem
+    from .gps import tracos_entre_pulsos
     from .pdfmapa import _dentro_da_rota
 
     brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-    return tracos_na_ordem(brutos)
+    return tracos_entre_pulsos(brutos, dia=dia)
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:

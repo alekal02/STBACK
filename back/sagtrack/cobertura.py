@@ -13,31 +13,26 @@ from .gps import haversine_m
 TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
 TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
 
-RAIO_M = 25.0
-PASSO_M = 35.0
+RAIO_M = 22.0
+PASSO_M = 30.0
 SALTO_GPS_M = 160.0
 FEITA_MIN = 70.0
 PARCIAL_MIN = 20.0
 
 
 def _trecho_coberto(trecho: LineString, gps_geom, raio_m: float) -> bool:
-    """Via feita só se o meio do pedaço está no GPS e a maior parte dos pontos também."""
+    """Via feita só se o pedaço inteiro está no GPS — evita marcar rua lateral só pelo cruzamento."""
     if gps_geom is None or gps_geom.is_empty or trecho.is_empty:
         return False
-    try:
-        meio = trecho.interpolate(0.5, normalized=True)
-    except Exception:
-        return gps_geom.distance(trecho) <= raio_m
-    if gps_geom.distance(meio) > raio_m:
-        return False
-    amostras = [meio]
-    for frac in (0.2, 0.8):
+    amostras = []
+    for frac in (0.15, 0.5, 0.85):
         try:
             amostras.append(trecho.interpolate(frac, normalized=True))
         except Exception:
             continue
-    perto = sum(1 for p in amostras if gps_geom.distance(p) <= raio_m)
-    return perto >= 2
+    if not amostras:
+        return gps_geom.distance(trecho) <= raio_m
+    return all(gps_geom.distance(p) <= raio_m for p in amostras)
 
 
 def _xy(ponto: dict[str, Any] | tuple[float, float]) -> tuple[float, float] | None:

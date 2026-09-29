@@ -721,7 +721,17 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
             if bruto:
                 faltando_rota = _linhas_leves(bruto.get("trechos_faltando"))
                 break
-    coletando = [c for c in presentes if c["papel"] in {"ATUANDO", "APOIO"}]
+    coletando = [
+        c
+        for c in presentes
+        if c["papel"] == "ATUANDO"
+        or (
+            c["papel"] == "APOIO"
+            and int(c.get("paradas") or 0) >= 3
+            and float(c.get("percentual") or 0) >= PARCIAL_MIN
+            and float(c.get("minutos_parado") or 0) >= 15
+        )
+    ]
     sobreposicao = len(coletando) >= 2
     if coletando:
         base = max(coletando, key=lambda c: float(c.get("percentual") or 0))
@@ -731,44 +741,31 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
     conclusao = _conclusao(pct, bool(coletando))
     titulo = f"{codigo} — {setor.get('nome') or ''}".strip(" —")
     nome_conclusao = _nome_conclusao(conclusao)
+    falta = max(0.0, round(100.0 - pct, 1))
     linhas = [
-        f"Rota {titulo} · {dia.strftime('%d/%m/%Y')} · {setor.get('frequencia') or 'sem turno no mapa'}",
-        f"Conclusão: {nome_conclusao} · {_fmt_pct(pct)} das ruas oficiais.",
+        f"*{codigo} {setor.get('nome') or ''}* · {dia.strftime('%d/%m/%Y')}",
+        f"{nome_conclusao} · {_fmt_pct(pct)} feita · {_fmt_pct(falta)} em aberto",
     ]
-    if not presentes:
-        linhas.append("Nenhum caminhão da Segtrack entrou neste polígono no dia.")
-    elif coletando:
-        linhas.append(
-            f"{len(coletando)} caminhão(ões) com parada de coleta. "
-            + ("Há sobreposição: mais de um fez coleta nesta rota." if sobreposicao else "Sem sobreposição de coleta.")
-        )
-    elif any(c["papel"] == "PERMANENCIA" for c in presentes):
-        linhas.append("Houve permanência neste polígono, sem coleta da rota. Isso não conta como rota feita.")
-    else:
-        linhas.append(
-            f"{len(presentes)} caminhão(ões) passaram por este polígono sem coleta. A rota fica não feita."
-        )
-    for caminhao in sorted(presentes, key=lambda c: ({"ATUANDO": 0, "APOIO": 1, "PASSAGEM": 2}.get(c["papel"], 9), -float(c["percentual"] or 0))):
-        papel = {
-            "ATUANDO": "atuando na rota",
-            "APOIO": "apoio com parada de coleta",
-            "PERMANENCIA": "permaneceu sem coletar",
-            "PASSAGEM": "só passagem",
-        }.get(caminhao["papel"], caminhao["papel"])
-        if caminhao["papel"] in {"ATUANDO", "APOIO"}:
+    if coletando:
+        for caminhao in sorted(coletando, key=lambda c: -float(c.get("percentual") or 0)):
+            papel = "atuou" if caminhao["papel"] == "ATUANDO" else "apoio"
             linhas.append(
                 f"{_nome(caminhao)} · {papel} · {_fmt_pct(caminhao['percentual'])} · "
-                f"{caminhao['paradas']} paradas · {caminhao['minutos_parado']} min parado"
+                f"{caminhao['paradas']} paradas · {caminhao['minutos_parado']} min"
             )
-        else:
-            linhas.append(
-                f"{_nome(caminhao)} · {papel} · {caminhao['paradas']} paradas · "
-                f"{caminhao['minutos_parado']} min. Não entra na conclusão."
-            )
-    linhas.append(
-        "O percentual conta só quem atuou ou fez apoio nesta rota. "
-        "Apoio exige 20% das ruas e 15 minutos parado. Abaixo de 20% fica como passagem."
-    )
+        if sobreposicao:
+            linhas.append("Mais de um caminhão coletou nesta rota.")
+    elif presentes:
+        n_pass = sum(1 for c in presentes if c["papel"] in {"PASSAGEM", "APOIO"})
+        n_perm = sum(1 for c in presentes if c["papel"] == "PERMANENCIA")
+        partes = []
+        if n_pass:
+            partes.append(f"{n_pass} passagem")
+        if n_perm:
+            partes.append(f"{n_perm} permanência")
+        linhas.append("Sem coleta. " + ", ".join(partes) + ".")
+    else:
+        linhas.append("Nenhum caminhão entrou neste polígono.")
     return {
         "tipo": "rota",
         "data": dia.isoformat(),
@@ -776,6 +773,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str) -> dict[str, Any]
         "texto": linhas,
         "conclusao": conclusao,
         "percentual": round(pct, 1),
+        "percentual_aberto": falta,
         "sobreposicao": sobreposicao,
         "setores": [
             {
@@ -843,13 +841,7 @@ def relatorio_placa(output_dir: Path, dia: date, consulta: str) -> dict[str, Any
             + "; ".join(f"{c['setor']} ({c['minutos_permanencia']} min)" for c in permanencias)
         )
     if passagens:
-        linhas.append(
-            f"Passou sem coletar em {len(passagens)} rota(s): "
-            + ", ".join(str(c["codigo"] or c["setor"]) for c in passagens[:8])
-        )
-    linhas.append(
-        "Cada rota abaixo teve coleta de verdade. Cruzar um polígono no caminho não entra nesta lista."
-    )
+        linhas.append(f"Passagem em {len(passagens)} rota(s) (não entra na conta).")
     coleta = [c for c in tocados if c["papel"] in {"ATUANDO", "APOIO"}]
     return {
         "tipo": "placa",

@@ -524,8 +524,8 @@ def renderizar_mapa(
         if vias in {"ambas", "abertas"}:
             grupos.append((item.get("faltando") or [], (176, 28, 18)))
         if vias in {"ambas", "feitas"}:
-            # Feitas entram só quando não há trajeto do caminhão (evita linha dupla).
-            if not pintados:
+            # Em "ambas" sempre pinta o feito (verde). Em "feitas" sozinha, só se não houver GPS.
+            if vias == "ambas" or not pintados:
                 grupos.append((item.get("feitos") or [], (15, 122, 68)))
         for grupo, cor_via in grupos:
             for trilha in grupo:
@@ -948,6 +948,7 @@ def _folhas_da_rota(
     frota: list[dict[str, Any]],
     *,
     gps_por_placa: dict[str, list] | None = None,
+    pct_feito: float | None = None,
 ) -> list[tuple[str, bytes, str]]:
     del pontos
     feitos, faltando = _preparar_vias(
@@ -963,36 +964,51 @@ def _folhas_da_rota(
         trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
         legendas = []
-    base_feito = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
-    base_aberto = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": faltando}
-    if faltando:
-        legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
+    if pct_feito is None:
+        n_f = len(feitos or [])
+        n_a = len(faltando or [])
+        pct_feito = round(100.0 * n_f / (n_f + n_a), 1) if (n_f + n_a) else 0.0
+    pct_aberto = max(0.0, round(100.0 - float(pct_feito or 0), 1))
+    # Um mapa: verde = feita, vermelho = em aberto, trajeto GPS por cima.
+    base = {
+        "aneis": aneis,
+        "rotulo": codigo,
+        "feitos": list(feitos or []),
+        "faltando": list(faltando or []),
+    }
+    if legendas:
+        nomes = ", ".join(p for p, _c in legendas)
+        legenda = (
+            f"Verde = via feita · vermelho = em aberto ({_fmt_pct_local(pct_aberto)}). "
+            f"Trajeto: {nomes}."
+        )
     else:
-        legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
-    if len(legendas) > 1:
-        legenda_feito = "Realizado. Cada cor é um caminhão. Caminho real do GPS na rota."
-    else:
-        legenda_feito = "Realizado. Caminho real do caminhão na rota (GPS). Sem pontos de coleta."
+        legenda = (
+            f"Verde = via feita · vermelho = em aberto ({_fmt_pct_local(pct_aberto)}). "
+            "Azul = caminho GPS."
+        )
     return [
         (
-            f"{titulo} · realizado",
+            f"{titulo} · {_fmt_pct_local(pct_aberto)} em aberto",
             renderizar_mapa(
-                [base_feito],
+                [base],
                 [],
                 [],
                 aneis,
-                vias="feitas",
+                vias="ambas",
                 tracos_cor=pintados,
                 legenda_placas=legendas,
             ),
-            legenda_feito,
-        ),
-        (
-            f"{titulo} · em aberto",
-            renderizar_mapa([base_aberto], [], [], aneis, vias="abertas"),
-            legenda_aberta,
+            legenda,
         ),
     ]
+
+
+def _fmt_pct_local(pct: float) -> str:
+    try:
+        return f"{float(pct):.1f}".replace(".", ",") + "%"
+    except (TypeError, ValueError):
+        return "0%"
 
 
 def _falta_pct(pct: float) -> int:
@@ -1453,7 +1469,10 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     if len(tabela) == 1:
         tabela.append(["—", "Passagem", "0", "0", "0%"])
     aneis = _aneis(setor)
-    titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao} · {_fmt_pct(rel.get('percentual'))}"
+    titulo = (
+        f"{codigo} {setor.get('nome') or ''} · {conclusao} · "
+        f"{_fmt_pct(rel.get('percentual'))} feita · {_fmt_pct(rel.get('percentual_aberto'))} em aberto"
+    )
     nome = f"rota-{codigo}-{dia.isoformat()}.pdf"
     mapas = [
         (folha_titulo, png, legenda, cor)
@@ -1466,6 +1485,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             dia,
             _ler(output_dir / dia.isoformat(), "frota.json") or [],
             gps_por_placa=por_placa,
+            pct_feito=float(rel.get("percentual") or 0),
         )
     ]
     return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome

@@ -30,7 +30,7 @@ _ULTIMO_ENVIO: dict[str, Any] = {}
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
 _PACOTE_MIN = max(5, int(os.getenv("WHATSAPP_PACOTE_MIN", "30") or "30"))
-_REGRAS_SITUACAO = "70/20-r22"
+_REGRAS_SITUACAO = "70/20-r22-apoio2"
 _MAPA_PDF = "gps-leve-v1"
 def _caminho_config() -> Path:
     from .config import pasta_dados
@@ -841,27 +841,38 @@ def _guardar_cache(pasta: Path, chave: str, arquivo: bytes) -> None:
 
 def _texto_frota(settings: Settings, dia: date) -> str:
     from .pdfmapa import _ler, _rotulo_andamento
-    from .relatorios import _fmt_pct, balanco_frota
+    from .relatorios import _fmt_pct, _frota_com_papeis, balanco_frota
 
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return ""
-    balanco = balanco_frota(_ler(pasta, "setores.json") or [], _ler(pasta, "frota.json") or [])
+    frota = _frota_com_papeis(_ler(pasta, "frota.json") or [])
+    balanco = balanco_frota(_ler(pasta, "setores.json") or [], frota)
     feitas = sum(1 for row in balanco if row["situacao"] == "Feita")
     parciais = sum(1 for row in balanco if row["situacao"] == "Parcial")
     nao = sum(1 for row in balanco if row["situacao"] == "Não feita")
     resumo_dia = _ler(pasta, "resumo.json") or {}
     corte = str(resumo_dia.get("congelado_em") or "")
+    n_apoio = sum(
+        1
+        for item in frota
+        for cob in (item.get("coberturas_inlog") or [])
+        if cob.get("papel") == "APOIO"
+    )
     linhas = [
         f"*Frota {dia.strftime('%d/%m/%Y')}* · {feitas} feitas · {parciais} parciais · {nao} não feitas",
     ]
+    if n_apoio:
+        linhas[0] += f" · {n_apoio} apoios"
     if len(corte) >= 16:
         linhas.append(f"Pulsos até {corte[11:16]}.")
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
+        apoio = [c for c in (row.get("caminhoes") or []) if "apoio" in str(c).lower()]
+        extra = f" · apoio: {', '.join(apoio)}" if apoio else ""
         linhas.append(
-            f"{row['codigo']} {row['nome']} · {_fmt_pct(row['percentual'])} · {_rotulo_andamento(row)}"
+            f"{row['codigo']} {row['nome']} · {_fmt_pct(row['percentual'])} · {_rotulo_andamento(row)}{extra}"
         )
     vazias = [str(row["codigo"]) for row in balanco if int(row.get("paradas") or 0) <= 0]
     if vazias:
@@ -1129,19 +1140,14 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 return
 
             if tipo == "frota":
-                # Abre pacote novo. Conta fresca: só remonta PDF, salvo se as regras mudaram.
+                # Abre pacote novo. Conta fresca: só remonta o PDF com as regras atuais.
                 resumo_arquivo = pasta_dia / "resumo.json"
                 idade_s = (
                     time.time() - resumo_arquivo.stat().st_mtime
                     if resumo_arquivo.is_file()
                     else 10**9
                 )
-                pac_antigo = _ler_pacote(pasta_dia)
-                regras_mudaram = bool(
-                    pac_antigo
-                    and str(pac_antigo.get("regras_situacao") or "") != _REGRAS_SITUACAO
-                )
-                if idade_s <= _PACOTE_MIN * 60 and not regras_mudaram:
+                if idade_s <= _PACOTE_MIN * 60:
                     enviar_texto(
                         settings,
                         mensagem["grupo"],

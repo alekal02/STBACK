@@ -1271,16 +1271,15 @@ def _pdf_frota_fiscal(
 def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     import gc
 
-    from .relatorios import _faixa_agenda, _fmt_pct, balanco_frota
+    from .relatorios import _faixa_agenda, _fmt_pct, _frota_com_papeis, balanco_frota
 
     pasta = output_dir / dia.isoformat()
     resumo = _ler(pasta, "resumo.json")
     setores = _ler(pasta, "setores.json") or []
-    frota = _ler(pasta, "frota.json") or []
+    frota = _frota_com_papeis(_ler(pasta, "frota.json") or [])
     if not resumo:
         return _sem_dia(dia), f"frota-{dia.isoformat()}.pdf"
     balanco = balanco_frota(setores, frota)
-    # GPS vem do resumo; frota só entra no balanço (sem trechos no mapa).
     gps_por_placa = {
         str(caminhao.get("placa") or ""): _afinar_gps(caminhao.get("gps") or [], 5)
         for caminhao in (resumo.get("caminhoes") or [])

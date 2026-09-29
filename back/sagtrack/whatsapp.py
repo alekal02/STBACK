@@ -721,25 +721,31 @@ def _produzir_pdf(settings: Settings, dia: date, tipo: str, consulta: str) -> Pa
         return pronto
     if not (pasta / "resumo.json").is_file():
         return None
+    print(f"WhatsApp: montando PDF {tipo} {consulta}".strip(), flush=True)
     if not _GERANDO.acquire(timeout=180):
         return _ultimo_pdf(pasta, chave)
     try:
-        proc = multiprocessing.get_context("spawn").Process(
-            target=_pdf_em_processo,
-            args=(str(settings.output_dir), dia.isoformat(), tipo, consulta, True),
-        )
-        proc.start()
-        proc.join()
+        _montar_pdf(settings, dia, tipo, consulta, forcar=False)
+    except Exception as exc:
+        print(f"WhatsApp: PDF {tipo} falhou: {exc}", flush=True)
+        return None
     finally:
         _GERANDO.release()
-    return _ultimo_pdf(pasta, chave)
+    caminho = _ultimo_pdf(pasta, chave)
+    if caminho is not None:
+        print(f"WhatsApp: PDF pronto · {caminho.stat().st_size} bytes", flush=True)
+    return caminho
 
 
 def _anexar_pdf(settings: Settings, grupo: str, tipo: str, consulta: str, dia: date) -> bool:
     caminho = _produzir_pdf(settings, dia, tipo, consulta)
     if caminho is None:
         return False
-    enviar_pdf(settings, grupo, caminho.read_bytes(), _nome_arquivo_pdf(tipo, consulta, dia))
+    try:
+        enviar_pdf(settings, grupo, caminho.read_bytes(), _nome_arquivo_pdf(tipo, consulta, dia))
+    except Exception as exc:
+        print(f"WhatsApp: falha ao enviar PDF {tipo}: {exc}", flush=True)
+        return False
     print(f"WhatsApp: PDF enviado · {tipo} {consulta}".strip(), flush=True)
     return True
 

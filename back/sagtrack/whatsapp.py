@@ -31,7 +31,7 @@ _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
 _PACOTE_MIN = max(5, int(os.getenv("WHATSAPP_PACOTE_MIN", "30") or "30"))
 _REGRAS_SITUACAO = "70/20-r22"
-_MAPA_PDF = "z16-sem-aberto"
+_MAPA_PDF = "z15-sem-aberto"
 def _caminho_config() -> Path:
     from .config import pasta_dados
 

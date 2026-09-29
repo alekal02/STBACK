@@ -434,9 +434,9 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    # WhatsApp/Render: leve = mais tiles/zoom que antes, ainda seguro em memória.
-    max_zoom = 16 if leve else 17
-    max_cols, max_rows = (7, 6) if leve else (9, 8)
+    # WhatsApp/Render: zoom alto demais estoura memória no PDF da frota.
+    max_zoom = 15 if leve else 17
+    max_cols, max_rows = (6, 5) if leve else (9, 8)
     zoom = 15
     for candidato in range(max_zoom, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
@@ -586,12 +586,12 @@ def renderizar_mapa(
             desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
             y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
-    teto = 2200 if leve else 2800
+    teto = 1800 if leve else 2600
     if imagem.width > teto:
         altura = int(imagem.height * (teto / imagem.width))
         imagem = imagem.resize((teto, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    qualidade = 90 if leve else 93
+    qualidade = 88 if leve else 92
     imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0)
     return saida.getvalue()
 
@@ -1259,6 +1259,8 @@ def _pdf_frota_fiscal(
 
 
 def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
+    import gc
+
     from .relatorios import _faixa_agenda, _fmt_pct, balanco_frota
 
     pasta = output_dir / dia.isoformat()
@@ -1272,8 +1274,10 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         str(caminhao.get("placa") or ""): caminhao.get("gps") or []
         for caminhao in (resumo.get("caminhoes") or [])
     }
+    # resumo é grande; libera o que não precisa no PDF.
+    del resumo
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(55 if _MAPA_LEVE else 90)
+    _abrir_prazo_mapa(50 if _MAPA_LEVE else 90)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
@@ -1300,10 +1304,16 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
             continue
         mapas.append((folha_titulo, png, legenda, cor))
-    periodo = resumo.get("periodo") or _turno(dia)
-    corte = str(resumo.get("congelado_em") or "")
-    if len(corte) >= 16:
-        periodo = f"{periodo} · pulsos até {corte[11:16]}"
+        gc.collect()
+    periodo = ""
+    try:
+        bruto = _ler(pasta, "resumo.json") or {}
+        periodo = bruto.get("periodo") or _turno(dia)
+        corte = str(bruto.get("congelado_em") or "")
+        if len(corte) >= 16:
+            periodo = f"{periodo} · pulsos até {corte[11:16]}"
+    except Exception:
+        periodo = _turno(dia)
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

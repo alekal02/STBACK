@@ -434,9 +434,9 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    # WhatsApp/Render: mapas mais leves para não derrubar o processo.
-    max_zoom = 15 if leve else 17
-    max_cols, max_rows = (5, 4) if leve else (8, 7)
+    # WhatsApp/Render: leve = mais tiles/zoom que antes, ainda seguro em memória.
+    max_zoom = 16 if leve else 17
+    max_cols, max_rows = (7, 6) if leve else (9, 8)
     zoom = 15
     for candidato in range(max_zoom, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
@@ -510,11 +510,12 @@ def renderizar_mapa(
             if len(coords) >= 4:
                 aneis_px.append(coords)
     if aneis_px:
-        fora = Image.new("L", imagem.size, 55)
+        # Fora do setor bem suave — dentro fica o mapa natural das ruas.
+        fora = Image.new("L", imagem.size, 28)
         desenho_fora = ImageDraw.Draw(fora)
         for coords in aneis_px:
             desenho_fora.polygon(coords, fill=0)
-        velo = Image.new("RGBA", imagem.size, (246, 242, 234, 255))
+        velo = Image.new("RGBA", imagem.size, (248, 246, 240, 255))
         velo.putalpha(fora)
         imagem.alpha_composite(velo)
     desenho = ImageDraw.Draw(imagem, "RGBA")
@@ -585,13 +586,13 @@ def renderizar_mapa(
             desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
             y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
-    teto = 1600 if leve else 2600
+    teto = 2200 if leve else 2800
     if imagem.width > teto:
         altura = int(imagem.height * (teto / imagem.width))
         imagem = imagem.resize((teto, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    qualidade = 82 if leve else 92
-    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0 if not leve else 2)
+    qualidade = 90 if leve else 93
+    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0)
     return saida.getvalue()
 
 
@@ -894,33 +895,23 @@ def _mapa_da_rota(
         [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
         frota,
     )
-    malha_rota = list(feitos or []) + list(faltando or [])
+    # Frota: só o GPS nas vias feitas — não desenha ruas em aberto.
+    malha_rota = list(feitos or []) or list(faltando or [])
     if gps_por_placa:
         pintados, legendas = _pintar_por_placa(aneis, gps_por_placa, malha_rota)
     else:
         trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
         legendas = []
-    base = {
-        "aneis": aneis,
-        "rotulo": codigo,
-        "feitos": [],
-        "faltando": list(faltando or []),
-    }
+    base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     if pintados:
         if len(legendas) > 1:
             nomes = ", ".join(p for p, _c in legendas)
-            legenda = (
-                f"Cada cor é um caminhão ({nomes}). "
-                "Vermelho = via da rota ainda sem passagem."
-            )
+            legenda = f"Cada cor é um caminhão ({nomes}). Caminho GPS na rota."
         elif legendas:
-            legenda = (
-                f"{legendas[0][0]}: caminho GPS na rota. "
-                "Vermelho = via planejada ainda sem passagem."
-            )
+            legenda = f"{legendas[0][0]}: caminho GPS na rota."
         else:
-            legenda = "Caminho GPS na rota. Vermelho = via planejada ainda sem passagem."
+            legenda = "Caminho GPS do caminhão na rota."
     else:
         legenda = "Programada para o dia. Nenhum pulso do caminhão entrou nesta rota."
     return (
@@ -930,7 +921,7 @@ def _mapa_da_rota(
             [],
             [],
             aneis,
-            vias="ambas" if faltando else "feitas",
+            vias="feitas",
             tracos_cor=pintados,
             legenda_placas=legendas,
         ),
@@ -1282,7 +1273,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         for caminhao in (resumo.get("caminhoes") or [])
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(35 if _MAPA_LEVE else 90)
+    _abrir_prazo_mapa(55 if _MAPA_LEVE else 90)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue

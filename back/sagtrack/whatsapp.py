@@ -980,29 +980,6 @@ def _reservar_coleta(data_iso: str, aviso: str) -> bool:
         return True
 
 
-def relogio_frota(settings: Settings) -> None:
-    """A cada 45 s guarda pulsos novos e atualiza o mapa. O PDF só nasce no pedido."""
-    from .config import aplicar_periodo, dia_operacional, janela_datetime
-    from .server import JOB, _rodar
-
-    time.sleep(15)
-    while True:
-        try:
-            dia = dia_operacional()
-            ajustado = aplicar_periodo(settings, data=dia.isoformat())
-            inicio, fim = janela_datetime(dia, ajustado.hora_inicio, ajustado.hora_fim, ajustado.data_fim)
-            agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
-            if inicio <= agora <= fim + timedelta(minutes=20):
-                if _reservar_coleta(dia.isoformat(), f"Mapa ao vivo · {dia.isoformat()}"):
-                    print("Frota ao vivo: puxando pulsos novos.", flush=True)
-                    _rodar(ajustado, com_pdf=False)
-        except Exception as exc:
-            print(f"Frota ao vivo: {exc}", flush=True)
-            with JOB["lock"]:
-                JOB["rodando"] = False
-        time.sleep(45)
-
-
 def _texto_frota(settings: Settings, dia: date) -> str:
     from .pdfmapa import _ler, _rotulo_andamento
     from .relatorios import _fmt_pct, balanco_frota
@@ -1108,8 +1085,19 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
                     continue
                 tipo = str(pedido["tipo"])
                 consulta = str(pedido["consulta"])
-                _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=False)
-                _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": tipo, "consulta": consulta})
+                if tipo == "frota":
+                    info = entregar_frota_congelada(settings, grupo, dia)
+                    _ULTIMO_ENVIO.update(
+                        {
+                            "fase": "congelado",
+                            "congelado_em": info.get("congelado_em"),
+                            "total_s": info.get("total_s"),
+                            "tipo": "frota",
+                        }
+                    )
+                else:
+                    _enviar_no_grupo(settings, grupo, tipo, consulta, dia, reutilizado=False)
+                    _ULTIMO_ENVIO.update({"fase": "enviado", "tipo": tipo, "consulta": consulta})
             except Exception as exc:
                 print(f"WhatsApp: {exc}", flush=True)
                 try:
@@ -1118,6 +1106,30 @@ def avisar_coleta_pronta(settings: Settings, falha: str = "") -> None:
                     pass
     finally:
         _fechar_frota_do_coletor()
+
+
+def relogio_frota(settings: Settings) -> None:
+    """A cada ~2 min guarda pulsos novos e atualiza o mapa. O PDF só nasce no pedido."""
+    from .config import aplicar_periodo, dia_operacional, janela_datetime
+    from .server import JOB, _rodar
+
+    time.sleep(20)
+    while True:
+        try:
+            dia = dia_operacional()
+            ajustado = aplicar_periodo(settings, data=dia.isoformat())
+            inicio, fim = janela_datetime(dia, ajustado.hora_inicio, ajustado.hora_fim, ajustado.data_fim)
+            agora = datetime.now(timezone(timedelta(hours=-3))).replace(tzinfo=None, microsecond=0)
+            if inicio <= agora <= fim + timedelta(minutes=20):
+                if _reservar_coleta(dia.isoformat(), f"Mapa ao vivo · {dia.isoformat()}"):
+                    print("Frota ao vivo: puxando pulsos novos.", flush=True)
+                    _rodar(ajustado, com_pdf=False)
+        except Exception as exc:
+            print(f"Frota ao vivo: {exc}", flush=True)
+            with JOB["lock"]:
+                JOB["rodando"] = False
+        # Intervalo maior que o casamento típico, para o pedido de frota achar a conta livre.
+        time.sleep(120)
 
 
 def _disparar_coleta(settings: Settings, dia: date) -> bool:
@@ -1242,39 +1254,13 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             recente = conta_recente(settings, dia)
             atualizar_rota = tipo == "rota" and _rota_repetida(mensagem["grupo"], consulta, dia)
             pasta_dia = settings.output_dir / dia.isoformat()
-            tem_resumo = (pasta_dia / "resumo.json").is_file()
-            # Frota com mapa já atualizado: congela o último pulso e manda o PDF, sem nova coleta.
+            tem_resumo = (pasta_dia / "resumo.json").is_file() and (pasta_dia / "frota.json").is_file()
+            # Frota com conta já gravada: congela na hora. Não espera o pulso ao vivo atual.
             if tipo == "frota" and tem_resumo:
-                from .server import JOB
-
-                with JOB["lock"]:
-                    desde = float(JOB.get("desde") or 0)
-                    rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
-                if rodando:
-                    enviar_texto(
-                        settings,
-                        mensagem["grupo"],
-                        "Recebi a frota. Esperando o pulso do mapa terminar e congelo em seguida.",
-                    )
-                    # Casamento da frota pode passar de 1 min; não congela no meio da gravação.
-                    limite = time.time() + 180
-                    while time.time() < limite:
-                        with JOB["lock"]:
-                            if not JOB["rodando"]:
-                                rodando = False
-                                break
-                        time.sleep(0.5)
-                    if rodando:
-                        enviar_texto(
-                            settings,
-                            mensagem["grupo"],
-                            "O mapa ainda está atualizando. Peça *frota* de novo em 1 minuto.",
-                        )
-                        return
                 enviar_texto(
                     settings,
                     mensagem["grupo"],
-                    "Recebi a frota. Congelando no último pulso do mapa e montando o PDF.",
+                    "Recebi a frota. Congelando no último pulso já salvo e montando o PDF.",
                 )
                 info = entregar_frota_congelada(settings, mensagem["grupo"], dia)
                 _ULTIMO_ENVIO.update(
@@ -1294,9 +1280,15 @@ def processar(body: Any, settings: Settings | None = None) -> None:
 
             with JOB["lock"]:
                 desde = float(JOB.get("desde") or 0)
-                rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 12 * 60)
+                rodando = bool(JOB["rodando"]) and (not desde or time.time() - desde < 20 * 60)
             nome = _nome_pedido(tipo, consulta)
-            if rodando:
+            if tipo == "frota" and rodando:
+                texto = (
+                    f"Recebi {nome}. É a primeira conta deste turno e o mapa ainda está "
+                    "casando os pulsos na malha. O PDF chega neste grupo quando fechar "
+                    "(pode levar alguns minutos só nesta primeira vez)."
+                )
+            elif rodando:
                 texto = (
                     f"Recebi {nome}. A conta já está fechando. "
                     "O PDF chega neste grupo assim que terminar."

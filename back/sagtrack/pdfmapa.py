@@ -207,31 +207,44 @@ def _abrir_prazo_mapa(segundos: float) -> None:
 
 
 def _provedor_mapa() -> str:
-    """Base do mapa: osm (padrão), carto, google (API key) ou esri."""
+    """Base do mapa: osm (padrão), google (API key), esri. Carto sem key cai no OSM."""
     bruto = (os.getenv("SAGTRACK_MAPA_BASE") or "osm").strip().lower()
     if bruto == "google" and not (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip():
         return "osm"
-    if bruto in {"osm", "carto", "google", "esri"}:
+    # Carto passou a exigir API key — tiles vêm com marca d'água e estragam o PDF.
+    if bruto == "carto":
+        return "osm"
+    if bruto in {"osm", "google", "esri"}:
         return bruto
     return "osm"
 
 
 def _url_tile(provedor: str, zoom: int, x: int, y: int) -> str:
-    if provedor == "carto":
-        return f"https://basemaps.cartocdn.com/rastertiles/voyager/{zoom}/{x}/{y}.png"
     if provedor == "esri":
         return (
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
         )
-    # OpenStreetMap (mirror FR — sem API key)
+    # OpenStreetMap FR — sem API key, nomes legíveis.
     return f"https://a.tile.openstreetmap.fr/osmfr/{zoom}/{x}/{y}.png"
+
+
+def _tile_estragado(img: Image.Image) -> bool:
+    """Detecta tile Carto 'API KEY REQUIRED' ou imagem vazia."""
+    if img.width < 64 or img.height < 64:
+        return True
+    amostra = img.resize((16, 16))
+    pixels = list(amostra.getdata())
+    if not pixels:
+        return True
+    # Marca d'água Carto: fundo claro quase uniforme.
+    claros = sum(1 for r, g, b in pixels if r > 220 and g > 220 and b > 220)
+    return claros >= len(pixels) * 0.85
 
 
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
     provedor = _provedor_mapa()
     if provedor == "google":
-        # Google usa mapa estático inteiro em _fundo_estatico, não tile a tile.
         return None
     chave = (zoom, x, y, provedor)
     if chave in _TILE_RUIM:
@@ -241,26 +254,39 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
     pasta.mkdir(parents=True, exist_ok=True)
     ext = "jpg" if provedor == "esri" else "png"
     arquivo = pasta / f"{x}_{y}.{ext}"
-    if not arquivo.is_file():
-        if _TILE_PRAZO and time.monotonic() > _TILE_PRAZO:
-            return None
-        url = _url_tile(provedor, zoom, x, y)
-        pedido = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Segtrack/1.0 (relatorios de coleta; https://github.com/alekal02/STBACK)",
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            },
-        )
+    if arquivo.is_file():
         try:
-            with urllib.request.urlopen(pedido, timeout=8) as resp:
-                arquivo.write_bytes(resp.read())
+            img = Image.open(arquivo).convert("RGB")
+            if _tile_estragado(img):
+                arquivo.unlink(missing_ok=True)
+            else:
+                return img
         except Exception:
+            try:
+                arquivo.unlink(missing_ok=True)
+            except OSError:
+                pass
+    if _TILE_PRAZO and time.monotonic() > _TILE_PRAZO:
+        return None
+    url = _url_tile(provedor, zoom, x, y)
+    pedido = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Segtrack/1.0 (relatorios de coleta; https://github.com/alekal02/STBACK)",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(pedido, timeout=10) as resp:
+            arquivo.write_bytes(resp.read())
+        img = Image.open(arquivo).convert("RGB")
+        if _tile_estragado(img):
+            arquivo.unlink(missing_ok=True)
             _TILE_RUIM.add(chave)
             return None
-    try:
-        return Image.open(arquivo).convert("RGB")
+        return img
     except Exception:
+        _TILE_RUIM.add(chave)
         return None
 
 
@@ -550,18 +576,18 @@ def renderizar_mapa(
                 )
                 desenho.text(canto, rotulo, font=fonte, fill=(28, 36, 48, 255))
     # Trajetória grossa — cada caminhão com a própria cor.
-    traco_px = max(5, int(4.2 * escala))
+    traco_px = max(6, int(5.0 * escala))
     for traco, cor in pintados:
         coords = [px(float(p[0]), float(p[1])) for p in traco if len(p) >= 2]
         if len(coords) < 2:
             continue
-        desenho.line(coords, fill=(255, 255, 255, 240), width=traco_px + 3, joint="curve")
+        desenho.line(coords, fill=(255, 255, 255, 245), width=traco_px + 4, joint="curve")
         desenho.line(coords, fill=(*cor, 255), width=traco_px, joint="curve")
     for coords in aneis_px:
         desenho.line(
             coords + [coords[0]],
-            fill=(194, 65, 12, 255),
-            width=max(3, int(2.4 * escala)),
+            fill=(180, 45, 20, 255),
+            width=max(4, int(3.2 * escala)),
         )
     canto_no = px(norte, oeste)
     canto_sl = px(sul, leste)
@@ -904,15 +930,25 @@ def _mapa_da_rota(
     *,
     gps_por_placa: dict[str, list] | None = None,
 ) -> tuple[str, bytes, str]:
-    # Relatório de frota: só o caminho GPS no polígono — sem ruas em aberto.
-    del pontos, dia, frota
+    # Frota: GPS colado no eixo das vias do polígono. Não desenha ruas em aberto.
+    del pontos
+    feitos, faltando = _preparar_vias(
+        dia,
+        codigo,
+        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
+        frota,
+    )
+    malha = list(feitos or []) + list(faltando or [])
+    pintados: list[tuple[list[list[float]], tuple[int, int, int]]] = []
+    legendas: list[tuple[str, tuple[int, int, int]]] = []
     if gps_por_placa:
-        leve = {placa: _afinar_gps(gps, 4) for placa, gps in gps_por_placa.items()}
-        pintados, legendas = _pintar_por_placa(aneis, leve, [])
+        leve = {placa: _afinar_gps(gps, 2) for placa, gps in gps_por_placa.items() if gps}
+        pintados, legendas = _pintar_por_placa(aneis, leve, malha)
+        if not pintados:
+            pintados, legendas = _pintar_por_placa(aneis, leve, [])
     else:
-        trajeto = _trajeto_do_caminhao(aneis, _afinar_gps(tracos, 4), None)
+        trajeto = _trajeto_do_caminhao(aneis, _afinar_gps(tracos, 2), malha or None)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
-        legendas = []
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     if pintados:
         if len(legendas) > 1:
@@ -930,7 +966,7 @@ def _mapa_da_rota(
             [base],
             [],
             [],
-            aneis,
+            aneis if aneis else None,
             vias="feitas",
             tracos_cor=pintados,
             legenda_placas=legendas,
@@ -1281,22 +1317,35 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         return _sem_dia(dia), f"frota-{dia.isoformat()}.pdf"
     balanco = balanco_frota(setores, frota)
     gps_por_placa = {
-        str(caminhao.get("placa") or ""): _afinar_gps(caminhao.get("gps") or [], 5)
+        str(caminhao.get("placa") or ""): list(caminhao.get("gps") or [])
         for caminhao in (resumo.get("caminhoes") or [])
     }
     periodo = resumo.get("periodo") or _turno(dia)
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:
         periodo = f"{periodo} · pulsos até {corte[11:16]}"
-    del resumo, frota, setores
+    del resumo, setores
     gc.collect()
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(45 if _MAPA_LEVE else 90)
+    _abrir_prazo_mapa(90 if _MAPA_LEVE else 120)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
         placas = [str(p) for p in (row.get("placas") or []) if str(p).strip()]
         por_placa = {placa: gps_por_placa.get(placa) or [] for placa in placas}
+        # Fallback: GPS recortado da cobertura da rota (quando o resumo veio vazio).
+        if not any(por_placa.values()):
+            codigo = str(row.get("codigo") or "")
+            for item in frota:
+                placa = str(item.get("placa") or "")
+                if placa not in placas:
+                    continue
+                for cob in item.get("coberturas_inlog") or []:
+                    if str(cob.get("codigo_rota") or "") != codigo:
+                        continue
+                    trechos = cob.get("trechos_gps") or []
+                    if trechos:
+                        por_placa[placa] = list(trechos)
         tracos = [traco for gps in por_placa.values() for traco in gps]
         estado = _rotulo_andamento(row)
         titulo = (
@@ -1311,7 +1360,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 tracos,
                 [],
                 dia,
-                [],
+                frota,
                 gps_por_placa=por_placa,
             )
         except Exception as exc:
@@ -1319,6 +1368,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             continue
         mapas.append((folha_titulo, png, legenda, cor))
         gc.collect()
+    del frota
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

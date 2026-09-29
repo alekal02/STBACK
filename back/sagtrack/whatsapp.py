@@ -749,6 +749,7 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
+    from . import pdfmapa
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
     pasta = settings.output_dir / dia.isoformat()
@@ -759,12 +760,16 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
             return guardado.read_bytes(), f"frota-{dia.isoformat()}.pdf"
         return guardado.read_bytes(), f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
     selos = {item: item.stat().st_mtime for item in _fontes_do_dia(pasta) if item.is_file()}
-    if tipo == "frota":
-        arquivo, nome = pdf_frota(settings.output_dir, dia)
-    elif tipo == "rota":
-        arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
-    else:
-        arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
+    pdfmapa._MAPA_LEVE = tipo in {"frota", "rota", "placa"}
+    try:
+        if tipo == "frota":
+            arquivo, nome = pdf_frota(settings.output_dir, dia)
+        elif tipo == "rota":
+            arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
+        else:
+            arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
+    finally:
+        pdfmapa._MAPA_LEVE = False
     if selos and all(item.is_file() and item.stat().st_mtime == selo for item, selo in selos.items()):
         _guardar_cache(pasta, chave, arquivo)
     return arquivo, nome
@@ -861,23 +866,39 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             _ULTIMO_ENVIO.clear()
             _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "coleta"})
             if tipo == "frota":
-                enviar_texto(
-                    settings,
-                    mensagem["grupo"],
-                    f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
-                    "e montando o PDF. Pode levar alguns minutos — já envio neste grupo.",
+                pasta_dia = settings.output_dir / dia.isoformat()
+                resumo_arquivo = pasta_dia / "resumo.json"
+                idade_s = (
+                    time.time() - resumo_arquivo.stat().st_mtime
+                    if resumo_arquivo.is_file()
+                    else 10**9
                 )
-                try:
-                    _atualizar_conta(
+                # Conta com menos de 20 min: só monta o PDF (evita matar o Render e demorar de novo).
+                if idade_s <= 20 * 60:
+                    enviar_texto(
                         settings,
-                        dia,
-                        forcar=True,
-                        aviso=f"WhatsApp frota · {dia.isoformat()}",
+                        mensagem["grupo"],
+                        f"Recebi a frota. A conta de {_rotulo_turno(dia)} já está atualizada. "
+                        "Montando o PDF agora e envio neste grupo.",
                     )
-                except RuntimeError as exc:
-                    enviar_texto(settings, mensagem["grupo"], str(exc))
-                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
-                    return
+                else:
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
+                        "e montando o PDF. Pode levar alguns minutos — já envio neste grupo.",
+                    )
+                    try:
+                        _atualizar_conta(
+                            settings,
+                            dia,
+                            forcar=True,
+                            aviso=f"WhatsApp frota · {dia.isoformat()}",
+                        )
+                    except RuntimeError as exc:
+                        enviar_texto(settings, mensagem["grupo"], str(exc))
+                        _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                        return
                 _ULTIMO_ENVIO["fase"] = "resumo"
                 resumo = _texto_frota(settings, dia)
                 if resumo:
@@ -886,7 +907,7 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                     enviar_texto(
                         settings,
                         mensagem["grupo"],
-                        "Conta atualizada. Montando o PDF com os mapas...",
+                        "Conta pronta. Montando o PDF com os mapas...",
                     )
             else:
                 _garantir_coleta(settings, dia)

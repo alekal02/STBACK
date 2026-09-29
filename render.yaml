@@ -29,6 +29,8 @@ services:
         value: http://24.199.86.195:8080
       - key: ALLOW_VERCEL_PREVIEWS
         value: "true"
+      - key: SAGTRACK_MAPA_BASE
+        value: "carto"
       - key: FULLTRACK_BASE_URL
         value: https://web-service2.ftdata.com.br
       - key: FULLTRACK_USERNAME

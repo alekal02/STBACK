@@ -192,8 +192,9 @@ def _tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]:
     return x, y
 
 
-_TILE_RUIM: set[tuple[int, int, int]] = set()
+_TILE_RUIM: set[tuple[int, int, int, str]] = set()
 _TILE_PRAZO = 0.0
+_MAPA_LEVE = False
 
 
 def _abrir_prazo_mapa(segundos: float) -> None:
@@ -201,24 +202,54 @@ def _abrir_prazo_mapa(segundos: float) -> None:
     _TILE_PRAZO = time.monotonic() + segundos
 
 
-def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
-    chave = (zoom, x, y)
-    if chave in _TILE_RUIM:
-        return None
-    bruto = os.getenv("OUTPUT_DIR", "").strip()
-    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / str(zoom)
-    pasta.mkdir(parents=True, exist_ok=True)
-    arquivo = pasta / f"{x}_{y}.jpg"
-    if not arquivo.is_file():
-        if _TILE_PRAZO and time.monotonic() > _TILE_PRAZO:
-            return None
-        url = (
+def _provedor_mapa() -> str:
+    """Base do mapa: carto/osm (OpenStreetMap), google (API key) ou esri."""
+    bruto = (os.getenv("SAGTRACK_MAPA_BASE") or "carto").strip().lower()
+    if bruto == "google" and not (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip():
+        return "carto"
+    if bruto in {"osm", "carto", "google", "esri"}:
+        return bruto
+    return "carto"
+
+
+def _url_tile(provedor: str, zoom: int, x: int, y: int) -> str:
+    if provedor == "carto":
+        return f"https://basemaps.cartocdn.com/rastertiles/voyager/{zoom}/{x}/{y}.png"
+    if provedor == "esri":
+        return (
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
             f"World_Street_Map/MapServer/tile/{zoom}/{y}/{x}"
         )
-        pedido = urllib.request.Request(url, headers={"User-Agent": "Segtrack/1.0"})
+    # OpenStreetMap
+    return f"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
+
+
+def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
+    provedor = _provedor_mapa()
+    if provedor == "google":
+        # Google usa mapa estático inteiro em _fundo_estatico, não tile a tile.
+        return None
+    chave = (zoom, x, y, provedor)
+    if chave in _TILE_RUIM:
+        return None
+    bruto = os.getenv("OUTPUT_DIR", "").strip()
+    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / provedor / str(zoom)
+    pasta.mkdir(parents=True, exist_ok=True)
+    ext = "jpg" if provedor == "esri" else "png"
+    arquivo = pasta / f"{x}_{y}.{ext}"
+    if not arquivo.is_file():
+        if _TILE_PRAZO and time.monotonic() > _TILE_PRAZO:
+            return None
+        url = _url_tile(provedor, zoom, x, y)
+        pedido = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Segtrack/1.0 (relatorios de coleta; https://github.com/alekal02/STBACK)",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
         try:
-            with urllib.request.urlopen(pedido, timeout=6) as resp:
+            with urllib.request.urlopen(pedido, timeout=8) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception:
             _TILE_RUIM.add(chave)
@@ -227,6 +258,87 @@ def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
         return Image.open(arquivo).convert("RGB")
     except Exception:
         return None
+
+
+def _zoom_para_bbox(sul: float, norte: float, oeste: float, leste: float, largura: int, altura: int) -> int:
+    cos = max(0.2, math.cos(math.radians((sul + norte) / 2)))
+    for zoom in range(17, 11, -1):
+        x0, y1 = _tile_xy(sul, oeste, zoom)
+        x1, y0 = _tile_xy(norte, leste, zoom)
+        px_w = abs(x1 - x0) * 256
+        px_h = abs(y1 - y0) * 256
+        if px_w <= largura * 1.05 and px_h <= altura * 1.05:
+            return zoom
+    return 14
+
+
+def _fundo_estatico(
+    sul: float,
+    norte: float,
+    oeste: float,
+    leste: float,
+    *,
+    leve: bool,
+) -> tuple[Image.Image, int, float, float, int, int] | None:
+    """Google Static Maps (só com GOOGLE_MAPS_API_KEY). OSM/Carto usam tiles."""
+    provedor = _provedor_mapa()
+    if provedor != "google":
+        return None
+    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not key:
+        return None
+    centro_lat = (sul + norte) / 2
+    centro_lon = (oeste + leste) / 2
+    if leve:
+        largura, altura = 1280, 900
+    else:
+        largura, altura = 1600, 1100
+    zoom = _zoom_para_bbox(sul, norte, oeste, leste, largura, altura)
+    bruto = os.getenv("OUTPUT_DIR", "").strip()
+    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / "static" / "google"
+    pasta.mkdir(parents=True, exist_ok=True)
+    chave = f"{centro_lat:.5f}_{centro_lon:.5f}_{zoom}_{largura}x{altura}"
+    arquivo = pasta / f"{chave}.png"
+    if not arquivo.is_file():
+        size_w = min(640, max(320, largura // 2))
+        size_h = min(640, max(320, altura // 2))
+        url = (
+            "https://maps.googleapis.com/maps/api/staticmap"
+            f"?center={centro_lat:.6f},{centro_lon:.6f}"
+            f"&zoom={zoom}&size={size_w}x{size_h}&scale=2"
+            f"&maptype=roadmap&language=pt-BR&key={key}"
+        )
+        pedido = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Segtrack/1.0 (relatorios de coleta)"},
+        )
+        try:
+            with urllib.request.urlopen(pedido, timeout=20) as resp:
+                arquivo.write_bytes(resp.read())
+        except Exception as exc:
+            print(f"Mapa Google Static: {exc}", flush=True)
+            return None
+    try:
+        img = Image.open(arquivo).convert("RGB")
+    except Exception:
+        return None
+    return img, zoom, centro_lat, centro_lon, img.width, img.height
+
+
+def _px_estatico(
+    lat: float,
+    lon: float,
+    *,
+    centro_lat: float,
+    centro_lon: float,
+    zoom: int,
+    largura: int,
+    altura: int,
+) -> tuple[int, int]:
+    mundo = 256 * (2**zoom)
+    cx, cy = _tile_xy(centro_lat, centro_lon, zoom)
+    x, y = _tile_xy(lat, lon, zoom)
+    return int((x - cx) * 256 + largura / 2), int((y - cy) * 256 + altura / 2)
 
 
 def _limites(grupos: list[list[list[float]]]) -> tuple[float, float, float, float] | None:
@@ -288,8 +400,11 @@ def renderizar_mapa(
     cor_traco: tuple[int, int, int] = (29, 78, 137),
     tracos_cor: list[tuple[list[list[float]], tuple[int, int, int]]] | None = None,
     legenda_placas: list[tuple[str, tuple[int, int, int]]] | None = None,
+    leve: bool | None = None,
 ) -> bytes:
     del pontos  # Relatório mostra só a trajetória — paradas de coleta não entram no mapa.
+    if leve is None:
+        leve = bool(_MAPA_LEVE)
     pintados = tracos_cor or [(traco, cor_traco) for traco in (tracos or [])]
     linhas_base = [traco for traco, _cor in pintados]
     moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or linhas_base
@@ -315,50 +430,74 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    # Zoom alto (até 17) e mais tiles → mapa nítido no PDF / WhatsApp.
+    # WhatsApp/Render: mapas mais leves para não derrubar o processo.
+    max_zoom = 15 if leve else 17
+    max_cols, max_rows = (5, 4) if leve else (8, 7)
     zoom = 15
-    for candidato in range(17, 14, -1):
+    for candidato in range(max_zoom, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
         x1, y0 = _tile_xy(norte, leste, candidato)
-        if math.floor(x1) - math.floor(x0) <= 8 and math.floor(y1) - math.floor(y0) <= 7:
+        if math.floor(x1) - math.floor(x0) <= max_cols and math.floor(y1) - math.floor(y0) <= max_rows:
             zoom = candidato
             break
-    x0, y1 = _tile_xy(sul, oeste, zoom)
-    x1, y0 = _tile_xy(norte, leste, zoom)
-    tx0, tx1 = math.floor(min(x0, x1)), math.floor(max(x0, x1))
-    ty0, ty1 = math.floor(min(y0, y1)), math.floor(max(y0, y1))
 
-    def limitar(inicio: int, fim: int, limite: int) -> tuple[int, int]:
-        if fim - inicio + 1 <= limite:
-            return inicio, fim
-        meio = (inicio + fim) // 2
-        comeco = max(0, meio - limite // 2)
-        return comeco, comeco + limite - 1
+    provedor = _provedor_mapa()
+    estatico = None
+    if provedor == "google":
+        estatico = _fundo_estatico(sul, norte, oeste, leste, leve=bool(leve))
 
-    tx0, tx1 = limitar(tx0, tx1, 8)
-    ty0, ty1 = limitar(ty0, ty1, 7)
-    cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
-    base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
-    coords = [
-        (ix, iy, tile_x, tile_y)
-        for ix, tile_x in enumerate(range(tx0, tx1 + 1))
-        for iy, tile_y in enumerate(range(ty0, ty1 + 1))
-    ]
+    if estatico is not None:
+        base, zoom, centro_lat, centro_lon, largura_img, altura_img = estatico
+        imagem = base.convert("RGBA")
+        escala = max(1.0, imagem.width / 2000)
 
-    def baixar(item: tuple[int, int, int, int]) -> tuple[int, int, Image.Image | None]:
-        ix, iy, tile_x, tile_y = item
-        return ix, iy, _baixar_tile(zoom, tile_x, tile_y)
+        def px(lat: float, lon: float) -> tuple[int, int]:
+            return _px_estatico(
+                lat,
+                lon,
+                centro_lat=centro_lat,
+                centro_lon=centro_lon,
+                zoom=zoom,
+                largura=largura_img,
+                altura=altura_img,
+            )
+    else:
+        x0, y1 = _tile_xy(sul, oeste, zoom)
+        x1, y0 = _tile_xy(norte, leste, zoom)
+        tx0, tx1 = math.floor(min(x0, x1)), math.floor(max(x0, x1))
+        ty0, ty1 = math.floor(min(y0, y1)), math.floor(max(y0, y1))
 
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        for ix, iy, tile in pool.map(baixar, coords):
-            if tile is not None:
-                base.paste(tile, (ix * 256, iy * 256))
-    imagem = base.convert("RGBA")
-    escala = max(1.0, imagem.width / 2000)
+        def limitar(inicio: int, fim: int, limite: int) -> tuple[int, int]:
+            if fim - inicio + 1 <= limite:
+                return inicio, fim
+            meio = (inicio + fim) // 2
+            comeco = max(0, meio - limite // 2)
+            return comeco, comeco + limite - 1
 
-    def px(lat: float, lon: float) -> tuple[int, int]:
-        xf, yf = _tile_xy(lat, lon, zoom)
-        return int((xf - tx0) * 256), int((yf - ty0) * 256)
+        tx0, tx1 = limitar(tx0, tx1, max_cols)
+        ty0, ty1 = limitar(ty0, ty1, max_rows)
+        cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
+        base = Image.new("RGB", (cols * 256, rows * 256), (244, 241, 234))
+        coords = [
+            (ix, iy, tile_x, tile_y)
+            for ix, tile_x in enumerate(range(tx0, tx1 + 1))
+            for iy, tile_y in enumerate(range(ty0, ty1 + 1))
+        ]
+
+        def baixar(item: tuple[int, int, int, int]) -> tuple[int, int, Image.Image | None]:
+            ix, iy, tile_x, tile_y = item
+            return ix, iy, _baixar_tile(zoom, tile_x, tile_y)
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for ix, iy, tile in pool.map(baixar, coords):
+                if tile is not None:
+                    base.paste(tile, (ix * 256, iy * 256))
+        imagem = base.convert("RGBA")
+        escala = max(1.0, imagem.width / 2000)
+
+        def px(lat: float, lon: float) -> tuple[int, int]:
+            xf, yf = _tile_xy(lat, lon, zoom)
+            return int((xf - tx0) * 256), int((yf - ty0) * 256)
 
     aneis_px: list[list[tuple[int, int]]] = []
     for item in poligonos:
@@ -442,12 +581,13 @@ def renderizar_mapa(
             desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
             y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
-    # Mantém resolução alta no PDF (antes encolhia para 1600 px e perdia nitidez).
-    if imagem.width > 2600:
-        altura = int(imagem.height * (2600 / imagem.width))
-        imagem = imagem.resize((2600, max(1, altura)), Image.Resampling.LANCZOS)
+    teto = 1600 if leve else 2600
+    if imagem.width > teto:
+        altura = int(imagem.height * (teto / imagem.width))
+        imagem = imagem.resize((teto, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    imagem.save(saida, format="JPEG", quality=92, optimize=True, subsampling=0)
+    qualidade = 82 if leve else 92
+    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0 if not leve else 2)
     return saida.getvalue()
 
 
@@ -1111,7 +1251,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         for caminhao in (resumo.get("caminhoes") or [])
     }
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(90)
+    _abrir_prazo_mapa(35 if _MAPA_LEVE else 90)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue

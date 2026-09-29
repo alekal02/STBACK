@@ -31,6 +31,9 @@ services:
         value: "true"
       - key: SAGTRACK_MAPA_BASE
         value: "osm"
+      # Opcional: token Mapbox → SAGTRACK_MAPA_BASE=mapbox e MAPBOX_ACCESS_TOKEN no painel.
+      - key: MAPBOX_ACCESS_TOKEN
+        sync: false
       - key: FULLTRACK_BASE_URL
         value: https://web-service2.ftdata.com.br
       - key: FULLTRACK_USERNAME

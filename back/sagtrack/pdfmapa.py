@@ -207,14 +207,18 @@ def _abrir_prazo_mapa(segundos: float) -> None:
 
 
 def _provedor_mapa() -> str:
-    """Base do mapa: osm (padrão), google (API key), esri. Carto sem key cai no OSM."""
+    """Base do mapa: osm (padrão), mapbox, google, esri. Carto sem key cai no OSM."""
     bruto = (os.getenv("SAGTRACK_MAPA_BASE") or "osm").strip().lower()
     if bruto == "google" and not (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip():
+        return "osm"
+    if bruto == "mapbox" and not (
+        (os.getenv("MAPBOX_ACCESS_TOKEN") or os.getenv("MAPBOX_TOKEN") or "").strip()
+    ):
         return "osm"
     # Carto passou a exigir API key — tiles vêm com marca d'água e estragam o PDF.
     if bruto == "carto":
         return "osm"
-    if bruto in {"osm", "google", "esri"}:
+    if bruto in {"osm", "google", "esri", "mapbox"}:
         return bruto
     return "osm"
 
@@ -244,7 +248,8 @@ def _tile_estragado(img: Image.Image) -> bool:
 
 def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
     provedor = _provedor_mapa()
-    if provedor == "google":
+    if provedor in {"google", "mapbox"}:
+        # Static API monta o fundo inteiro em _fundo_estatico.
         return None
     chave = (zoom, x, y, provedor)
     if chave in _TILE_RUIM:
@@ -310,12 +315,9 @@ def _fundo_estatico(
     *,
     leve: bool,
 ) -> tuple[Image.Image, int, float, float, int, int] | None:
-    """Google Static Maps (só com GOOGLE_MAPS_API_KEY). OSM/Carto usam tiles."""
+    """Mapa estático em uma requisição: Mapbox ou Google. OSM/ESRI usam tiles."""
     provedor = _provedor_mapa()
-    if provedor != "google":
-        return None
-    key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
-    if not key:
+    if provedor not in {"google", "mapbox"}:
         return None
     centro_lat = (sul + norte) / 2
     centro_lon = (oeste + leste) / 2
@@ -325,34 +327,103 @@ def _fundo_estatico(
         largura, altura = 1600, 1100
     zoom = _zoom_para_bbox(sul, norte, oeste, leste, largura, altura)
     bruto = os.getenv("OUTPUT_DIR", "").strip()
-    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / "static" / "google"
+    pasta = (Path(bruto) if bruto else ROOT / "output") / "tiles" / "static" / provedor
     pasta.mkdir(parents=True, exist_ok=True)
     chave = f"{centro_lat:.5f}_{centro_lon:.5f}_{zoom}_{largura}x{altura}"
     arquivo = pasta / f"{chave}.png"
     if not arquivo.is_file():
-        size_w = min(640, max(320, largura // 2))
-        size_h = min(640, max(320, altura // 2))
-        url = (
-            "https://maps.googleapis.com/maps/api/staticmap"
-            f"?center={centro_lat:.6f},{centro_lon:.6f}"
-            f"&zoom={zoom}&size={size_w}x{size_h}&scale=2"
-            f"&maptype=roadmap&language=pt-BR&key={key}"
-        )
+        if provedor == "mapbox":
+            token = (os.getenv("MAPBOX_ACCESS_TOKEN") or os.getenv("MAPBOX_TOKEN") or "").strip()
+            if not token:
+                return None
+            # @2x: imagem nítida; size máx. 1280 no lado.
+            size_w = min(1280, max(400, largura // 2))
+            size_h = min(1280, max(300, altura // 2))
+            url = (
+                "https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/"
+                f"{centro_lon:.6f},{centro_lat:.6f},{zoom}/{size_w}x{size_h}@2x"
+                f"?language=pt&access_token={token}"
+            )
+        else:
+            key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
+            if not key:
+                return None
+            size_w = min(640, max(320, largura // 2))
+            size_h = min(640, max(320, altura // 2))
+            url = (
+                "https://maps.googleapis.com/maps/api/staticmap"
+                f"?center={centro_lat:.6f},{centro_lon:.6f}"
+                f"&zoom={zoom}&size={size_w}x{size_h}&scale=2"
+                f"&maptype=roadmap&language=pt-BR&key={key}"
+            )
         pedido = urllib.request.Request(
             url,
             headers={"User-Agent": "Segtrack/1.0 (relatorios de coleta)"},
         )
         try:
-            with urllib.request.urlopen(pedido, timeout=20) as resp:
+            with urllib.request.urlopen(pedido, timeout=25) as resp:
                 arquivo.write_bytes(resp.read())
         except Exception as exc:
-            print(f"Mapa Google Static: {exc}", flush=True)
+            print(f"Mapa estático {provedor}: {exc}", flush=True)
             return None
     try:
         img = Image.open(arquivo).convert("RGB")
     except Exception:
         return None
+    if _tile_estragado(img):
+        try:
+            arquivo.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
     return img, zoom, centro_lat, centro_lon, img.width, img.height
+
+
+def _douglas_peucker(pontos: list[list[float]], epsilon: float) -> list[list[float]]:
+    """Reduz pontos da trajetória mantendo a forma (mais rápido e limpo no PDF)."""
+    if len(pontos) < 3 or epsilon <= 0:
+        return pontos
+
+    def dist_seg(p, a, b) -> float:
+        ax, ay = float(a[0]), float(a[1])
+        bx, by = float(b[0]), float(b[1])
+        px, py = float(p[0]), float(p[1])
+        dx, dy = bx - ax, by - ay
+        if dx == 0 and dy == 0:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+    def rec(pts: list[list[float]]) -> list[list[float]]:
+        if len(pts) < 3:
+            return pts
+        a, b = pts[0], pts[-1]
+        idx, melhor = 0, -1.0
+        for i in range(1, len(pts) - 1):
+            d = dist_seg(pts[i], a, b)
+            if d > melhor:
+                idx, melhor = i, d
+        if melhor > epsilon:
+            esq = rec(pts[: idx + 1])
+            dir_ = rec(pts[idx:])
+            return esq[:-1] + dir_
+        return [a, b]
+
+    return rec(pontos)
+
+
+def _simplificar_tracos(tracos: list, epsilon: float = 0.00008) -> list:
+    saida = []
+    for traco in tracos or []:
+        if not isinstance(traco, list) or len(traco) < 2:
+            continue
+        limpo = [[float(p[0]), float(p[1])] for p in traco if len(p) >= 2]
+        if len(limpo) < 2:
+            continue
+        fino = _douglas_peucker(limpo, epsilon)
+        if len(fino) >= 2:
+            saida.append(fino)
+    return saida
 
 
 def _px_estatico(
@@ -942,12 +1013,20 @@ def _mapa_da_rota(
     pintados: list[tuple[list[list[float]], tuple[int, int, int]]] = []
     legendas: list[tuple[str, tuple[int, int, int]]] = []
     if gps_por_placa:
-        leve = {placa: _afinar_gps(gps, 2) for placa, gps in gps_por_placa.items() if gps}
+        leve = {
+            placa: _simplificar_tracos(_afinar_gps(gps, 2), 0.00006)
+            for placa, gps in gps_por_placa.items()
+            if gps
+        }
         pintados, legendas = _pintar_por_placa(aneis, leve, malha)
         if not pintados:
             pintados, legendas = _pintar_por_placa(aneis, leve, [])
     else:
-        trajeto = _trajeto_do_caminhao(aneis, _afinar_gps(tracos, 2), malha or None)
+        trajeto = _trajeto_do_caminhao(
+            aneis,
+            _simplificar_tracos(_afinar_gps(tracos, 2), 0.00006),
+            malha or None,
+        )
         pintados = [(t, (29, 78, 217)) for t in trajeto]
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     if pintados:

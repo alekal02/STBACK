@@ -246,8 +246,10 @@ def _tile_estragado(img: Image.Image) -> bool:
     return claros >= len(pixels) * 0.85
 
 
-def _baixar_tile(zoom: int, x: int, y: int) -> Image.Image | None:
-    provedor = _provedor_mapa()
+def _baixar_tile(
+    zoom: int, x: int, y: int, *, provedor: str | None = None
+) -> Image.Image | None:
+    provedor = (provedor or _provedor_mapa()).strip().lower()
     if provedor in {"google", "mapbox"}:
         # Static API monta o fundo inteiro em _fundo_estatico.
         return None
@@ -322,7 +324,8 @@ def _fundo_estatico(
     centro_lat = (sul + norte) / 2
     centro_lon = (oeste + leste) / 2
     if leve:
-        largura, altura = 1280, 900
+        # Frota no Render: uma imagem menor por rota evita OOM no PDF.
+        largura, altura = 960, 680
     else:
         largura, altura = 1600, 1100
     zoom = _zoom_para_bbox(sul, norte, oeste, leste, largura, altura)
@@ -544,8 +547,10 @@ def renderizar_mapa(
 
     provedor = _provedor_mapa()
     estatico = None
-    if provedor == "google":
+    if provedor in {"google", "mapbox"}:
         estatico = _fundo_estatico(sul, norte, oeste, leste, leve=bool(leve))
+        if estatico is None:
+            print(f"Mapa estático {provedor} falhou — fallback OSM.", flush=True)
 
     if estatico is not None:
         base, zoom, centro_lat, centro_lon, largura_img, altura_img = estatico
@@ -563,6 +568,8 @@ def renderizar_mapa(
                 altura=altura_img,
             )
     else:
+        # Mapbox/Google sem static: monta tiles OSM (nunca tiles “vazios” do provedor static).
+        provedor_tiles = provedor if provedor not in {"google", "mapbox"} else "osm"
         x0, y1 = _tile_xy(sul, oeste, zoom)
         x1, y0 = _tile_xy(norte, leste, zoom)
         tx0, tx1 = math.floor(min(x0, x1)), math.floor(max(x0, x1))
@@ -587,7 +594,7 @@ def renderizar_mapa(
 
         def baixar(item: tuple[int, int, int, int]) -> tuple[int, int, Image.Image | None]:
             ix, iy, tile_x, tile_y = item
-            return ix, iy, _baixar_tile(zoom, tile_x, tile_y)
+            return ix, iy, _baixar_tile(zoom, tile_x, tile_y, provedor=provedor_tiles)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
             for ix, iy, tile in pool.map(baixar, coords):
@@ -1445,6 +1452,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         except Exception as exc:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
             continue
+        print(f"PDF frota mapa {row.get('codigo')} ({len(png)} bytes)", flush=True)
         mapas.append((folha_titulo, png, legenda, cor))
         gc.collect()
     del frota

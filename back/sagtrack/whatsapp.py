@@ -1042,7 +1042,17 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 resumo_s = round(time.perf_counter() - inicio, 1)
                 _ULTIMO_ENVIO["fase"] = "pdf"
                 _ULTIMO_ENVIO["resumo_s"] = resumo_s
-                arquivo, nome = _gerar(settings, tipo, "", dia)
+                try:
+                    arquivo, nome = _gerar(settings, tipo, "", dia)
+                except Exception as exc:
+                    print(f"WhatsApp: PDF frota atual falhou: {exc}", flush=True)
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        f"A conta fechou, mas o PDF falhou: {exc}. Peça *frota* de novo para tentar só o PDF.",
+                    )
+                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                    return
                 congelado = ""
                 try:
                     resumo_dia = json.loads((pasta_dia / "resumo.json").read_text(encoding="utf-8"))
@@ -1186,7 +1196,17 @@ def processar(body: Any, settings: Settings | None = None) -> None:
                 resumo_s = round(time.perf_counter() - inicio, 1)
                 _ULTIMO_ENVIO["fase"] = "pdf"
                 _ULTIMO_ENVIO["resumo_s"] = resumo_s
-                arquivo, nome = _gerar(settings, tipo, consulta, dia)
+                try:
+                    arquivo, nome = _gerar(settings, tipo, consulta, dia)
+                except Exception as exc:
+                    print(f"WhatsApp: PDF frota falhou: {exc}", flush=True)
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        f"A conta fechou, mas o PDF falhou: {exc}. Peça *frota* de novo.",
+                    )
+                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                    return
                 congelado = ""
                 try:
                     resumo_dia = json.loads((pasta_dia / "resumo.json").read_text(encoding="utf-8"))

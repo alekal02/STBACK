@@ -3,4 +3,3 @@ shapely>=2.0.0
 pyproj>=3.6.0
 pillow>=10.0.0
 reportlab>=4.0.0
-playwright>=1.49.0

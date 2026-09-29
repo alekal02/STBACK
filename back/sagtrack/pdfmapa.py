@@ -263,19 +263,6 @@ def renderizar_mapa(
     cor_traco: tuple[int, int, int] = (29, 78, 137),
     camadas: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    from .folhamapa import fotografar
-
-    foto = fotografar(
-        poligonos,
-        tracos,
-        pontos,
-        enquadramento,
-        vias=vias,
-        cor_traco=cor_traco,
-        camadas=camadas,
-    )
-    if foto:
-        return foto
     moldura = enquadramento or [anel for item in poligonos for anel in item.get("aneis") or []] or tracos
     caixa = _limites(moldura)
     if caixa is None:
@@ -611,8 +598,7 @@ def _camadas_da_rota(
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list],
 ) -> list[dict[str, Any]]:
-    from .gps import trajetoria_unica
-    from .mapa import vias_proximas
+    from .gps import tracos_na_ordem
 
     ordem = {"ATUANDO": 0, "APOIO": 1}
     candidatos = []
@@ -630,32 +616,19 @@ def _camadas_da_rota(
             continue
         placa = str(item.get("placa") or "")
         brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-        trilha = trajetoria_unica(brutos, vias_proximas(brutos), dia=dia)
-        tracos = trilha.get("tracos") or []
+        tracos = tracos_na_ordem(brutos)
         if not tracos:
             continue
-        candidatos.append(
-            (
-                ordem.get(str(cob.get("papel")), 9),
-                -int(cob.get("paradas") or 0),
-                item,
-                cob,
-                tracos,
-                trilha.get("entrada"),
-                trilha.get("saida"),
-            )
-        )
+        candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))
     candidatos.sort(key=lambda linha: (linha[0], linha[1]))
     camadas = []
-    for indice, (_ordem, _paradas, item, cob, tracos, entrada, saida) in enumerate(candidatos):
+    for indice, (_ordem, _paradas, item, cob, tracos) in enumerate(candidatos):
         cor, nome_cor = _CORES_TRACO[indice % len(_CORES_TRACO)]
         papel = "atuou" if cob.get("papel") == "ATUANDO" else "apoio"
         camadas.append(
             {
                 "cor": cor,
                 "tracos": tracos,
-                "entrada": entrada,
-                "saida": saida,
                 "rotulo": f"{nome_cor}: {_nome_caminhao(item)} {papel}",
             }
         )
@@ -665,30 +638,7 @@ def _camadas_da_rota(
 def _legenda_tracos(camadas: list[dict[str, Any]], vazio: str) -> str:
     if not camadas:
         return vazio
-    return " · ".join(str(item.get("rotulo") or "") for item in camadas) + ". Linha única, da entrada à saída. Ponto: parada nesse trajeto."
-
-
-def _so_no_traco(pontos: list, tracos: list, limite_m: float = 25) -> list:
-    """O ponto de coleta só aparece se estiver em cima do trajeto dos pulsos."""
-    from .gps import haversine_m
-
-    linhas = [traco for traco in tracos or [] if traco and len(traco) >= 2]
-    if not linhas:
-        return []
-    saida = []
-    for ponto in pontos or []:
-        try:
-            marca = (float(ponto["latitude"]), float(ponto["longitude"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if any(
-            haversine_m(marca, (float(coord[0]), float(coord[1]))) <= limite_m
-            for traco in linhas
-            for coord in traco
-            if len(coord) >= 2
-        ):
-            saida.append(ponto)
-    return saida
+    return " · ".join(str(item.get("rotulo") or "") for item in camadas) + ". Ponto: parada."
 
 
 def _mapa_da_rota(
@@ -705,21 +655,12 @@ def _mapa_da_rota(
     if camadas:
         legenda = _legenda_tracos(camadas, "")
         desenhos = camadas
-        trilha = [traco for faixa in camadas for traco in (faixa.get("tracos") or [])]
     else:
         legenda = "Programada para o dia. Nenhum caminhão coletou nesta rota."
         desenhos = [{"tracos": tracos, "cor": (29, 78, 137)}]
-        trilha = tracos
     return (
         titulo,
-        renderizar_mapa(
-            [{"aneis": aneis, "rotulo": codigo}],
-            [],
-            _so_no_traco(pontos, trilha),
-            aneis,
-            vias="nenhuma",
-            camadas=desenhos,
-        ),
+        renderizar_mapa([{"aneis": aneis, "rotulo": codigo}], [], pontos, aneis, vias="nenhuma", camadas=desenhos),
         legenda,
     )
 
@@ -742,12 +683,11 @@ def _folhas_da_rota(
     else:
         legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
     if camadas:
-        trilha = [traco for faixa in camadas for traco in (faixa.get("tracos") or [])]
-        realizado = renderizar_mapa([base], [], _so_no_traco(pontos, trilha), aneis, vias="nenhuma", camadas=camadas)
+        realizado = renderizar_mapa([base], [], pontos, aneis, vias="nenhuma", camadas=camadas)
         legenda_feita = _legenda_tracos(camadas, "")
     else:
-        realizado = renderizar_mapa([base], tracos, _so_no_traco(pontos, tracos), aneis, vias="nenhuma")
-        legenda_feita = "Realizado. A linha passa pelos pulsos, na ordem da hora. O ponto só entra se houver 2 pulsos no mesmo lugar, de 20 segundos a 2 minutos."
+        realizado = renderizar_mapa([base], tracos, pontos, aneis, vias="nenhuma")
+        legenda_feita = "Realizado. A linha é o trajeto do caminhão, na ordem dos pulsos. Ponto: parada."
     return [
         (f"{titulo} · realizado", realizado, legenda_feita),
         (
@@ -1015,13 +955,6 @@ def _pdf_frota_fiscal(
 
 
 def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
-    from .folhamapa import sessao
-
-    with sessao():
-        return _pdf_frota(output_dir, dia)
-
-
-def _pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     from .relatorios import _faixa_agenda, _fmt_pct, balanco_frota
 
     pasta = output_dir / dia.isoformat()
@@ -1183,13 +1116,6 @@ def _papel_legivel(papel: str) -> str:
 
 
 def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
-    from .folhamapa import sessao
-
-    with sessao():
-        return _pdf_rota(output_dir, dia, consulta)
-
-
-def _pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     from .relatorios import _fmt_pct, _nome_conclusao, montar
 
     rel = montar(output_dir, dia, "rota", consulta)
@@ -1247,13 +1173,6 @@ def _pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
 
 
 def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
-    from .folhamapa import sessao
-
-    with sessao():
-        return _pdf_placa(output_dir, dia, consulta)
-
-
-def _pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     from .relatorios import _aplicar_apoio, _conclusao, _fmt_pct, _nome_conclusao, montar
 
     rel = montar(output_dir, dia, "placa", consulta)

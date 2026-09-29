@@ -167,58 +167,6 @@ def _codigo_setor(texto: str) -> str:
     return achado.group(1) if achado else ""
 
 
-_VIAS_CACHE: list[Any] | None = None
-_VIAS_TREE: Any = None
-
-
-def malha_viaria() -> tuple[list[Any], Any]:
-    """Ruas oficiais em UTM, com índice espacial. A malha é lida uma vez."""
-    global _VIAS_CACHE, _VIAS_TREE
-    if _VIAS_CACHE is None:
-        from shapely.strtree import STRtree
-
-        _VIAS_CACHE = carregar_vias()
-        _VIAS_TREE = STRtree(_VIAS_CACHE) if _VIAS_CACHE else None
-    return _VIAS_CACHE, _VIAS_TREE
-
-
-def vias_proximas(pontos: list[dict[str, Any]], margem_m: float = 90) -> list[list[list[float]]]:
-    """Ruas oficiais em volta dos pulsos, para ligar um pulso ao próximo pelo meio da via."""
-    from shapely.geometry import box
-
-    linhas, arvore = malha_viaria()
-    if not linhas or arvore is None:
-        return []
-    xs: list[float] = []
-    ys: list[float] = []
-    for ponto in pontos or []:
-        try:
-            lat = float(ponto["latitude"])
-            lon = float(ponto["longitude"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        x, y = TO_UTM.transform(lon, lat)
-        xs.append(float(x))
-        ys.append(float(y))
-    if len(xs) < 2:
-        return []
-    zona = box(min(xs) - margem_m, min(ys) - margem_m, max(xs) + margem_m, max(ys) + margem_m)
-    try:
-        indices = list(arvore.query(zona, predicate="intersects"))
-    except TypeError:
-        indices = [i for i, linha in enumerate(linhas) if linha.intersects(zona)]
-    saida: list[list[list[float]]] = []
-    for idx in indices:
-        linha = linhas[int(idx)]
-        coords = []
-        for x, y in linha.coords:
-            lon, lat = TO_WGS.transform(float(x), float(y))
-            coords.append([float(lat), float(lon)])
-        if len(coords) >= 2:
-            saida.append(coords)
-    return saida
-
-
 def carregar_vias() -> list[Any]:
     arquivo = _sincronizar_gpkg()
     if not arquivo:

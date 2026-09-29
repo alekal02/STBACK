@@ -336,9 +336,6 @@ def _rede_viaria(ruas: list[list[list[float]]]) -> list[list[list[float]]]:
 
     if not ruas:
         return []
-    # Juntar milhares de ruas com unary_union trava o servidor e o PDF não sai.
-    if len(ruas) > 1200:
-        return ruas
     chave = (
         len(ruas),
         round(float(ruas[0][0][0]), 5),
@@ -486,15 +483,11 @@ def trajetoria_uniforme(
     vias: list[list[list[float]]] | None = None,
     *,
     dia: date | None = None,
-    salto_max_m: float = 180.0,
-    cola_m: float = 8.0,
-    rua_m: float = 55.0,
-    unica: bool = False,
+    salto_max_m: float = 120.0,
+    cola_m: float = 12.0,
+    rua_m: float = 40.0,
 ) -> list[list[list[float]]]:
-    """Liga cada pulso ao seguinte, na ordem da hora, pelo meio da rua oficial.
-
-    Com unica=True o caminhão fica numa linha só, da entrada até a saída.
-    """
+    """Liga os pulsos pela hora e, quando o pulso está na via oficial, segue o meio da rua."""
     marcas: list[tuple[datetime, Ponto]] = []
     referencia = dia or date.today()
     for ponto in pontos or []:
@@ -515,8 +508,7 @@ def trajetoria_uniforme(
 
     ruas = [via for via in (vias or []) if via and len(via) >= 2]
     if not ruas:
-        pulsos = [coord for _momento, coord in seguidos]
-        return _quebrar_salto(pulsos, 1_000_000 if unica else salto_max_m)
+        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
 
     ruas = _rede_viaria(ruas) or ruas
     caixas = []
@@ -586,75 +578,44 @@ def trajetoria_uniforme(
             trechos.append(atual)
         atual = []
 
-    def guardar(fatia: list[Ponto]) -> None:
-        nonlocal atual
-        if len(fatia) < 2:
-            return
-        if atual:
-            _alongar(atual, fatia)
-        else:
-            atual = list(fatia)
-
     for momento, coord in seguidos:
-        proj = projetar_rede(coord, anterior[0] if anterior and anterior[0] >= 0 else None)
+        proj = projetar_rede(coord, anterior[0] if anterior else None)
         if proj is None:
-            if unica:
-                if atual:
-                    guardar([atual[-1], coord])
-                else:
-                    atual = [coord]
-                anterior = (-1, 0.0, coord, momento)
-            else:
-                quebrar()
-                anterior = None
+            quebrar()
+            anterior = None
             continue
         indice, along, ponto = proj
         if anterior is None:
             anterior = (indice, along, ponto, momento)
-            if unica and atual:
-                guardar([atual[-1], ponto])
-            continue
-        if anterior[0] < 0:
-            guardar([anterior[2], ponto])
-            anterior = (indice, along, ponto, momento)
             continue
         reta = haversine_m(anterior[2], ponto)
         dt = abs((momento - anterior[3]).total_seconds())
-        if unica:
-            limite = min(4000.0, max(reta * 4.0, reta + 500.0, 900.0))
-        else:
-            pela_forma = max(reta * 2.4, reta + 140.0)
-            pela_hora = (42 / 3.6) * dt + 50 if dt > 0 else 80.0
-            limite = min(1200.0, pela_forma, pela_hora)
+        pela_forma = max(reta * 2.4, reta + 140.0)
+        pela_hora = (42 / 3.6) * dt + 50 if dt > 0 else 80.0
+        limite = min(1200.0, pela_forma, pela_hora)
         fatia = _ligar_na_rede(ruas, comps, adj, anterior[0], anterior[1], indice, along, limite)
-        if fatia is None and (unica or reta <= 40):
+        if fatia is None and reta <= 40:
             fatia = [anterior[2], ponto]
         if fatia and len(fatia) >= 2:
-            guardar(fatia)
-        elif not unica:
+            if atual:
+                _alongar(atual, fatia)
+            else:
+                atual = list(fatia)
+        else:
             quebrar()
         anterior = (indice, along, ponto, momento)
     quebrar()
     if not trechos:
-        pulsos = [coord for _momento, coord in seguidos]
-        return _quebrar_salto(pulsos, 1_000_000 if unica else salto_max_m)
-    if unica:
-        junto = list(trechos[0])
-        for extra in trechos[1:]:
-            _alongar(junto, extra)
-        fino = _rdp(junto, 3)
-        if len(fino) < 2:
-            return []
-        return [[[lat, lon] for lat, lon in fino]]
+        return _quebrar_salto([coord for _momento, coord in seguidos], salto_max_m)
     saida = []
     for trecho in trechos:
-        fino = _rdp(trecho, 3)
+        fino = _rdp(trecho, 6)
         if len(fino) >= 2:
             saida.append([[lat, lon] for lat, lon in fino])
     return saida
 
 
-def _quebrar_salto(pontos: list[Ponto], salto_max_m: float, tolerancia_m: float = 4) -> list[list[list[float]]]:
+def _quebrar_salto(pontos: list[Ponto], salto_max_m: float) -> list[list[list[float]]]:
     trechos: list[list[Ponto]] = []
     atual = [pontos[0]]
     for coord in pontos[1:]:
@@ -666,7 +627,7 @@ def _quebrar_salto(pontos: list[Ponto], salto_max_m: float, tolerancia_m: float 
         atual.append(coord)
     if len(atual) >= 2:
         trechos.append(atual)
-    return [[[lat, lon] for lat, lon in _rdp(trecho, tolerancia_m)] for trecho in trechos if len(trecho) >= 2]
+    return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(trecho) >= 2]
 
 
 def ordem_do_pulso(ponto: dict[str, Any]) -> tuple[int, datetime | str]:
@@ -691,54 +652,6 @@ def tracos_na_ordem(pontos: list[dict[str, Any]], salto_max_m: float = 160) -> l
     if len(pares) < 2:
         return []
     return _quebrar_salto(pares, salto_max_m)
-
-
-def _hora_pulso(ponto: dict[str, Any], dia: date | None) -> str:
-    marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia or date.today())
-    if marca is None:
-        return ""
-    return marca.strftime("%H:%M")
-
-
-def _marca_extremo(ponto: dict[str, Any], dia: date | None) -> dict[str, Any] | None:
-    try:
-        return {
-            "latitude": float(ponto["latitude"]),
-            "longitude": float(ponto["longitude"]),
-            "hora": _hora_pulso(ponto, dia),
-        }
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def trajetoria_unica(
-    pontos: list[dict[str, Any]] | None,
-    vias: list[list[list[float]]] | None = None,
-    *,
-    dia: date | None = None,
-) -> dict[str, Any]:
-    """Uma linha só, da entrada à saída, com os pulsos na ordem da hora e o miolo na rua."""
-    ordenados = sorted(pontos or [], key=ordem_do_pulso)
-    validos = []
-    for ponto in ordenados:
-        try:
-            float(ponto["latitude"])
-            float(ponto["longitude"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        validos.append(ponto)
-    linhas = trajetoria_uniforme(validos, vias, dia=dia, unica=True)
-    if len(linhas) > 1:
-        junto = [coord for linha in linhas for coord in linha]
-        linhas = [junto] if len(junto) >= 2 else []
-    entrada = _marca_extremo(validos[0], dia) if validos else None
-    saida = _marca_extremo(validos[-1], dia) if len(validos) >= 2 else None
-    if linhas and linhas[0]:
-        if entrada:
-            entrada["latitude"], entrada["longitude"] = float(linhas[0][0][0]), float(linhas[0][0][1])
-        if saida:
-            saida["latitude"], saida["longitude"] = float(linhas[0][-1][0]), float(linhas[0][-1][1])
-    return {"tracos": linhas, "entrada": entrada, "saida": saida}
 
 
 def tracos_realistas(

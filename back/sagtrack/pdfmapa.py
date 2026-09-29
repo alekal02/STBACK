@@ -434,9 +434,9 @@ def renderizar_mapa(
         extra = ((span_lon * cos / 1.55) - span_lat) / 2
         sul -= extra
         norte += extra
-    # WhatsApp/Render: zoom alto demais estoura memória no PDF da frota.
+    # WhatsApp/Render: mapa legível sem estourar memória no PDF da frota.
     max_zoom = 15 if leve else 17
-    max_cols, max_rows = (6, 5) if leve else (9, 8)
+    max_cols, max_rows = (5, 4) if leve else (9, 8)
     zoom = 15
     for candidato in range(max_zoom, 14, -1):
         x0, y1 = _tile_xy(sul, oeste, candidato)
@@ -586,13 +586,13 @@ def renderizar_mapa(
             desenho.text((x0 + 22, y0), texto, font=fonte_leg, fill=(28, 36, 48, 255))
             y0 = caixa[3] + 10
     imagem = imagem.convert("RGB")
-    teto = 1800 if leve else 2600
+    teto = 1600 if leve else 2600
     if imagem.width > teto:
         altura = int(imagem.height * (teto / imagem.width))
         imagem = imagem.resize((teto, max(1, altura)), Image.Resampling.LANCZOS)
     saida = io.BytesIO()
-    qualidade = 88 if leve else 92
-    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0)
+    qualidade = 86 if leve else 92
+    imagem.save(saida, format="JPEG", quality=qualidade, optimize=True, subsampling=0 if not leve else 2)
     return saida.getvalue()
 
 
@@ -877,6 +877,22 @@ def _pintar_por_placa(
     return pintados, legendas
 
 
+def _afinar_gps(tracos: list, passo: int = 3) -> list:
+    """Reduz pontos do GPS só para desenhar o mapa (menos memória)."""
+    if passo <= 1:
+        return list(tracos or [])
+    saida = []
+    for traco in tracos or []:
+        if not isinstance(traco, list) or len(traco) < 2:
+            continue
+        fino = traco[::passo]
+        if fino[-1] is not traco[-1]:
+            fino = list(fino) + [traco[-1]]
+        if len(fino) >= 2:
+            saida.append(fino)
+    return saida
+
+
 def _mapa_da_rota(
     titulo: str,
     codigo: str,
@@ -888,19 +904,13 @@ def _mapa_da_rota(
     *,
     gps_por_placa: dict[str, list] | None = None,
 ) -> tuple[str, bytes, str]:
-    del pontos
-    feitos, faltando = _preparar_vias(
-        dia,
-        codigo,
-        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
-        frota,
-    )
-    # Frota: só o GPS nas vias feitas — não desenha ruas em aberto.
-    malha_rota = list(feitos or []) or list(faltando or [])
+    # Relatório de frota: só o caminho GPS no polígono — sem ruas em aberto.
+    del pontos, dia, frota
     if gps_por_placa:
-        pintados, legendas = _pintar_por_placa(aneis, gps_por_placa, malha_rota)
+        leve = {placa: _afinar_gps(gps, 4) for placa, gps in gps_por_placa.items()}
+        pintados, legendas = _pintar_por_placa(aneis, leve, [])
     else:
-        trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
+        trajeto = _trajeto_do_caminhao(aneis, _afinar_gps(tracos, 4), None)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
         legendas = []
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
@@ -1270,14 +1280,19 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     if not resumo:
         return _sem_dia(dia), f"frota-{dia.isoformat()}.pdf"
     balanco = balanco_frota(setores, frota)
+    # GPS vem do resumo; frota só entra no balanço (sem trechos no mapa).
     gps_por_placa = {
-        str(caminhao.get("placa") or ""): caminhao.get("gps") or []
+        str(caminhao.get("placa") or ""): _afinar_gps(caminhao.get("gps") or [], 5)
         for caminhao in (resumo.get("caminhoes") or [])
     }
-    # resumo é grande; libera o que não precisa no PDF.
-    del resumo
+    periodo = resumo.get("periodo") or _turno(dia)
+    corte = str(resumo.get("congelado_em") or "")
+    if len(corte) >= 16:
+        periodo = f"{periodo} · pulsos até {corte[11:16]}"
+    del resumo, frota, setores
+    gc.collect()
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(50 if _MAPA_LEVE else 90)
+    _abrir_prazo_mapa(45 if _MAPA_LEVE else 90)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
@@ -1295,9 +1310,9 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 row["codigo"],
                 _aneis(row),
                 tracos,
-                row.get("pontos") or [],
+                [],
                 dia,
-                frota,
+                [],
                 gps_por_placa=por_placa,
             )
         except Exception as exc:
@@ -1305,15 +1320,6 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             continue
         mapas.append((folha_titulo, png, legenda, cor))
         gc.collect()
-    periodo = ""
-    try:
-        bruto = _ler(pasta, "resumo.json") or {}
-        periodo = bruto.get("periodo") or _turno(dia)
-        corte = str(bruto.get("congelado_em") or "")
-        if len(corte) >= 16:
-            periodo = f"{periodo} · pulsos até {corte[11:16]}"
-    except Exception:
-        periodo = _turno(dia)
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

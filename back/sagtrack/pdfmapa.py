@@ -1050,6 +1050,17 @@ def _pdf_frota_fiscal(
     return buffer.getvalue()
 
 
+def _andamento(output_dir: Path, texto: str, pct: int) -> None:
+    try:
+        destino = output_dir / "andamento.json"
+        destino.write_text(
+            json.dumps({"texto": texto, "pct": int(pct)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     from .relatorios import _faixa_agenda, _fmt_pct, balanco_frota
 
@@ -1065,10 +1076,16 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     balanco = balanco_frota(setores, frota)
     pontos_por_placa = _ler(pasta, "pontos.json") or {}
     mapas: list[tuple[str, bytes, str, tuple[float, float, float]]] = []
+    filas = [row for row in balanco if int(row.get("paradas") or 0) > 0]
     _abrir_prazo_mapa(100)
-    for row in balanco:
-        if int(row.get("paradas") or 0) <= 0:
-            continue
+    _andamento(output_dir, "Montando o PDF da frota.", 82)
+    total = len(filas) or 1
+    for indice, row in enumerate(filas, start=1):
+        _andamento(
+            output_dir,
+            f"PDF {indice}/{total} · {row.get('codigo')}",
+            82 + int(16 * indice / total),
+        )
         estado = _rotulo_andamento(row)
         titulo = (
             f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
@@ -1095,6 +1112,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:
         periodo = f"{periodo} · pulsos até {corte[11:16]}"
+    _andamento(output_dir, "PDF da frota pronto. Enviando no grupo.", 98)
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 
 

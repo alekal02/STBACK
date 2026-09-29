@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import threading
 import time
 from datetime import date
@@ -36,6 +37,46 @@ def _aplicar(settings: Settings, corpo: dict[str, Any]) -> Settings:
         data_fim=corpo.get("data_fim") or None,
     )
     return Cls(**{**settings.__dict__, **novo.__dict__})
+
+
+def _pct_da_mensagem(msg: str) -> int | None:
+    pulsos = re.search(r"Pulsos (\d+)/(\d+)", msg)
+    if pulsos:
+        return 8 + int(32 * int(pulsos.group(1)) / max(int(pulsos.group(2)), 1))
+    mapa = re.search(r"Mapa oficial (\d+)/(\d+)", msg)
+    if mapa:
+        return 42 + int(34 * int(mapa.group(1)) / max(int(mapa.group(2)), 1))
+    if "Medindo paradas" in msg:
+        return 78
+    if msg.startswith("Pronto") or "continua valendo" in msg:
+        return 82
+    if "Cruzando ruas" in msg or "Lendo o mapa" in msg:
+        return 40
+    if msg.startswith("Horário congelado") or msg.startswith("Segtrack em"):
+        return 6
+    return None
+
+
+def _percentual(mensagens: list[str]) -> int:
+    pct = 3
+    for msg in mensagens:
+        achado = _pct_da_mensagem(msg)
+        if achado is not None:
+            pct = max(pct, achado)
+    return min(pct, 99)
+
+
+def _andamento_arquivo(pasta) -> tuple[int, str] | None:
+    arquivo = pasta / "andamento.json"
+    if not arquivo.is_file():
+        return None
+    try:
+        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(bruto, dict):
+        return None
+    return int(bruto.get("pct") or 0), str(bruto.get("texto") or "")
 
 
 def _rodar(settings: Settings, com_pdf: bool = True) -> None:
@@ -233,15 +274,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/progresso":
             with JOB["lock"]:
-                self._json(
-                    200,
-                    {
-                        "rodando": JOB["rodando"],
-                        "erro": JOB["erro"],
-                        "data": JOB["data"],
-                        "mensagens": list(JOB["mensagens"]),
-                    },
-                )
+                mensagens = list(JOB["mensagens"])
+                rodando = bool(JOB["rodando"])
+                desde = float(JOB.get("desde") or 0)
+                erro = JOB["erro"]
+                data = JOB["data"]
+            pct = _percentual(mensagens) if rodando else 0
+            texto = mensagens[-1] if mensagens else ""
+            arquivo = self.settings.output_dir / "andamento.json"
+            if rodando and arquivo.is_file() and arquivo.stat().st_mtime >= desde - 1:
+                extra = _andamento_arquivo(self.settings.output_dir)
+                if extra and extra[0] >= pct:
+                    pct, texto = extra
+            self._json(
+                200,
+                {
+                    "rodando": rodando,
+                    "erro": erro,
+                    "data": data,
+                    "pct": pct if rodando else 0,
+                    "texto": texto if rodando else "",
+                    "mensagens": mensagens,
+                },
+            )
             return
         if url.path == "/api/ultimo":
             self._json(200, ultimo_resumo(self.settings.output_dir) or {})

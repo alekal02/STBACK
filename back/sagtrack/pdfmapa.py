@@ -591,14 +591,84 @@ def _nome_caminhao(item: dict[str, Any]) -> str:
     return " ".join(parte for parte in partes if parte) or "Caminhão"
 
 
+def _nome_arquivo_rota(codigo: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in (codigo or "rota"))
+
+
+def _arquivo_rota(pasta: Path, codigo: str, nome: str) -> Path:
+    return pasta / "cache" / "rotas" / f"{_nome_arquivo_rota(codigo)}-{nome}"
+
+
+def _cache_fresco(pasta: Path, arquivo: Path) -> bool:
+    if not arquivo.is_file() or arquivo.stat().st_size < 2:
+        return False
+    selo = arquivo.stat().st_mtime
+    for nome in ("pontos.json", "frota.json"):
+        fonte = pasta / nome
+        if fonte.is_file() and fonte.stat().st_mtime > selo + 0.5:
+            return False
+    return True
+
+
+def _ler_camadas(pasta: Path, codigo: str) -> list[dict[str, Any]] | None:
+    arquivo = _arquivo_rota(pasta, codigo, "tracos.json")
+    if not _cache_fresco(pasta, arquivo):
+        return None
+    try:
+        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(bruto, list):
+        return None
+    camadas = []
+    for item in bruto:
+        if not isinstance(item, dict):
+            continue
+        cor = item.get("cor") or [29, 78, 137]
+        item["cor"] = tuple(cor)
+        camadas.append(item)
+    return camadas
+
+
+def _guardar_camadas(pasta: Path, codigo: str, camadas: list[dict[str, Any]]) -> None:
+    arquivo = _arquivo_rota(pasta, codigo, "tracos.json")
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    bruto = []
+    for item in camadas:
+        copia = dict(item)
+        cor = copia.get("cor") or (29, 78, 137)
+        copia["cor"] = list(cor)
+        bruto.append(copia)
+    temporario = arquivo.with_name(arquivo.name + ".tmp")
+    temporario.write_text(json.dumps(bruto, ensure_ascii=False), encoding="utf-8")
+    temporario.replace(arquivo)
+
+
+def tracos_guardados(pasta: Path, codigo: str, placa: str) -> list | None:
+    """Trajetória já desenhada desta rota. None se o cache não vale."""
+    camadas = _ler_camadas(pasta, codigo)
+    if camadas is None:
+        return None
+    for item in camadas:
+        if str(item.get("placa") or "") == placa:
+            return list(item.get("tracos") or [])
+    return []
+
+
 def _camadas_da_rota(
     dia: date,
     codigo: str,
     aneis: list,
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list],
+    pasta: Path | None = None,
 ) -> list[dict[str, Any]]:
     from .gps import trajetoria_uniforme
+
+    if pasta is not None:
+        guardadas = _ler_camadas(pasta, codigo)
+        if guardadas is not None:
+            return guardadas
 
     vias = _vias_oficiais(dia, codigo)
     ordem = {"ATUANDO": 0, "APOIO": 1}
@@ -628,11 +698,15 @@ def _camadas_da_rota(
         papel = "atuou" if cob.get("papel") == "ATUANDO" else "apoio"
         camadas.append(
             {
+                "placa": str(item.get("placa") or ""),
+                "papel": cob.get("papel") or "",
                 "cor": cor,
                 "tracos": tracos,
                 "rotulo": f"{nome_cor}: {_nome_caminhao(item)} {papel}",
             }
         )
+    if pasta is not None:
+        _guardar_camadas(pasta, codigo, camadas)
     return camadas
 
 
@@ -651,19 +725,31 @@ def _mapa_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list] | None = None,
+    pasta: Path | None = None,
 ) -> tuple[str, bytes, str]:
-    camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {})
+    jpg = _arquivo_rota(pasta, codigo, "realizado.jpg") if pasta is not None else None
+    texto_legenda = _arquivo_rota(pasta, codigo, "legenda.txt") if pasta is not None else None
+    if (
+        pasta is not None
+        and jpg is not None
+        and texto_legenda is not None
+        and _cache_fresco(pasta, jpg)
+        and _cache_fresco(pasta, texto_legenda)
+    ):
+        return titulo, jpg.read_bytes(), texto_legenda.read_text(encoding="utf-8")
+    camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {}, pasta)
     if camadas:
         legenda = _legenda_tracos(camadas, "")
         desenhos = camadas
     else:
         legenda = "Programada para o dia. Nenhum caminhão coletou nesta rota."
         desenhos = [{"tracos": tracos, "cor": (29, 78, 137)}]
-    return (
-        titulo,
-        renderizar_mapa([{"aneis": aneis, "rotulo": codigo}], [], pontos, aneis, vias="nenhuma", camadas=desenhos),
-        legenda,
-    )
+    png = renderizar_mapa([{"aneis": aneis, "rotulo": codigo}], [], pontos, aneis, vias="nenhuma", camadas=desenhos)
+    if jpg is not None and texto_legenda is not None:
+        jpg.parent.mkdir(parents=True, exist_ok=True)
+        jpg.write_bytes(png)
+        texto_legenda.write_text(legenda, encoding="utf-8")
+    return titulo, png, legenda
 
 
 def _folhas_da_rota(
@@ -675,27 +761,36 @@ def _folhas_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list] | None = None,
+    pasta: Path | None = None,
 ) -> list[tuple[str, bytes, str]]:
+    _titulo, realizado, legenda_feita = _mapa_da_rota(
+        titulo,
+        codigo,
+        aneis,
+        tracos,
+        pontos,
+        dia,
+        frota,
+        pontos_por_placa,
+        pasta,
+    )
     feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
-    camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {})
     if faltando:
         legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
     else:
         legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
-    if camadas:
-        realizado = renderizar_mapa([base], [], pontos, aneis, vias="nenhuma", camadas=camadas)
-        legenda_feita = _legenda_tracos(camadas, "")
+    aberta = _arquivo_rota(pasta, codigo, "aberta.jpg") if pasta is not None else None
+    if pasta is not None and aberta is not None and _cache_fresco(pasta, aberta):
+        png_aberta = aberta.read_bytes()
     else:
-        realizado = renderizar_mapa([base], tracos, pontos, aneis, vias="nenhuma")
-        legenda_feita = "Realizado. A linha é o trajeto do caminhão, na ordem dos pulsos. Ponto: parada."
+        base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
+        png_aberta = renderizar_mapa([base], [], [], aneis, vias="abertas")
+        if aberta is not None:
+            aberta.parent.mkdir(parents=True, exist_ok=True)
+            aberta.write_bytes(png_aberta)
     return [
         (f"{titulo} · realizado", realizado, legenda_feita),
-        (
-            f"{titulo} · em aberto",
-            renderizar_mapa([base], [], [], aneis, vias="abertas"),
-            legenda_aberta,
-        ),
+        (f"{titulo} · em aberto", png_aberta, legenda_aberta),
     ]
 
 
@@ -989,6 +1084,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 dia,
                 frota,
                 pontos_por_placa,
+                pasta,
             )
         except Exception as exc:
             print(f"Mapa {row.get('codigo')}: {exc}", flush=True)
@@ -1168,6 +1264,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             dia,
             frota_mapa,
             _ler(pasta, "pontos.json") or {},
+            pasta,
         )
     ]
     return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
@@ -1214,6 +1311,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             dia,
             frota,
             _ler(output_dir / dia.isoformat(), "pontos.json") or {},
+            output_dir / dia.isoformat(),
         ):
             mapas.append((folha_titulo, png, legenda, cor))
     if len(tabela) == 1:

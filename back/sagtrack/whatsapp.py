@@ -21,6 +21,17 @@ _VISTOS: set[str] = set()
 _DIAS: dict[tuple[str, str], date] = {}
 _LOCK = threading.Lock()
 _GERANDO = threading.Lock()
+_TRAVAs: dict[str, threading.Lock] = {}
+_TRAVA_MESTRE = threading.Lock()
+
+
+def _trava_pdf(chave: str) -> threading.Lock:
+    with _TRAVA_MESTRE:
+        trava = _TRAVAs.get(chave)
+        if trava is None:
+            trava = threading.Lock()
+            _TRAVAs[chave] = trava
+        return trava
 _CONFIG_LOCK = threading.Lock()
 _AVISO: dict[str, Any] | None = None
 _PENDENTES: list[dict[str, Any]] = []
@@ -710,7 +721,8 @@ def _pdf_em_processo(output_dir: str, dia_iso: str, tipo: str, consulta: str, fo
 
 
 def agendar_pdf(settings: Settings, dia: date, tipo: str = "frota", consulta: str = "", *, forcar: bool = False) -> None:
-    if not _GERANDO.acquire(blocking=False):
+    trava = _trava_pdf(_chave_pdf(tipo, consulta))
+    if not trava.acquire(blocking=False):
         return
 
     def vigia() -> None:
@@ -727,7 +739,7 @@ def agendar_pdf(settings: Settings, dia: date, tipo: str = "frota", consulta: st
         except Exception as exc:
             print(f"PDF {tipo}: {exc}", flush=True)
         finally:
-            _GERANDO.release()
+            trava.release()
 
     threading.Thread(target=vigia, daemon=True).start()
 
@@ -763,7 +775,8 @@ def obter_pdf(
         pronto = _ultimo_pdf(pasta, chave)
         if pronto is not None:
             return pronto.read_bytes(), nome
-    if not _GERANDO.acquire(timeout=20 * 60):
+    trava = _trava_pdf(chave)
+    if not trava.acquire(timeout=20 * 60):
         pronto = _ultimo_pdf(pasta, chave)
         return (pronto.read_bytes(), nome) if pronto is not None else None
     try:
@@ -782,7 +795,7 @@ def obter_pdf(
             return None
         return pronto.read_bytes(), nome
     finally:
-        _GERANDO.release()
+        trava.release()
 
 
 def _cortar_texto(texto: str) -> str:
@@ -1073,20 +1086,21 @@ def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = 
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return
-    if not _GERANDO.acquire(blocking=False):
+    trava = _trava_pdf(_chave_pdf("frota", ""))
+    if not trava.acquire(blocking=False):
         return
     try:
         if on_progress:
             on_progress("Montando o PDF para o botão de download...")
         _montar_pdf(settings, dia, "frota", "", forcar=_pdf_atrasado(pasta, _chave_pdf("frota", "")))
         if on_progress:
-            on_progress("PDF pronto. No grupo, o link abre a página e o arquivo baixa por lá.")
+            on_progress("PDF pronto. No grupo, o resumo e o arquivo seguem juntos.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
             on_progress("A frota foi salva. O PDF segue sendo montado em segundo plano.")
     finally:
-        _GERANDO.release()
+        trava.release()
 
 
 def processar(body: Any, settings: Settings | None = None) -> None:

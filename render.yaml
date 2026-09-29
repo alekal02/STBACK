@@ -30,8 +30,8 @@ services:
       - key: ALLOW_VERCEL_PREVIEWS
         value: "true"
       - key: SAGTRACK_MAPA_BASE
-        value: "osm"
-      # Opcional: token Mapbox → SAGTRACK_MAPA_BASE=mapbox e MAPBOX_ACCESS_TOKEN no painel.
+        value: "mapbox"
+      # Token Mapbox (Static Images) — valor só no painel/API, não no git.
       - key: MAPBOX_ACCESS_TOKEN
         sync: false
       - key: FULLTRACK_BASE_URL

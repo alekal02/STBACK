@@ -598,9 +598,8 @@ def _camadas_da_rota(
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list],
 ) -> list[dict[str, Any]]:
-    from .gps import trajetoria_uniforme
+    from .gps import tracos_na_ordem
 
-    vias = _vias_oficiais(dia, codigo)
     ordem = {"ATUANDO": 0, "APOIO": 1}
     candidatos = []
     for item in frota:
@@ -617,7 +616,7 @@ def _camadas_da_rota(
             continue
         placa = str(item.get("placa") or "")
         brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-        tracos = trajetoria_uniforme(brutos, vias, dia=dia)
+        tracos = tracos_na_ordem(brutos)
         if not tracos:
             continue
         candidatos.append((ordem.get(str(cob.get("papel")), 9), -int(cob.get("paradas") or 0), item, cob, tracos))

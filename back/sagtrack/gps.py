@@ -630,6 +630,21 @@ def _quebrar_salto(pontos: list[Ponto], salto_max_m: float) -> list[list[list[fl
     return [[[lat, lon] for lat, lon in _rdp(trecho, 8)] for trecho in trechos if len(trecho) >= 2]
 
 
+def tracos_na_ordem(pontos: list[dict[str, Any]], salto_max_m: float = 160) -> list[list[list[float]]]:
+    """Liga os pulsos na ordem do horário. Um salto acima de 160 m abre outro trecho."""
+    ordenados = sorted(pontos or [], key=lambda item: str(item.get("timestamp") or ""))
+    pares: list[Ponto] = []
+    for ponto in ordenados:
+        lat = ponto.get("latitude")
+        lon = ponto.get("longitude")
+        if lat is None or lon is None:
+            continue
+        pares.append((float(lat), float(lon)))
+    if len(pares) < 2:
+        return []
+    return _quebrar_salto(pares, salto_max_m)
+
+
 def tracos_realistas(
     pontos: list[dict[str, Any]],
     salto_max_m: float = 380,

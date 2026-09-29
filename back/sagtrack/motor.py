@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .api import coletar_percursos
 from .config import Settings, janela_datetime, rotulo_periodo
-from .gps import _datetime_do_timestamp, haversine_m, tracos_realistas
+from .gps import _datetime_do_timestamp, haversine_m, tracos_na_ordem
 from .mapa import aplicar_setores_oficiais, carregar_setores
 from .relatorios import _aplicar_apoio, medir_presenca, pontos_leves, setores_leves
 from .verificacao import coberturas_executadas
@@ -120,7 +120,7 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
-        "gps": tracos_realistas(sorted(pontos, key=lambda p: str(p.get("timestamp") or "")), salto_max_m=2500, tolerancia_m=12),
+        "gps": tracos_na_ordem(pontos),
         "poligonos": poligonos[:3],
     }
 

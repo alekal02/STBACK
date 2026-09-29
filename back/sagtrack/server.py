@@ -140,7 +140,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         if url.path == "/api/health":
-            self._json(200, {"status": "ok", "servico": "segtrack", "versao": "2026-09-29-rotinas"})
+            self._json(200, {"status": "ok", "servico": "segtrack", "versao": "2026-09-29-rotinas2"})
             return
         if url.path == "/config.js":
             self._arquivo(FRONT / "config.js")

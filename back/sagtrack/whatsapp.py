@@ -1003,17 +1003,15 @@ def _cumprir_slot(settings: Settings, marca: datetime) -> None:
 
     if _carimbo_auto(settings, marca).is_file():
         return
-    for _tentativa in range(4):
+    limite = marca + timedelta(hours=2)
+    while datetime.now(_FUSO_BRT) < limite:
         try:
             estado = _fiscal_da_hora(settings, dia_operacional())
         except Exception as exc:
             print(f"PDF automático: {exc}", flush=True)
             return
-        if estado == "adiado":
-            time.sleep(60)
-            continue
-        if estado == "sem-conta":
-            time.sleep(45)
+        if estado in {"adiado", "sem-conta"}:
+            time.sleep(30)
             continue
         _marcar_auto(settings, marca)
         return
@@ -1303,10 +1301,8 @@ def processar(body: Any, settings: Settings | None = None) -> None:
         inicio = time.perf_counter()
         _ULTIMO_ENVIO.clear()
         _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "pdf"})
-        recente = conta_recente(settings, dia)
         conta_salva = (settings.output_dir / dia.isoformat() / "resumo.json").is_file()
-        turno_aberto = dia == dia_operacional()
-        if conta_salva and (not turno_aberto or recente):
+        if conta_salva:
             _entregar_guardado(settings, mensagem["grupo"], tipo, consulta, dia)
             _ULTIMO_ENVIO.update({"fase": "guardado", "total_s": round(time.perf_counter() - inicio, 1)})
             return

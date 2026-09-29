@@ -336,6 +336,9 @@ def _rede_viaria(ruas: list[list[list[float]]]) -> list[list[list[float]]]:
 
     if not ruas:
         return []
+    # Juntar milhares de ruas com unary_union trava o servidor e o PDF não sai.
+    if len(ruas) > 1200:
+        return ruas
     chave = (
         len(ruas),
         round(float(ruas[0][0][0]), 5),

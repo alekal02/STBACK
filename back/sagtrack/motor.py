@@ -309,7 +309,11 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         medir_presenca(refazer, setores, dia)
     _aplicar_apoio(rotas)
 
-    folhas = [folha_caminhao(item, dia) for item in rotas]
+    folhas = []
+    total_folhas = len(rotas)
+    for indice, item in enumerate(rotas, start=1):
+        progress(f"Trajeto {indice}/{total_folhas} · {item.get('placa') or item.get('veiculo')}")
+        folhas.append(folha_caminhao(item, dia))
     resumo = montar_resumo(dia, folhas, settings)
     resumo["trajeto"] = "unica"
     resumo["congelado_em"] = congelado.isoformat(timespec="seconds")

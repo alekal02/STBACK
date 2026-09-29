@@ -208,6 +208,53 @@ def _sentido_osm(valor: Any) -> int:
     return 0
 
 
+_CRS_VIAS = {"epsg": 31982, "inferido": False, "compativel": True}
+
+
+def crs_viario() -> dict[str, Any]:
+    return dict(_CRS_VIAS)
+
+
+def _para_utm(geom: Any, origem: int | None, amostra: tuple[float, float] | None):
+    from shapely.ops import transform
+
+    global _CRS_VIAS
+    if geom is None or geom.is_empty:
+        return geom
+    x, y = amostra if amostra else (float(geom.coords[0][0]), float(geom.coords[0][1]))
+    geografico = abs(x) <= 180 and abs(y) <= 90
+    epsg = origem
+    if epsg in {4326, 4674, 4988, 4989} or (epsg in {None, 0} and geografico):
+        _CRS_VIAS = {"epsg": epsg or 4326, "inferido": epsg in {None, 0}, "compativel": True}
+        return transform(Transformer.from_crs(epsg or 4326, 31982, always_xy=True).transform, geom)
+    if epsg not in {None, 0, 31982} and not geografico:
+        try:
+            convertido = transform(Transformer.from_crs(int(epsg), 31982, always_xy=True).transform, geom)
+        except Exception:
+            _CRS_VIAS = {"epsg": epsg, "inferido": True, "compativel": False}
+            return geom
+        _CRS_VIAS = {"epsg": epsg, "inferido": False, "compativel": True}
+        return convertido
+    if geografico:
+        _CRS_VIAS = {"epsg": 4326, "inferido": True, "compativel": True}
+        return transform(TO_UTM.transform, geom)
+    _CRS_VIAS = {"epsg": 31982 if epsg in {None, 0} else epsg, "inferido": epsg in {None, 0}, "compativel": True}
+    return geom
+
+
+def _srs_da_tabela(con: sqlite3.Connection, tabela: str) -> int | None:
+    try:
+        row = con.execute(
+            "SELECT srs_id FROM gpkg_geometry_columns WHERE table_name = ?",
+            (tabela,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or row[0] is None:
+        return None
+    return int(row[0])
+
+
 def linhas_oficiais() -> list[tuple[Any, int]]:
     """Vias em UTM 31982 com o sentido. A malha do map matching nasce daqui."""
     global _LINHAS_SENTIDO
@@ -226,6 +273,7 @@ def linhas_oficiais() -> list[tuple[Any, int]]:
     cols = _colunas(con, tabela)
     geom_col = _achar_coluna(cols, "geom", "geometry") or "geom"
     sentido_col = _achar_coluna(cols, "oneway")
+    srs = _srs_da_tabela(con, tabela)
     campos = _quote(geom_col)
     if sentido_col:
         campos = f"{campos}, {_quote(sentido_col)}"
@@ -243,10 +291,99 @@ def linhas_oficiais() -> list[tuple[Any, int]]:
         sentido = _sentido_osm(row[1] if sentido_col else None)
         partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
         for parte in partes:
-            if parte.geom_type == "LineString" and len(parte.coords) >= 2 and parte.length >= 1:
+            if parte.geom_type != "LineString" or len(parte.coords) < 2:
+                continue
+            amostra = (float(parte.coords[0][0]), float(parte.coords[0][1]))
+            parte = _para_utm(parte, srs, amostra)
+            if parte is not None and not parte.is_empty and parte.length >= 1:
                 pares.append((parte, sentido))
     con.close()
+    if not pares:
+        pares = _linhas_geojson() or _linhas_postgis()
     _LINHAS_SENTIDO = pares
+    return pares
+
+
+def _linhas_geojson() -> list[tuple[Any, int]]:
+    import json
+
+    from shapely.geometry import shape
+
+    pasta = ROOT / "data"
+    if not pasta.is_dir():
+        return []
+    pares: list[tuple[Any, int]] = []
+    for arquivo in sorted(pasta.glob("*.geojson")):
+        try:
+            dado = json.loads(arquivo.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        feicoes = dado.get("features") if isinstance(dado, dict) else None
+        if not isinstance(feicoes, list):
+            continue
+        for feicao in feicoes:
+            geometria = (feicao or {}).get("geometry") if isinstance(feicao, dict) else None
+            if not geometria:
+                continue
+            try:
+                geom = shape(geometria)
+            except Exception:
+                continue
+            props = (feicao or {}).get("properties") or {}
+            sentido = _sentido_osm(props.get("oneway") or props.get("sentido") or props.get("SENTIDO"))
+            partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
+            for parte in partes:
+                if parte.geom_type != "LineString" or len(parte.coords) < 2:
+                    continue
+                amostra = (float(parte.coords[0][0]), float(parte.coords[0][1]))
+                parte = _para_utm(parte, None, amostra)
+                if parte is not None and not parte.is_empty and parte.length >= 1:
+                    pares.append((parte, sentido))
+    return pares
+
+
+def _linhas_postgis() -> list[tuple[Any, int]]:
+    import os
+    import re
+
+    dsn = os.getenv("SAGTRACK_POSTGIS", "").strip()
+    tabela = os.getenv("SAGTRACK_POSTGIS_VIAS", "").strip()
+    if not dsn or not tabela or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\.]*", tabela):
+        return []
+    try:
+        import psycopg
+    except ImportError:
+        try:
+            import psycopg2 as psycopg
+        except ImportError:
+            return []
+    from shapely import from_wkb
+
+    try:
+        con = psycopg.connect(dsn)
+    except Exception:
+        return []
+    pares: list[tuple[Any, int]] = []
+    try:
+        with con.cursor() as cur:
+            cur.execute(f"SELECT ST_AsBinary(ST_Transform(geom, 31982)) FROM {tabela}")
+            for (blob,) in cur.fetchall():
+                if not blob:
+                    continue
+                try:
+                    geom = from_wkb(bytes(blob))
+                except Exception:
+                    continue
+                if geom is None or geom.is_empty:
+                    continue
+                partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
+                for parte in partes:
+                    if parte.geom_type == "LineString" and len(parte.coords) >= 2 and parte.length >= 1:
+                        pares.append((parte, 0))
+    except Exception:
+        pares = []
+    finally:
+        con.close()
     return pares
 
 
@@ -261,6 +398,7 @@ def carregar_vias() -> list[Any]:
         return []
     cols = _colunas(con, tabela)
     geom_col = _achar_coluna(cols, "geom", "geometry") or "geom"
+    srs = _srs_da_tabela(con, tabela)
     linhas = []
     for (blob,) in con.execute(f"SELECT {_quote(geom_col)} FROM {_quote(tabela)}"):
         if not blob:
@@ -273,7 +411,11 @@ def carregar_vias() -> list[Any]:
             continue
         partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
         for parte in partes:
-            if parte.geom_type == "LineString" and len(parte.coords) >= 2:
+            if parte.geom_type != "LineString" or len(parte.coords) < 2:
+                continue
+            amostra = (float(parte.coords[0][0]), float(parte.coords[0][1]))
+            parte = _para_utm(parte, srs, amostra)
+            if parte is not None and not parte.is_empty and parte.length >= 1:
                 linhas.append(parte)
     con.close()
     return linhas
@@ -530,6 +672,8 @@ def aplicar_setores_oficiais(
                 geom_setor=setor["geom"],
                 km_oficial=setor.get("km_oficial"),
                 pecas=setor.get("_pecas") or [],
+                faixa_confirmada=item.get("_faixa_confirmada"),
+                faixa_estimada=item.get("_faixa_estimada"),
             )
             km_feito = float(cob.get("km_coleta") or 0)
             n_pts = int(cob.get("pontos_no_setor") or 0)
@@ -553,6 +697,7 @@ def aplicar_setores_oficiais(
                 "veiculo_inlog": item.get("inlog") or "",
                 "trechos_feitos": cob.get("trechos_feitos") or [],
                 "trechos_faltando": cob.get("trechos_faltando") or [],
+                "trechos_incertos": cob.get("trechos_incertos") or [],
                 "trechos_planejados": cob.get("trechos_planejados") or [],
                 "trechos_gps": cob.get("trechos_gps") or [],
                 "poligonos": setor.get("poligonos") or [],
@@ -589,6 +734,10 @@ def aplicar_setores_oficiais(
             item["qtd_pacmans"] = melhor.get("moradias")
             item["trechos_feitos"] = [t for row in visiveis for t in (row.get("trechos_feitos") or [])]
             item["trechos_faltando"] = [t for row in visiveis for t in (row.get("trechos_faltando") or [])]
+            item["trechos_incertos"] = [t for row in visiveis for t in (row.get("trechos_incertos") or [])]
+            item["cobertura_malha"] = any(str(row.get("metodo") or "") == "malha" for row in visiveis) or bool(
+                item.get("_faixa_confirmada") is not None or item.get("_faixa_estimada") is not None
+            )
             item["trechos_planejados"] = [t for row in visiveis for t in (row.get("trechos_planejados") or [])]
             item["trechos_gps"] = [t for row in visiveis for t in (row.get("trechos_gps") or [])]
             item["poligonos"] = [anel for row in visiveis for anel in (row.get("poligonos") or [])]
@@ -615,6 +764,8 @@ def aplicar_setores_oficiais(
                 item["km_faltando"] = top.get("km_faltando")
                 item["trechos_feitos"] = top.get("trechos_feitos") or []
                 item["trechos_faltando"] = top.get("trechos_faltando") or []
+                item["trechos_incertos"] = top.get("trechos_incertos") or []
+                item["cobertura_malha"] = str(top.get("metodo") or "") == "malha"
                 item["poligonos"] = top.get("poligonos") or []
                 item["pontos_dia"] = pontos
                 item["pontos"] = pontos
@@ -631,6 +782,7 @@ def aplicar_setores_oficiais(
                 item["rota_planejada"] = []
                 item["trechos_feitos"] = []
                 item["trechos_faltando"] = []
+                item["trechos_incertos"] = []
                 item["trechos_planejados"] = []
                 item["trechos_gps"] = []
                 item["pontos_dia"] = pontos

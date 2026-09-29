@@ -702,6 +702,7 @@ class Malha:
         sentidos = [sentido for geom, sentido in originais if geom is not None and not geom.is_empty]
         if not geoms:
             return malha
+        geoms = _soldar_pontas(geoms)
         unido = unary_union(geoms)
         partes = _partes_de_linha(unido)
         arvore = STRtree(geoms)
@@ -764,6 +765,64 @@ class Malha:
         if melhor is None:
             return None
         return _Snap(melhor[1], melhor[2], melhor[3])
+
+    def candidatos(
+        self,
+        coord: Ponto,
+        raio_m: float,
+        rumo: tuple[float, float] | None = None,
+        limite: int = 4,
+    ) -> list[_Snap]:
+        """Até `limite` vias dentro do raio. A primeira é a mais compatível com o rumo."""
+        from shapely.geometry import Point
+
+        from .mapa import TO_UTM
+
+        if self._arvore is None:
+            return []
+        x, y = TO_UTM.transform(float(coord[1]), float(coord[0]))
+        ponto = Point(x, y)
+        achados: list[tuple[float, float, int, float]] = []
+        for indice in self._arvore.query(ponto.buffer(raio_m)):
+            aresta = int(indice)
+            geom = self.geoms[aresta]
+            dist = float(geom.distance(ponto))
+            if dist > raio_m:
+                continue
+            along = float(geom.project(ponto))
+            nota = dist + _penalidade_rumo(geom, along, rumo)
+            achados.append((nota, dist, aresta, along))
+        achados.sort(key=lambda item: item[0])
+        return [_Snap(aresta, along, dist) for _nota, dist, aresta, along in achados[:limite]]
+
+    def ambiguo(self, snaps: list[_Snap]) -> bool:
+        """Duas vias paralelas quase à mesma distância. O caminho não pode ser confirmado."""
+        if len(snaps) < 2:
+            return False
+        if snaps[1].dist - snaps[0].dist > 8:
+            return False
+        if snaps[0].aresta == snaps[1].aresta:
+            return False
+        nos_a = {self.no0[snaps[0].aresta], self.no1[snaps[0].aresta]}
+        nos_b = {self.no0[snaps[1].aresta], self.no1[snaps[1].aresta]}
+        return not bool(nos_a & nos_b)
+
+    def componentes(self) -> int:
+        vistos: set[tuple[int, int]] = set()
+        total = 0
+        for no in self.adj:
+            if no in vistos:
+                continue
+            total += 1
+            fila = [no]
+            vistos.add(no)
+            while fila:
+                atual = fila.pop()
+                for outro, _aresta, _frente in self.adj.get(atual, ()):
+                    if outro not in vistos:
+                        vistos.add(outro)
+                        fila.append(outro)
+        return total
 
     def caminho(self, origem: _Snap, destino: _Snap, limite_m: float) -> tuple[list[Ponto], float] | None:
         import heapq
@@ -874,6 +933,66 @@ class Malha:
             lon, lat = TO_WGS.transform(x, y)
             saida.append((lat, lon))
         return saida
+
+
+def _soldar_pontas(geoms: list[Any], tol: float = 4.0) -> list[Any]:
+    """Une pontas que ficaram a até 4 m. O cruzamento que já se toca o unary_union parte."""
+    from shapely.geometry import LineString
+
+    pontas: list[tuple[float, float, int, int]] = []
+    for indice, geom in enumerate(geoms):
+        coords = list(geom.coords)
+        if len(coords) < 2:
+            continue
+        pontas.append((float(coords[0][0]), float(coords[0][1]), indice, 0))
+        pontas.append((float(coords[-1][0]), float(coords[-1][1]), indice, -1))
+    if not pontas:
+        return geoms
+    pai = list(range(len(pontas)))
+
+    def achar(no: int) -> int:
+        while pai[no] != no:
+            pai[no] = pai[pai[no]]
+            no = pai[no]
+        return no
+
+    grade: dict[tuple[int, int], list[int]] = {}
+    for indice, (x, y, _geom, _qual) in enumerate(pontas):
+        grade.setdefault((int(x // tol), int(y // tol)), []).append(indice)
+    limite = tol * tol
+    for indice, (x, y, _geom, _qual) in enumerate(pontas):
+        cx, cy = int(x // tol), int(y // tol)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for outro in grade.get((cx + dx, cy + dy), ()):
+                    if outro <= indice:
+                        continue
+                    ox, oy = pontas[outro][0], pontas[outro][1]
+                    if (x - ox) ** 2 + (y - oy) ** 2 <= limite:
+                        pai[achar(outro)] = achar(indice)
+    grupos: dict[int, list[int]] = {}
+    for indice in range(len(pontas)):
+        grupos.setdefault(achar(indice), []).append(indice)
+    mover: dict[tuple[int, int], tuple[float, float]] = {}
+    for membros in grupos.values():
+        if len(membros) < 2:
+            continue
+        mx = sum(pontas[i][0] for i in membros) / len(membros)
+        my = sum(pontas[i][1] for i in membros) / len(membros)
+        for i in membros:
+            mover[(pontas[i][2], pontas[i][3])] = (mx, my)
+    saida = []
+    for indice, geom in enumerate(geoms):
+        coords = [tuple(p) for p in geom.coords]
+        if (indice, 0) in mover:
+            coords[0] = mover[(indice, 0)]
+        if (indice, -1) in mover:
+            coords[-1] = mover[(indice, -1)]
+        if len(coords) >= 2 and coords[0] != coords[-1]:
+            saida.append(LineString(coords))
+        else:
+            saida.append(geom)
+    return saida
 
 
 def _partes_de_linha(geom: Any) -> list[Any]:
@@ -1000,11 +1119,12 @@ def _caminho_plausivel(dist: float, comp: float, dt: float) -> bool:
 
 
 def _trecho_confirmado(dist: float, comp: float, da: float, db: float, dt: float) -> bool:
-    if da > 40 or db > 40 or comp > 220:
+    """Confirmado só quando o caminho na via tem o tamanho do deslocamento medido."""
+    if da > 25 or db > 25:
         return False
-    if comp > max(dist * 1.7, dist + 70):
+    if abs(comp - dist) > max(50.0, 0.40 * max(dist, 1.0)):
         return False
-    if dt > 0 and comp > (40 / 3.6) * dt + 160:
+    if dt > 0 and comp > (55 / 3.6) * dt + 90:
         return False
     return True
 
@@ -1017,53 +1137,313 @@ def _guardar_trecho(atual: list[Ponto], destino: list[list[list[float]]]) -> Non
         destino.append([[lat, lon] for lat, lon in fino])
 
 
-def casar_tracos(
-    pontos: list[dict[str, Any]],
-    dia: date | None = None,
-    vias: list[list[list[float]]] | None = None,
-    malha: Malha | None = None,
-) -> dict[str, Any]:
-    """Casa cada pulso com a via oficial e liga o próximo pela hora.
+def _sigma_do_pulso(ponto: dict[str, Any]) -> float:
+    bruto = ponto.get("precisao")
+    if bruto in (None, ""):
+        bruto = ponto.get("hdop")
+    try:
+        valor = float(str(bruto).replace(",", "."))
+    except (TypeError, ValueError):
+        return 18.0
+    if valor <= 0:
+        return 18.0
+    metros = valor * 6.0 if valor < 15 else valor
+    return max(8.0, min(40.0, metros))
 
-    A linha desenhada não entra na porcentagem da rota. Rua feita continua
-    sendo só a que tem pulso a até 45 m. Sem via compatível, o salto fica aberto.
-    """
-    ordenados = sorted(pontos or [], key=ordem_do_pulso)
-    referencia = dia or date.today()
-    marcas: list[tuple[datetime, Ponto]] = []
-    for ponto in ordenados:
-        lat = ponto.get("latitude")
-        lon = ponto.get("longitude")
-        if lat is None or lon is None:
-            continue
-        momento = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), referencia)
-        marcas.append((momento or datetime.min, (float(lat), float(lon))))
-    seguidos: list[tuple[datetime, Ponto]] = []
-    for momento, coord in marcas:
-        if seguidos and haversine_m(seguidos[-1][1], coord) < 8:
-            continue
-        seguidos.append((momento, coord))
-    original = _quebrar_salto([coord for _momento, coord in seguidos], _CURTO_M) if len(seguidos) >= 2 else []
-    vazio = {
-        "confirmado": [],
-        "estimado": [],
-        "original": original,
-        "resumo": {"confirmado": 0, "estimado": 0, "indeterminado": 0},
-    }
-    if len(seguidos) < 2:
-        return vazio
-    if malha is None:
-        malha = Malha.de_wgs(vias) if vias is not None else malha_oficial()
-    if not malha.geoms:
-        return vazio
 
-    confirmado: list[list[list[float]]] = []
-    estimado: list[list[list[float]]] = []
-    contagem = {"confirmado": 0, "estimado": 0, "indeterminado": 0}
+def _velocidade_do_pulso(ponto: dict[str, Any]) -> float | None:
+    try:
+        valor = float(str(ponto.get("velocidade") or "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    if valor < 0 or valor > 180:
+        return None
+    return valor
+
+
+def _log_emissao(dist: float, sigma: float) -> float:
+    return -0.5 * (dist / sigma) ** 2
+
+
+def _log_transicao(metros: float, dist: float) -> float:
+    return -abs(metros - dist) / 35.0
+
+
+def _log_rumo_caminho(geom: list[Ponto], rumo: tuple[float, float] | None) -> float:
+    if not rumo or len(geom) < 2:
+        return 0.0
+    norma = math.hypot(rumo[0], rumo[1])
+    if norma < 8:
+        return 0.0
+    a, b = geom[0], geom[min(3, len(geom) - 1)]
+    leste = (b[1] - a[1]) * 111_320 * math.cos(math.radians(a[0]))
+    norte = (b[0] - a[0]) * 110_540
+    norma_via = math.hypot(leste, norte)
+    if norma_via < 6:
+        return 0.0
+    cosseno = (leste * rumo[0] + norte * rumo[1]) / (norma_via * norma)
+    if cosseno < -0.15:
+        return -2.8
+    return 0.0
+
+
+def _classe_do_salto(
+    dist: float,
+    comp: float,
+    da: float,
+    db: float,
+    dt: float,
+    ambiguo: bool,
+    vel_a: float | None,
+    vel_b: float | None,
+) -> str:
+    if not _caminho_plausivel(dist, comp, dt):
+        return "indeterminado"
+    if dt > 1:
+        vel_via = comp / dt * 3.6
+        if vel_via > 72:
+            return "indeterminado"
+        if vel_a is not None and vel_b is not None:
+            media = (vel_a + vel_b) / 2
+            if abs(media - vel_via) > 38 and vel_via > 22:
+                ambiguo = True
+    if ambiguo or not _trecho_confirmado(dist, comp, da, db, dt):
+        return "estimado"
+    return "confirmado"
+
+
+def _confianca_casamento(resumo: dict[str, int]) -> float:
+    pesos = (
+        int(resumo.get("confirmado") or 0)
+        + int(resumo.get("estimado") or 0)
+        + int(resumo.get("indeterminado") or 0)
+    )
+    if pesos <= 0:
+        return 0.0
+    return round(int(resumo.get("confirmado") or 0) / pesos, 2)
+
+
+_ZONA_LOCAIS: Any = None
+
+
+def _zona_locais() -> Any:
+    """Pátio e aterro em UTM. O trecho dentro deles é deslocamento, não coleta."""
+    global _ZONA_LOCAIS
+    if _ZONA_LOCAIS is not None:
+        return _ZONA_LOCAIS
+    import json
+
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from .config import ROOT
+    from .mapa import TO_UTM
+
+    arquivo = ROOT / "data" / "locais.json"
+    if not arquivo.is_file():
+        _ZONA_LOCAIS = False
+        return _ZONA_LOCAIS
+    try:
+        dado = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _ZONA_LOCAIS = False
+        return _ZONA_LOCAIS
+    polys = []
+    for local in (dado or {}).get("locais") or []:
+        for anel in local.get("aneis") or []:
+            coords = []
+            for ponto in anel:
+                if len(ponto) < 2:
+                    continue
+                x, y = TO_UTM.transform(float(ponto[1]), float(ponto[0]))
+                coords.append((x, y))
+            if len(coords) >= 4:
+                polys.append(Polygon(coords))
+    _ZONA_LOCAIS = unary_union(polys) if polys else False
+    return _ZONA_LOCAIS
+
+
+def _linhas_wgs_de_utm(geom: Any) -> list[list[list[float]]]:
+    from .mapa import TO_WGS
+
+    saida = []
+    partes = [geom] if geom.geom_type == "LineString" else list(getattr(geom, "geoms", []) or [])
+    for parte in partes:
+        if parte.geom_type != "LineString" or len(parte.coords) < 2 or parte.length < 8:
+            continue
+        linha = []
+        for x, y in parte.coords:
+            lon, lat = TO_WGS.transform(float(x), float(y))
+            linha.append([lat, lon])
+        if len(linha) >= 2:
+            saida.append(linha)
+    return saida
+
+
+def _separar_locais(
+    tracos: list[list[list[float]]],
+) -> tuple[list[list[list[float]]], list[list[list[float]]]]:
+    from shapely.geometry import LineString
+
+    from .mapa import TO_UTM
+
+    zona = _zona_locais()
+    if not zona or not tracos:
+        return tracos, []
+    normais: list[list[list[float]]] = []
+    desloc: list[list[list[float]]] = []
+    for trecho in tracos:
+        xy = []
+        for ponto in trecho:
+            if len(ponto) < 2:
+                continue
+            x, y = TO_UTM.transform(float(ponto[1]), float(ponto[0]))
+            xy.append((x, y))
+        if len(xy) < 2:
+            continue
+        linha = LineString(xy)
+        try:
+            fora = linha.difference(zona)
+            dentro = linha.intersection(zona)
+        except Exception:
+            normais.append(trecho)
+            continue
+        normais.extend(_linhas_wgs_de_utm(fora))
+        desloc.extend(_linhas_wgs_de_utm(dentro))
+    return normais, desloc
+
+
+def _viterbi(
+    grupo: list[tuple[datetime, Ponto, float | None, float]],
+    malha: Malha,
+) -> tuple[list[tuple[str, list[Ponto]]], int]:
+    """HMM: emissão pela distância à via, transição pelo caminho que cabe no tempo."""
+    n = len(grupo)
+    camadas = []
+    for indice, (_momento, coord, _vel, _sigma) in enumerate(grupo):
+        rumo = _rumo_utm(grupo[indice - 1][1], coord) if indice else None
+        camadas.append(malha.candidatos(coord, _RAIO_CASAMENTO_M, rumo=rumo, limite=4))
+    neg = -1e12
+    dp: list[list[float]] = []
+    anterior: list[list[int]] = []
+    salto: list[list[tuple[list[Ponto], float] | None]] = []
+    for i, cands in enumerate(camadas):
+        dp.append([neg] * len(cands))
+        anterior.append([-1] * len(cands))
+        salto.append([None] * len(cands))
+        if not cands:
+            continue
+        if i == 0:
+            for j, cand in enumerate(cands):
+                dp[i][j] = _log_emissao(cand.dist, grupo[i][3])
+            continue
+        dist = haversine_m(grupo[i - 1][1], grupo[i][1])
+        dt = abs((grupo[i][0] - grupo[i - 1][0]).total_seconds()) if grupo[i][0] and grupo[i - 1][0] else 0.0
+        limite = _limite_do_salto(dist, dt)
+        rumo = _rumo_utm(grupo[i - 1][1], grupo[i][1])
+        for j, cand in enumerate(cands):
+            emissao = _log_emissao(cand.dist, grupo[i][3])
+            melhor = neg
+            origem = -1
+            escolhido: tuple[list[Ponto], float] | None = None
+            for k, prev in enumerate(camadas[i - 1]):
+                if dp[i - 1][k] <= neg / 2:
+                    continue
+                achado = malha.caminho(prev, cand, limite)
+                if achado is None:
+                    continue
+                geom, metros = achado
+                if not _caminho_plausivel(dist, metros, dt):
+                    continue
+                nota = (
+                    dp[i - 1][k]
+                    + _log_transicao(metros, dist)
+                    + emissao
+                    + _log_rumo_caminho(geom, rumo)
+                )
+                if nota > melhor:
+                    melhor = nota
+                    origem = k
+                    escolhido = (geom, metros)
+            dp[i][j] = melhor
+            anterior[i][j] = origem
+            salto[i][j] = escolhido
+    fim = n - 1
+    falhas_cauda = 0
+    while fim > 0 and (not dp[fim] or max(dp[fim]) <= neg / 2):
+        fim -= 1
+        falhas_cauda += 1
+    if fim == 0 and (not dp[0] or max(dp[0]) <= neg / 2):
+        return [], max(0, n - 1)
+    estado = max(range(len(dp[fim])), key=lambda j: dp[fim][j])
+    ordem: list[int] = [-1] * n
+    ordem[fim] = estado
+    for i in range(fim, 0, -1):
+        if ordem[i] < 0:
+            break
+        ordem[i - 1] = anterior[i][ordem[i]]
+    trechos: list[tuple[str, list[Ponto]]] = []
+    falhas = falhas_cauda
+    for i in range(1, fim + 1):
+        j = ordem[i]
+        k = ordem[i - 1]
+        ligacao = salto[i][j] if j >= 0 else None
+        if k < 0 or j < 0 or ligacao is None:
+            falhas += 1
+            continue
+        geom, metros = ligacao
+        dist = haversine_m(grupo[i - 1][1], grupo[i][1])
+        dt = abs((grupo[i][0] - grupo[i - 1][0]).total_seconds()) if grupo[i][0] and grupo[i - 1][0] else 0.0
+        classe = _classe_do_salto(
+            dist,
+            metros,
+            camadas[i - 1][k].dist,
+            camadas[i][j].dist,
+            dt,
+            malha.ambiguo(camadas[i - 1]) or malha.ambiguo(camadas[i]),
+            grupo[i - 1][2],
+            grupo[i][2],
+        )
+        if classe == "indeterminado":
+            falhas += 1
+            continue
+        trechos.append((classe, geom))
+    return trechos, falhas
+
+
+def _runs_com_via(
+    grupo: list[tuple[datetime, Ponto, float | None, float]],
+    malha: Malha,
+) -> tuple[list[list[tuple[datetime, Ponto, float | None, float]]], int]:
+    runs: list[list[tuple[datetime, Ponto, float | None, float]]] = []
+    atual: list[tuple[datetime, Ponto, float | None, float]] = []
+    sem_via = 0
+    for item in grupo:
+        if malha.candidatos(item[1], _RAIO_CASAMENTO_M, limite=1):
+            atual.append(item)
+            continue
+        sem_via += 1
+        if len(atual) >= 2:
+            runs.append(atual)
+        atual = []
+    if len(atual) >= 2:
+        runs.append(atual)
+    return runs, sem_via
+
+
+def _casar_grupo(
+    grupo: list[tuple[datetime, Ponto, float | None, float]],
+    malha: Malha,
+    confirmado: list[list[list[float]]],
+    estimado: list[list[list[float]]],
+) -> dict[str, int]:
+    contagem = {"confirmado": 0, "estimado": 0, "indeterminado": 0, "sem_via": 0}
+    runs, sem_via = _runs_com_via(grupo, malha)
+    contagem["sem_via"] = sem_via
+    if sem_via and len(grupo) >= 2:
+        contagem["indeterminado"] += sem_via
     classe = ""
     atual: list[Ponto] = []
-    anterior = seguidos[0]
-    snap_anterior = malha.projetar(anterior[1], _RAIO_CASAMENTO_M)
 
     def fechar() -> None:
         nonlocal classe, atual
@@ -1085,51 +1465,242 @@ def casar_tracos(
             atual = list(geom)
         contagem[nova] += 1
 
-    for momento, coord in seguidos[1:]:
-        dist = haversine_m(anterior[1], coord)
-        dt = abs((momento - anterior[0]).total_seconds()) if momento and anterior[0] else 0.0
-        rumo = _rumo_utm(anterior[1], coord)
-        snap = malha.projetar(
-            coord,
-            _RAIO_CASAMENTO_M,
-            preferida=snap_anterior.aresta if snap_anterior else None,
-            rumo=rumo,
-        )
-        if _pulso_impossivel(dist, dt):
-            fechar()
+    for run in runs:
+        trechos, falhas = _viterbi(run, malha)
+        contagem["indeterminado"] += falhas
+        for nova, geom in trechos:
+            usar(nova, geom)
+        fechar()
+    return contagem
+
+
+def _emendar_listas(base: list, extra: list) -> list:
+    if not base or not extra:
+        return list(base) + list(extra)
+    fim = base[-1][-1] if base[-1] else None
+    inicio = extra[0][0] if extra[0] else None
+    if (
+        fim
+        and inicio
+        and len(fim) >= 2
+        and len(inicio) >= 2
+        and haversine_m((float(fim[0]), float(fim[1])), (float(inicio[0]), float(inicio[1]))) < 12
+    ):
+        unidos = list(base)
+        unidos[-1] = list(base[-1]) + list(extra[0][1:])
+        unidos.extend(extra[1:])
+        return unidos
+    return list(base) + list(extra)
+
+
+def _nucleo_casamento(
+    pontos: list[dict[str, Any]],
+    dia: date | None,
+    vias: list[list[list[float]]] | None,
+    malha: Malha | None,
+) -> dict[str, Any]:
+    ordenados = sorted(pontos or [], key=ordem_do_pulso)
+    referencia = dia or date.today()
+    bruto: list[tuple[datetime, Ponto, float | None, float]] = []
+    invalidos = 0
+    for ponto in ordenados:
+        try:
+            lat = float(ponto["latitude"])
+            lon = float(ponto["longitude"])
+        except (KeyError, TypeError, ValueError):
+            invalidos += 1
+            continue
+        if abs(lat) < 0.5 or abs(lon) < 0.5 or abs(lat) > 90 or abs(lon) > 180:
+            invalidos += 1
+            continue
+        momento = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), referencia)
+        bruto.append((momento or datetime.min, (lat, lon), _velocidade_do_pulso(ponto), _sigma_do_pulso(ponto)))
+    seguidos: list[tuple[datetime, Ponto, float | None, float]] = []
+    duplicados = 0
+    for item in bruto:
+        if seguidos and haversine_m(seguidos[-1][1], item[1]) < 8:
+            duplicados += 1
+            continue
+        seguidos.append(item)
+    saltos = 0
+    limpos: list[tuple[datetime, Ponto, float | None, float]] = []
+    for indice, item in enumerate(seguidos):
+        if 0 < indice < len(seguidos) - 1:
+            antes, depois = seguidos[indice - 1], seguidos[indice + 1]
+            ida = haversine_m(antes[1], item[1])
+            volta = haversine_m(item[1], depois[1])
+            dt = abs((depois[0] - antes[0]).total_seconds()) if depois[0] and antes[0] else 0.0
+            rapido = dt <= 0 or ida + volta > (45 / 3.6) * dt + 80
+            if ida > 250 and volta > 250 and haversine_m(antes[1], depois[1]) < 60 and rapido:
+                saltos += 1
+                continue
+        limpos.append(item)
+    seguidos = limpos
+    original = _quebrar_salto([coord for _momento, coord, _vel, _sigma in seguidos], 180) if len(seguidos) >= 2 else []
+    vazio = {
+        "confirmado": [],
+        "estimado": [],
+        "deslocamento": [],
+        "original": original,
+        "disponivel": False,
+        "resumo": {
+            "confirmado": 0,
+            "estimado": 0,
+            "indeterminado": 0,
+            "sem_via": 0,
+            "gaps": 0,
+            "invalidos": invalidos,
+            "duplicados": duplicados,
+            "saltos": saltos,
+            "confianca": 0.0,
+        },
+    }
+    if len(seguidos) < 2:
+        return vazio
+    if malha is None:
+        malha = Malha.de_wgs(vias) if vias is not None else malha_oficial()
+    if not malha.geoms:
+        return vazio
+
+    confirmado: list[list[list[float]]] = []
+    estimado: list[list[list[float]]] = []
+    contagem = {
+        "confirmado": 0,
+        "estimado": 0,
+        "indeterminado": 0,
+        "sem_via": 0,
+        "gaps": 0,
+        "invalidos": invalidos,
+        "duplicados": duplicados,
+        "saltos": saltos,
+    }
+    grupo: list[tuple[datetime, Ponto, float | None, float]] = [seguidos[0]]
+    for item in seguidos[1:]:
+        dist = haversine_m(grupo[-1][1], item[1])
+        dt = abs((item[0] - grupo[-1][0]).total_seconds()) if item[0] and grupo[-1][0] else 0.0
+        if dt >= _SILENCIO_S or _pulso_impossivel(dist, dt):
+            if len(grupo) >= 2:
+                parcial = _casar_grupo(grupo, malha, confirmado, estimado)
+                for chave in ("confirmado", "estimado", "indeterminado", "sem_via"):
+                    contagem[chave] += parcial[chave]
+            contagem["gaps"] += 1
             contagem["indeterminado"] += 1
-        elif snap_anterior is None or snap is None:
-            if dist <= _CURTO_M:
-                usar("confirmado", [anterior[1], coord])
-            else:
-                fechar()
-                contagem["indeterminado"] += 1
-        else:
-            achado = malha.caminho(snap_anterior, snap, _limite_do_salto(dist, dt))
-            if achado is None:
-                if dist <= _CURTO_M:
-                    usar("confirmado", [anterior[1], coord])
-                else:
-                    fechar()
-                    contagem["indeterminado"] += 1
-            else:
-                geom, comp = achado
-                if _trecho_confirmado(dist, comp, snap_anterior.dist, snap.dist, dt):
-                    usar("confirmado", geom)
-                elif _caminho_plausivel(dist, comp, dt):
-                    usar("estimado", geom)
-                else:
-                    fechar()
-                    contagem["indeterminado"] += 1
-        anterior = (momento, coord)
-        snap_anterior = snap
-    fechar()
+            grupo = [item]
+            continue
+        grupo.append(item)
+    if len(grupo) >= 2:
+        parcial = _casar_grupo(grupo, malha, confirmado, estimado)
+        for chave in ("confirmado", "estimado", "indeterminado", "sem_via"):
+            contagem[chave] += parcial[chave]
+    confirmado, desloc_c = _separar_locais(confirmado)
+    estimado, desloc_e = _separar_locais(estimado)
+    contagem["confianca"] = _confianca_casamento(contagem)
+    contagem["componentes"] = malha.componentes()
     return {
         "confirmado": confirmado,
         "estimado": estimado,
+        "deslocamento": desloc_c + desloc_e,
         "original": original,
+        "disponivel": True,
         "resumo": contagem,
     }
+
+
+def _chaves_gps(pontos: list[dict[str, Any]]) -> list[str]:
+    chaves = []
+    for ponto in sorted(pontos or [], key=ordem_do_pulso):
+        try:
+            lat = round(float(ponto["latitude"]), 5)
+            lon = round(float(ponto["longitude"]), 5)
+        except (KeyError, TypeError, ValueError):
+            continue
+        chaves.append(f"{ponto.get('timestamp')}|{lat}|{lon}")
+    return chaves
+
+
+def casar_tracos(
+    pontos: list[dict[str, Any]],
+    dia: date | None = None,
+    vias: list[list[list[float]]] | None = None,
+    malha: Malha | None = None,
+    *,
+    placa: str = "",
+    pasta_cache: Any = None,
+) -> dict[str, Any]:
+    """Casa a sequência de pulsos com a rede viária.
+
+    A emissão é a distância do pulso à via. A transição é o caminho na rede
+    cujo comprimento cabe na distância e no tempo observados. Sem candidato
+    dentro do raio, ou sem caminho compatível, o trecho fica indeterminado
+    e nenhuma reta é desenhada no lugar. O GPS original não é alterado.
+    """
+    import json
+    from pathlib import Path
+
+    versao = "v2"
+    cache = Path(pasta_cache) if pasta_cache else None
+    arquivo = None
+    guardado: dict[str, Any] | None = None
+    chaves = _chaves_gps(pontos)
+    if cache and placa and vias is None and malha is None:
+        cache.mkdir(parents=True, exist_ok=True)
+        arquivo = cache / f"{versao}-{placa}.json"
+        if arquivo.is_file():
+            try:
+                guardado = json.loads(arquivo.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                guardado = None
+        if guardado and guardado.get("chaves") == chaves and isinstance(guardado.get("resultado"), dict):
+            return guardado["resultado"]
+        prefixo = list((guardado or {}).get("chaves") or [])
+        if (
+            guardado
+            and prefixo
+            and len(chaves) > len(prefixo)
+            and chaves[: len(prefixo)] == prefixo
+            and isinstance(guardado.get("resultado"), dict)
+        ):
+            cauda = sorted(pontos or [], key=ordem_do_pulso)[len(prefixo) - 1 :]
+            novo = _nucleo_casamento(cauda, dia, vias, malha)
+            anterior = guardado["resultado"]
+            resultado = {
+                "confirmado": _emendar_listas(anterior.get("confirmado") or [], novo.get("confirmado") or []),
+                "estimado": _emendar_listas(anterior.get("estimado") or [], novo.get("estimado") or []),
+                "deslocamento": _emendar_listas(anterior.get("deslocamento") or [], novo.get("deslocamento") or []),
+                "original": _emendar_listas(anterior.get("original") or [], novo.get("original") or []),
+                "disponivel": bool(anterior.get("disponivel") or novo.get("disponivel")),
+                "resumo": {},
+            }
+            chaves_resumo = (
+                "confirmado",
+                "estimado",
+                "indeterminado",
+                "sem_via",
+                "gaps",
+                "invalidos",
+                "duplicados",
+                "saltos",
+                "componentes",
+            )
+            for chave in chaves_resumo:
+                resultado["resumo"][chave] = int((anterior.get("resumo") or {}).get(chave) or 0) + int(
+                    (novo.get("resumo") or {}).get(chave) or 0
+                )
+            if "componentes" in (novo.get("resumo") or {}):
+                resultado["resumo"]["componentes"] = novo["resumo"]["componentes"]
+            resultado["resumo"]["confianca"] = _confianca_casamento(resultado["resumo"])
+            arquivo.write_text(
+                json.dumps({"chaves": chaves, "resultado": resultado}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return resultado
+    resultado = _nucleo_casamento(pontos, dia, vias, malha)
+    if arquivo is not None and resultado.get("disponivel"):
+        arquivo.write_text(
+            json.dumps({"chaves": chaves, "resultado": resultado}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return resultado
 
 
 def tracos_entre_pulsos(

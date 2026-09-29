@@ -644,7 +644,7 @@ def _texto_decisao(dia: date, balanco: list[dict[str, Any]]) -> list[str]:
             f"{_conta(len(parciais), 'parcial', 'parciais')}, "
             f"{_conta(len(nao), 'não feita', 'não feitas')}."
         ),
-        "Feita é pelo menos 90% das ruas oficiais com pulso a até 45 m. Sem pulso, a rua fica em aberto.",
+        "Feita é pelo menos 90% do eixo das ruas oficiais percorrido pelo trajeto casado na malha. Passar perto, sem entrar na via, não conta.",
     ]
     for faixa in ("Diurno", "Noturno", "Noturno diário", "Sem turno"):
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
@@ -706,7 +706,7 @@ def relatorio_frota(output_dir: Path, dia: date) -> dict[str, Any]:
     texto = _texto_decisao(dia, balanco)
     texto.append(
         f"{len(caminhoes)} caminhão(ões) com pulso na cidade. "
-        "Apoio é outro caminhão que entrou na rota e deixou pulsos suficientes. Sem pulso a 45 m da rua, a passagem não conta."
+        "Apoio é outro caminhão que entrou na rota e deixou pulsos suficientes. A rua só conta quando o trajeto casado passa por ela."
     )
     return {
         "tipo": "frota",
@@ -842,6 +842,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
     presentes = []
     feitos_rota: list = []
     faltando_rota: list = []
+    incertos_rota: list = []
     melhor_faltando = -1.0
     for item in frota:
         cob = next((c for c in _tocados(item, oficiais=_oficiais(setores)) if str(c.get("codigo") or "") == codigo), None)
@@ -850,9 +851,11 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
             continue
         feitos = _linhas_leves(bruto.get("trechos_feitos"))
         faltando = _linhas_leves(bruto.get("trechos_faltando"))
+        incertos = _linhas_leves(bruto.get("trechos_incertos"))
         papel = cob.get("papel") or "PASSAGEM"
         if papel in {"ATUANDO", "APOIO"}:
             feitos_rota.extend(feitos)
+            incertos_rota.extend(incertos)
             pct_cob = float(cob.get("percentual") or 0)
             if pct_cob > melhor_faltando:
                 melhor_faltando = pct_cob
@@ -882,9 +885,12 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
                 "confianca": cob.get("confianca") or "",
                 "feitos": feitos,
                 "faltando": faltando,
+                "incertos": incertos,
                 "paradas_pontos": cob.get("paradas_pontos") or [],
                 "gps": gps,
                 "gps_estimado": gps_estimado,
+                "gps_original": casado.get("original") or [],
+                "gps_deslocamento": casado.get("deslocamento") or [],
                 "casamento": casado.get("resumo") or {},
             }
         )
@@ -966,6 +972,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
                 "poligonos": setor.get("poligonos") or [],
                 "feitos": feitos_rota,
                 "faltando": faltando_rota,
+                "incertos": incertos_rota,
             }
         ],
         "caminhoes": presentes,

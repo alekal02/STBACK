@@ -1,7 +1,7 @@
-"""Map matching: esquina, vias paralelas, retorno, salto e silêncio.
+"""Map matching: esquina, vias paralelas, retorno, salto, silêncio e cobertura.
 
 Roda com: py -m sagtrack.testes_casamento
-A conta da rota não usa este traçado. Rua feita segue o pulso a 45 m.
+A rua feita é o eixo que o trajeto confirmado percorre. Passar perto não conta.
 """
 
 from __future__ import annotations
@@ -113,6 +113,115 @@ def teste_sentido() -> None:
     assert malha.custo_volta[0] > malha.custo_ida[0]
 
 
+def teste_sem_corda_fora_da_via() -> None:
+    via = [[-16.8200, -49.2500], [-16.8200, -49.2470]]
+    casado = casar_tracos(
+        [
+            _pulso(-16.8200, -49.2530, "15:00:00"),
+            _pulso(-16.8200, -49.2524, "15:00:20"),
+        ],
+        vias=[via],
+    )
+    assert _linhas(casado) == []
+    assert casado["resumo"]["indeterminado"] >= 1
+
+
+def teste_nao_encurta_o_quarteirao() -> None:
+    from sagtrack.cobertura import TO_UTM, TO_WGS
+
+    lat0, lon0 = -16.82, -49.25
+
+    def mover(leste: float, norte: float) -> tuple[float, float]:
+        x, y = TO_UTM.transform(lon0, lat0)
+        lon, lat = TO_WGS.transform(x + leste, y + norte)
+        return lat, lon
+
+    cantos = [mover(0, 0), mover(0, 160), mover(220, 160), mover(220, 0)]
+    vias = [[list(cantos[i]), list(cantos[(i + 1) % 4])] for i in range(4)]
+    pontos = []
+    passo = 0
+    for origem, destino in ((cantos[0], cantos[1]), (cantos[1], cantos[2]), (cantos[2], cantos[3])):
+        for parte in range(5):
+            lat = origem[0] + (destino[0] - origem[0]) * parte / 4
+            lon = origem[1] + (destino[1] - origem[1]) * parte / 4
+            minuto = 15 * 60 + passo * 12
+            pontos.append(_pulso(lat, lon, f"15:{minuto // 60:02d}:{minuto % 60:02d}"))
+            passo += 1
+    casado = casar_tracos(pontos, vias=vias)
+    canto = cantos[1]
+    assert _distancia_ao_traco(canto, _linhas(casado)) < 20, _distancia_ao_traco(canto, _linhas(casado))
+    atalho = mover(110, 0)
+    assert _distancia_ao_traco(atalho, _linhas(casado)) > 40
+
+
+def teste_cobertura_ignora_paralela() -> None:
+    from shapely.geometry import LineString
+
+    from sagtrack.cobertura import TO_UTM, avaliar_cobertura, faixa_de_tracos, pecas_da_rua
+
+    sul = [[-16.82000, -49.2500], [-16.82000, -49.2470]]
+    norte = [[-16.82070, -49.2500], [-16.82070, -49.2470]]
+    pontos = [
+        _pulso(-16.82000, -49.2496, "15:00:00"),
+        _pulso(-16.82000, -49.2490, "15:00:25"),
+        _pulso(-16.82000, -49.2484, "15:00:50"),
+        _pulso(-16.82000, -49.2478, "15:01:15"),
+    ]
+    casado = casar_tracos(pontos, vias=[sul, norte])
+    faixa_c = faixa_de_tracos(casado["confirmado"])
+    faixa_e = faixa_de_tracos(casado["estimado"])
+
+    def utm(linha: list) -> LineString:
+        return LineString([TO_UTM.transform(float(p[1]), float(p[0])) for p in linha])
+
+    pecas = pecas_da_rua([utm(sul), utm(norte)])
+    cob = avaliar_cobertura([], pontos, pecas=pecas, faixa_confirmada=faixa_c, faixa_estimada=faixa_e)
+    assert cob["metodo"] == "malha"
+    assert 30 <= cob["percentual"] <= 70, cob["percentual"]
+    norte_lat = -16.82070
+    for trecho in cob["trechos_feitos"]:
+        for lat, _lon in trecho:
+            assert abs(lat - norte_lat) > abs(lat - (-16.82000))
+
+
+def teste_cobertura_nao_dobra() -> None:
+    from shapely.geometry import LineString
+
+    from sagtrack.cobertura import TO_UTM, avaliar_cobertura, faixa_de_tracos, pecas_da_rua
+
+    via = [[-16.8200, -49.2500], [-16.8200, -49.2470]]
+    ida = [
+        _pulso(-16.8200, -49.2496, "15:00:00"),
+        _pulso(-16.8200, -49.2486, "15:00:30"),
+        _pulso(-16.8200, -49.2476, "15:01:00"),
+    ]
+    volta = [
+        _pulso(-16.8200, -49.2486, "15:01:30"),
+        _pulso(-16.8200, -49.2496, "15:02:00"),
+    ]
+    casado = casar_tracos(ida + volta, vias=[via])
+    linha = LineString([TO_UTM.transform(p[1], p[0]) for p in via])
+    cob = avaliar_cobertura(
+        [],
+        ida + volta,
+        pecas=pecas_da_rua([linha]),
+        faixa_confirmada=faixa_de_tracos(casado["confirmado"]),
+        faixa_estimada=faixa_de_tracos(casado["estimado"]),
+    )
+    assert cob["percentual"] <= 100
+    assert cob["km_coleta"] < linha.length / 1000 * 1.25
+
+
+def teste_emenda_de_cache() -> None:
+    from sagtrack.gps import _emendar_listas
+
+    unidos = _emendar_listas([[[-16.82, -49.25], [-16.82, -49.249]]], [[[-16.82, -49.249], [-16.82, -49.248]]])
+    assert len(unidos) == 1
+    assert unidos[0][-1][1] == -49.248
+    separados = _emendar_listas([[[-16.82, -49.25], [-16.82, -49.249]]], [[[-16.81, -49.24], [-16.81, -49.239]]])
+    assert len(separados) == 2
+
+
 def teste_malha_oficial_conecta() -> None:
     from sagtrack.mapa import TO_WGS
 
@@ -149,6 +258,11 @@ def main() -> None:
     teste_silencio()
     teste_pulso_curto_confirmado()
     teste_sentido()
+    teste_sem_corda_fora_da_via()
+    teste_nao_encurta_o_quarteirao()
+    teste_cobertura_ignora_paralela()
+    teste_cobertura_nao_dobra()
+    teste_emenda_de_cache()
     teste_malha_oficial_conecta()
     print("casamento ok")
 

@@ -67,16 +67,19 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
                 "confianca": item.get("confianca") or "",
                 "trechos_feitos": item.get("trechos_feitos") or [],
                 "trechos_faltando": item.get("trechos_faltando") or [],
+                "trechos_incertos": item.get("trechos_incertos") or [],
                 "poligonos": item.get("poligonos") or [],
             }
         ]
     feitos: list = []
     faltando: list = []
+    incertos: list = []
     poligonos: list = []
     setores = []
     for cob in visiveis:
         feitos.extend(_thin(t, 160) for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2)
         faltando.extend(_thin(t, 160) for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2)
+        incertos.extend(_thin(t, 160) for t in (cob.get("trechos_incertos") or []) if t and len(t) >= 2)
         for anel in (cob.get("poligonos") or [])[:1]:
             if anel and len(anel) >= 4:
                 poligonos.append(_thin(anel, 120))
@@ -120,9 +123,11 @@ def folha_caminhao(item: dict[str, Any]) -> dict[str, Any]:
         "setores": setores,
         "feitos": feitos,
         "faltando": faltando,
+        "incertos": incertos,
         "gps": item.get("_tracos") if "_tracos" in item else tracos_na_ordem(pontos),
         "gps_estimado": item.get("_tracos_estimados") or [],
         "gps_original": item.get("_tracos_originais") or [],
+        "gps_deslocamento": item.get("_tracos_deslocamento") or [],
         "casamento": item.get("_casamento") or {},
         "poligonos": poligonos[:3],
     }
@@ -169,7 +174,9 @@ _CAMPOS_CONTA = (
     "qtd_pacmans",
     "trechos_feitos",
     "trechos_faltando",
+    "trechos_incertos",
     "trechos_planejados",
+    "cobertura_malha",
     "trechos_gps",
     "poligonos",
     "vias",
@@ -200,9 +207,32 @@ def _contas_salvas(pasta: Path) -> dict[str, dict[str, Any]]:
     }
 
 
+def _guardar_casamento(item: dict[str, Any], dia: date, pasta: Path) -> None:
+    from .cobertura import faixa_de_tracos
+
+    casado = casar_tracos(
+        item.get("pontos") or [],
+        dia=dia,
+        placa=str(item.get("placa") or ""),
+        pasta_cache=pasta / "casamento",
+    )
+    item["_tracos"] = casado.get("confirmado") or []
+    item["_tracos_estimados"] = casado.get("estimado") or []
+    item["_tracos_deslocamento"] = casado.get("deslocamento") or []
+    item["_tracos_originais"] = casado.get("original") or []
+    item["_casamento"] = casado.get("resumo") or {}
+    if casado.get("disponivel"):
+        item["_faixa_confirmada"] = faixa_de_tracos(item["_tracos"])
+        item["_faixa_estimada"] = faixa_de_tracos(item["_tracos_estimados"])
+
+
 def _reaproveitar_conta(item: dict[str, Any], anterior: dict[str, Any] | None) -> bool:
     """Mantém a rua já cruzada quando o caminhão não teve pulso novo."""
     if not anterior or not anterior.get("coberturas_inlog"):
+        return False
+    from .mapa import caminho_gpkg
+
+    if caminho_gpkg() and not anterior.get("cobertura_malha"):
         return False
     for campo in _CAMPOS_CONTA:
         if campo in anterior:
@@ -264,9 +294,12 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         and rotas
         and all(str(item.get("origem_pulso") or "") == "salvo" for item in rotas)
     ):
-        (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
-        progress("Nenhum pulso novo. A conclusão já salva continua valendo.")
-        return json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+        guardado = json.loads((pasta / "resumo.json").read_text(encoding="utf-8"))
+        casas = [((c or {}).get("casamento") or {}) for c in (guardado.get("caminhoes") or [])]
+        if casas and all("confianca" in casa for casa in casas):
+            (pasta / "verificado.txt").write_text(congelado.isoformat(timespec="seconds"), encoding="utf-8")
+            progress("Nenhum pulso novo. A conclusão já salva continua valendo.")
+            return guardado
     for item in rotas:
         item["km_dia"] = _km(item.get("pontos") or [])
 
@@ -278,6 +311,9 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
             continue
         refazer.append(item)
 
+    progress("Montando a rede viária e casando os pulsos na ordem da hora.")
+    for item in rotas:
+        _guardar_casamento(item, dia, pasta)
     progress("Lendo o mapa oficial de Aparecida...")
     setores = carregar_setores(dia)
     if refazer:
@@ -290,14 +326,6 @@ def executar(settings: Settings, on_progress: Progresso | None = None) -> dict[s
         medir_presenca(refazer, setores, dia)
     _aplicar_apoio(rotas)
 
-    progress("Casando os pulsos com a malha oficial, na ordem da hora.")
-    for item in rotas:
-        progress(f"Trajeto na via · {item.get('placa') or ''}")
-        casado = casar_tracos(item.get("pontos") or [], dia=dia)
-        item["_tracos"] = casado["confirmado"]
-        item["_tracos_estimados"] = casado["estimado"]
-        item["_tracos_originais"] = casado["original"]
-        item["_casamento"] = casado["resumo"]
     folhas = [folha_caminhao(item) for item in rotas]
     resumo = montar_resumo(dia, folhas, settings)
     resumo["congelado_em"] = congelado.isoformat(timespec="seconds")
@@ -450,6 +478,8 @@ def _gravar_trajeto_ao_vivo(
         f"Caminhão na rota {setor.get('codigo') or ''}. Atualizando trajeto até {agora.strftime('%H:%M')}.",
         flush=True,
     )
+    for base in atualizados:
+        _guardar_casamento(base, dia, pasta)
     aplicar_setores_oficiais(atualizados, setores, dia)
     medir_presenca(atualizados, setores, dia)
     for base in atualizados:

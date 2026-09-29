@@ -89,6 +89,7 @@ def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
                 continue
             feitos = [t for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2]
             faltando = [t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2]
+            faltando = faltando + [t for t in (cob.get("trechos_incertos") or []) if t and len(t) >= 2]
             if not feitos and not faltando:
                 continue
             rank = 1 if str(cob.get("papel") or "") in {"ATUANDO", "APOIO"} else 0
@@ -159,7 +160,7 @@ def _vias_no_poligono(dia: date, codigo: str, tracos: list[list[list[float]]]) -
     zona = None
     if linhas:
         try:
-            zona = unary_union(linhas).simplify(12).buffer(45)
+            zona = unary_union(linhas).simplify(12).buffer(14)
         except Exception:
             zona = None
     feitos: list = []
@@ -700,9 +701,9 @@ def _folhas_da_rota(
         titulo_aberto = f"{titulo} · em aberto · falta {_fmt_pct(falta)}"
         falta_txt = f" Falta {_fmt_pct(falta)}."
     if faltando:
-        legenda_aberta = "Em aberto." + falta_txt + " A linha vermelha é a rua oficial sem pulso a 45 m."
+        legenda_aberta = "Em aberto." + falta_txt + " A linha vermelha é a rua oficial que o trajeto casado não percorreu."
     else:
-        legenda_aberta = "Em aberto." + falta_txt + " Nenhuma rua oficial ficou sem pulso a 45 m."
+        legenda_aberta = "Em aberto." + falta_txt + " O trajeto casado cobriu as ruas oficiais desta rota."
     if camadas:
         realizado = renderizar_mapa([base], [], pontos, aneis, vias="nenhuma", camadas=camadas)
         legenda_feita = _legenda_tracos(camadas, "")

@@ -358,6 +358,39 @@ def _meios_com_pulso(
     return coberto
 
 
+def faixa_de_tracos(tracos: list, buffer_m: float = 12.0):
+    """Faixa de 12 m ao redor do trajeto casado. Rua paralela fica de fora."""
+    from shapely.geometry import Polygon
+
+    linhas = []
+    for trecho in tracos or []:
+        xy = []
+        for par in trecho:
+            if not isinstance(par, (list, tuple)) or len(par) < 2:
+                continue
+            ponto = _xy((float(par[0]), float(par[1])))
+            if ponto:
+                xy.append(ponto)
+        if len(xy) >= 2:
+            linhas.append(LineString(xy))
+    if not linhas:
+        return Polygon()
+    faixa = unary_union(linhas).buffer(buffer_m)
+    if not faixa.is_valid:
+        faixa = faixa.buffer(0)
+    return faixa
+
+
+def _corte_faixa(trecho: LineString, faixa) -> LineString:
+    if faixa is None or faixa.is_empty or not trecho.intersects(faixa):
+        return LineString()
+    try:
+        inter = trecho.intersection(faixa)
+    except Exception:
+        return LineString()
+    return inter
+
+
 def avaliar_cobertura(
     planejada: list[Any],
     gps: list[dict[str, Any]],
@@ -365,6 +398,8 @@ def avaliar_cobertura(
     km_oficial: float | None = None,
     ruas: list[LineString] | None = None,
     pecas: list[tuple[LineString, float, float, float]] | None = None,
+    faixa_confirmada=None,
+    faixa_estimada=None,
 ) -> dict[str, Any]:
     pontos = list(gps or [])
     pares = []
@@ -418,9 +453,29 @@ def avaliar_cobertura(
 
     feitos: list[LineString] = []
     faltando: list[LineString] = []
+    incertos: list[LineString] = []
     km_plano = 0.0
     km_feito = 0.0
-    if pecas:
+    if pecas and (faixa_confirmada is not None or faixa_estimada is not None):
+        for trecho, _mx, _my, km in pecas:
+            km_plano += km
+            coberta = _corte_faixa(trecho, faixa_confirmada)
+            sobra = trecho.difference(faixa_confirmada) if coberta.length else trecho
+            incerta = _corte_faixa(sobra, faixa_estimada) if sobra is not None and not sobra.is_empty else LineString()
+            if incerta.length:
+                try:
+                    falta = sobra.difference(faixa_estimada)
+                except Exception:
+                    falta = sobra
+            else:
+                falta = sobra
+            km_feito += coberta.length / 1000.0
+            feitos.extend(geom for geom in _iter_linhas(coberta) if geom.length >= 1)
+            incertos.extend(geom for geom in _iter_linhas(incerta) if geom.length >= 1)
+            faltando.extend(geom for geom in _iter_linhas(falta) if geom.length >= 1)
+        pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
+        metodo = "malha"
+    elif pecas:
         for fica, (trecho, _mx, _my, km) in zip(marcas, pecas):
             km_plano += km
             if fica:
@@ -450,13 +505,14 @@ def avaliar_cobertura(
         "veredicto": veredicto,
         "confianca": conf,
         "metodo": metodo,
-        "km_coleta": round(km_feito if metodo == "ruas" else km_rastreio, 3),
+        "km_coleta": round(km_feito if metodo in {"ruas", "malha"} else km_rastreio, 3),
         "km_gps": round(km_rastreio, 3),
         "km_total": round(km_plano or (km_oficial or 0.0), 3),
         "km_faltando": round(max(0.0, (km_plano or 0) - km_feito), 3),
         "pontos_no_setor": n_pts,
         "trechos_feitos": _fundir(feitos),
         "trechos_faltando": _fundir(faltando),
+        "trechos_incertos": _fundir(incertos),
         "trechos_planejados": _fundir(planejadas),
         "trechos_gps": [_wgs(list(linha.coords)) for linha in gps_linhas],
         "pontos_clip": pontos,

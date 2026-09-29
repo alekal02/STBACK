@@ -228,7 +228,7 @@ def _anexar_vias(setores: list[dict[str, Any]]) -> None:
             setor["ruas"] = []
             setor["vias"] = []
             continue
-        zona = geom.buffer(20)
+        zona = geom.buffer(45)
         recorte = []
         try:
             indices = list(arvore.query(zona, predicate="intersects"))
@@ -431,7 +431,7 @@ def aplicar_setores_oficiais(
         melhor_cob: dict[str, Any] | None = None
         melhor_pct = -1.0
         for setor in setores:
-            clip = recortar_pontos(pontos, setor["geom"], 90)
+            clip = recortar_pontos(pontos, setor["geom"], 120)
             if len(clip) < 8:
                 continue
             cob = avaliar_cobertura(
@@ -452,7 +452,7 @@ def aplicar_setores_oficiais(
                 "turno": setor.get("turno") or "",
                 "dias": setor.get("dias") or [],
                 "km_coleta": cob.get("km_coleta"),
-                "km_total": setor.get("km_oficial") or cob.get("km_total"),
+                "km_total": cob.get("km_total"),
                 "km_faltando": cob.get("km_faltando"),
                 "qtd_pacmans": setor.get("moradias"),
                 "percentual": cob.get("percentual") or 0,

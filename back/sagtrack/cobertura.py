@@ -312,45 +312,50 @@ def avaliar_cobertura(
     km_oficial: float | None = None,
     ruas: list[LineString] | None = None,
 ) -> dict[str, Any]:
-    pontos = recortar_pontos(gps, geom_setor, 90) if geom_setor is not None else list(gps or [])
-    n_pts = len(pontos)
-    km_rastreio = km_gps(pontos, salto_m=SALTO_GPS_M + 40)
+    pontos = list(gps or [])
+    pulsos_xy = [par for par in (_xy(p) for p in pontos) if par]
+    perto: list[tuple[float, float]] = []
     planejadas = list(ruas or [])
     if not planejadas:
         candidatas = _linhas_planejadas(planejada)
         if candidatas and not _parece_contorno(candidatas):
             planejadas = candidatas
-    gps_linhas = _linhas_gps(pontos)
-    gps_xy = [_xy(p) for p in pontos]
-    gps_xy = [p for p in gps_xy if p]
+    zona_pulso = None
+    if pulsos_xy and planejadas:
+        malha = unary_union(planejadas)
+        if not malha.is_empty:
+            perto = [par for par in pulsos_xy if malha.distance(Point(par)) <= RAIO_M]
+            if perto:
+                zona_pulso = MultiPoint(perto).buffer(RAIO_M)
+    elif pulsos_xy and geom_setor is not None:
+        pontos = recortar_pontos(pontos, geom_setor, 90)
+        pulsos_xy = [par for par in (_xy(p) for p in pontos) if par]
+    n_pts = len(perto) if planejadas else len(pulsos_xy)
+    if planejadas:
+        marcas = set(perto)
+        pontos_perto = [p for p in pontos if _xy(p) in marcas]
+    else:
+        pontos_perto = pontos
+    km_rastreio = km_gps(pontos_perto, salto_m=SALTO_GPS_M + 40)
+    gps_linhas = _linhas_gps(pontos_perto)
+    gps_xy = perto if planejadas else pulsos_xy
 
     feitos: list[LineString] = []
     faltando: list[LineString] = []
     km_plano = 0.0
     km_feito = 0.0
     if planejadas:
-        gps_geom = None
-        if gps_linhas:
-            gps_geom = unary_union(gps_linhas)
-        elif gps_xy:
-            gps_geom = unary_union([Point(p) for p in gps_xy])
         for linha in planejadas:
             for trecho in _cortar(linha, PASSO_M):
                 km_plano += trecho.length / 1000.0
-                coberto = (
-                    gps_geom is not None
-                    and not gps_geom.is_empty
-                    and gps_geom.distance(trecho) <= RAIO_M
-                )
+                meio = trecho.interpolate(0.5, normalized=True)
+                coberto = zona_pulso is not None and not zona_pulso.is_empty and zona_pulso.covers(meio)
                 if coberto:
                     feitos.append(trecho)
                     km_feito += trecho.length / 1000.0
                 else:
                     faltando.append(trecho)
         pct = round(min(100.0, 100.0 * km_feito / km_plano), 1) if km_plano else 0.0
-        if km_oficial and km_oficial > 0:
-            pct = round(min(100.0, 100.0 * km_feito / km_oficial), 1)
-            km_plano = float(km_oficial)
         metodo = "ruas"
     else:
         base = km_oficial or 0.0

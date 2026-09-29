@@ -81,7 +81,7 @@ def _cor_situacao(situacao: str) -> tuple[int, int, int]:
 
 
 def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
-    """Usa a cobertura que mais marcou via feita. O restante fica só nessa mesma cobertura."""
+    """A mesma cobertura que gerou o percentual: ruas com pulso e ruas sem pulso."""
     melhor: tuple[int, float, list, list] | None = None
     for item in frota:
         for cob in item.get("coberturas_inlog") or []:
@@ -91,12 +91,20 @@ def _ruas(frota: list[dict[str, Any]], codigo: str) -> tuple[list, list]:
             faltando = [t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2]
             if not feitos and not faltando:
                 continue
-            nota = (len(feitos), float(cob.get("percentual") or 0), feitos, faltando)
+            rank = 1 if str(cob.get("papel") or "") in {"ATUANDO", "APOIO"} else 0
+            nota = (rank, float(cob.get("percentual") or 0), feitos, faltando)
             if melhor is None or nota[0] > melhor[0] or (nota[0] == melhor[0] and nota[1] > melhor[1]):
                 melhor = nota
     if melhor is None:
         return [], []
     return melhor[2], melhor[3]
+
+
+def _partes_da_conta(pct: float) -> tuple[float, float]:
+    """O feito e o que falta somam 100. Os dois nascem do mesmo percentual."""
+    feito = round(float(pct or 0), 1)
+    falta = round(max(0.0, 100.0 - feito), 1)
+    return feito, falta
 
 
 _MALHA: dict[str, list[dict[str, Any]]] = {}
@@ -674,14 +682,26 @@ def _folhas_da_rota(
     dia: date,
     frota: list[dict[str, Any]],
     pontos_por_placa: dict[str, list] | None = None,
+    pct: float | None = None,
 ) -> list[tuple[str, bytes, str]]:
     feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
     base = {"aneis": aneis, "rotulo": codigo, "feitos": feitos, "faltando": faltando}
     camadas = _camadas_da_rota(dia, codigo, aneis, frota, pontos_por_placa or {})
-    if faltando:
-        legenda_aberta = "Em aberto. A linha vermelha é a via oficial que ficou sem coleta."
+    if pct is None:
+        titulo_feito = f"{titulo} · realizado"
+        titulo_aberto = f"{titulo} · em aberto"
+        falta_txt = ""
     else:
-        legenda_aberta = "Em aberto. Nenhuma via oficial ficou sem coleta nesta rota."
+        feito, falta = _partes_da_conta(pct)
+        from .relatorios import _fmt_pct
+
+        titulo_feito = f"{titulo} · feito {_fmt_pct(feito)}"
+        titulo_aberto = f"{titulo} · em aberto · falta {_fmt_pct(falta)}"
+        falta_txt = f" Falta {_fmt_pct(falta)}."
+    if faltando:
+        legenda_aberta = "Em aberto." + falta_txt + " A linha vermelha é a rua oficial sem pulso a 45 m."
+    else:
+        legenda_aberta = "Em aberto." + falta_txt + " Nenhuma rua oficial ficou sem pulso a 45 m."
     if camadas:
         realizado = renderizar_mapa([base], [], pontos, aneis, vias="nenhuma", camadas=camadas)
         legenda_feita = _legenda_tracos(camadas, "")
@@ -689,9 +709,9 @@ def _folhas_da_rota(
         realizado = renderizar_mapa([base], tracos, pontos, aneis, vias="nenhuma")
         legenda_feita = "Realizado. A linha é o trajeto do caminhão, na ordem dos pulsos. Ponto: parada."
     return [
-        (f"{titulo} · realizado", realizado, legenda_feita),
+        (titulo_feito, realizado, legenda_feita),
         (
-            f"{titulo} · em aberto",
+            titulo_aberto,
             renderizar_mapa([base], [], [], aneis, vias="abertas"),
             legenda_aberta,
         ),
@@ -1149,7 +1169,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
     if len(tabela) == 1:
         tabela.append(["—", "Passagem", "0", "0", "0%"])
     aneis = _aneis(setor)
-    titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao} · {_fmt_pct(rel.get('percentual'))}"
+    titulo = f"{codigo} {setor.get('nome') or ''} · {conclusao}".strip()
     nome = f"rota-{codigo}-{dia.isoformat()}.pdf"
     pasta = output_dir / dia.isoformat()
     from .relatorios import _aplicar_apoio
@@ -1167,6 +1187,7 @@ def pdf_rota(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             dia,
             frota_mapa,
             _ler(pasta, "pontos.json") or {},
+            pct=float(rel.get("percentual") or 0),
         )
     ]
     return _pdf_leitura(f"Segtrack · rota · {titulo}", list(rel.get("texto") or []), tabela, mapas, cor), nome
@@ -1203,7 +1224,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             ]
         )
         codigo = str(linha.get("codigo") or "")
-        nome_setor = f"{codigo} {conclusao} · {_fmt_pct(pct)}"
+        nome_setor = f"{codigo} {conclusao}"
         for folha_titulo, png, legenda in _folhas_da_rota(
             nome_setor,
             codigo,
@@ -1213,6 +1234,7 @@ def pdf_placa(output_dir: Path, dia: date, consulta: str) -> tuple[bytes, str]:
             dia,
             frota,
             _ler(output_dir / dia.isoformat(), "pontos.json") or {},
+            pct=pct,
         ):
             mapas.append((folha_titulo, png, legenda, cor))
     if len(tabela) == 1:

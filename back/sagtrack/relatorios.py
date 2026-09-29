@@ -148,7 +148,21 @@ def _no_patio(lat: float, lon: float) -> bool:
     return any(zona.covers(ponto) for zona in _patios())
 
 
+def _malha_do_setor(setor: dict[str, Any]):
+    from shapely.ops import unary_union
+
+    guardada = setor.get("_ruas_uniao")
+    if guardada is not None:
+        return guardada
+    ruas = [rua for rua in (setor.get("ruas") or []) if not getattr(rua, "is_empty", True)]
+    uniao = unary_union(ruas) if ruas else None
+    setor["_ruas_uniao"] = uniao
+    return uniao
+
+
 def _setor_da_parada(lat: float, lon: float, setores: list[dict[str, Any]]) -> dict[str, Any] | None:
+    from .cobertura import RAIO_M
+
     x, y = TO_UTM.transform(lon, lat)
     ponto = Point(x, y)
     donos = []
@@ -158,9 +172,19 @@ def _setor_da_parada(lat: float, lon: float, setores: list[dict[str, Any]]) -> d
             continue
         if geom.covers(ponto):
             donos.append(setor)
-    if not donos:
-        return None
-    return min(donos, key=lambda setor: setor["geom"].area)
+    if donos:
+        return min(donos, key=lambda setor: setor["geom"].area)
+    melhor = None
+    melhor_m = RAIO_M + 1
+    for setor in setores:
+        malha = _malha_do_setor(setor)
+        if malha is None or malha.is_empty:
+            continue
+        distancia = malha.distance(ponto)
+        if distancia <= RAIO_M and distancia < melhor_m:
+            melhor = setor
+            melhor_m = distancia
+    return melhor
 
 
 def _saida(pontos: list[dict[str, Any]], dia: date) -> dict[str, Any] | None:
@@ -207,8 +231,7 @@ def medir_presenca(rotas: list[dict[str, Any]], setores: list[dict[str, Any]], d
             cob["permanencias"] = len(permanencia)
             cob["minutos_permanencia"] = round(sum(p["segundos"] for p in permanencia) / 60.0, 1)
             cob["paradas_pontos"] = coleta[:80]
-            geom = (por_codigo.get(codigo) or {}).get("geom")
-            pulsos, minutos = _pulsos_dentro(pontos, geom, dia)
+            pulsos, minutos = _pulsos_dentro(pontos, oficial.get("geom"), dia, oficial.get("ruas") or [])
             cob["pulsos"] = pulsos
             cob["minutos_dentro"] = minutos
         _definir_papeis(item)
@@ -232,11 +255,23 @@ def _e_coleta(cob: dict[str, Any]) -> bool:
     return int(cob.get("paradas") or 0) >= 3
 
 
-def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date) -> tuple[int, float]:
-    """Pulsos com o caminhão dentro do polígono, e o tempo entre o primeiro e o último."""
-    if geom is None or geom.is_empty or not pontos:
+def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date, ruas: list | None = None) -> tuple[int, float]:
+    """Pulsos a até 45 m da rua oficial, ou dentro do polígono quando a rua não está no mapa."""
+    from .cobertura import RAIO_M
+
+    if not pontos:
         return 0, 0.0
-    minx, miny, maxx, maxy = geom.bounds
+    malha = None
+    if ruas:
+        from shapely.ops import unary_union
+
+        linhas = [rua for rua in ruas if rua is not None and not getattr(rua, "is_empty", True)]
+        if linhas:
+            malha = unary_union(linhas)
+    if (malha is None or malha.is_empty) and (geom is None or geom.is_empty):
+        return 0, 0.0
+    zona = malha.buffer(RAIO_M) if malha is not None and not malha.is_empty else geom
+    minx, miny, maxx, maxy = zona.bounds
     marcas: list[datetime] = []
     total = 0
     for ponto in pontos:
@@ -248,7 +283,7 @@ def _pulsos_dentro(pontos: list[dict[str, Any]], geom, dia: date) -> tuple[int, 
         x, y = TO_UTM.transform(lon, lat)
         if x < minx or x > maxx or y < miny or y > maxy:
             continue
-        if not geom.covers(Point(x, y)):
+        if not zona.covers(Point(x, y)):
             continue
         total += 1
         marca = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
@@ -593,7 +628,7 @@ def _texto_decisao(dia: date, balanco: list[dict[str, Any]]) -> list[str]:
             f"{_conta(len(parciais), 'parcial', 'parciais')}, "
             f"{_conta(len(nao), 'não feita', 'não feitas')}."
         ),
-        "Feita é cobertura de pelo menos 90% das ruas oficiais, com parada de coleta dentro do polígono e no turno da rota.",
+        "Feita é pelo menos 90% das ruas oficiais com pulso a até 45 m. Sem pulso, a rua fica em aberto.",
     ]
     for faixa in ("Diurno", "Noturno", "Noturno diário", "Sem turno"):
         grupo = [r for r in balanco if _faixa_agenda(r) == faixa]
@@ -655,20 +690,14 @@ def relatorio_frota(output_dir: Path, dia: date) -> dict[str, Any]:
     texto = _texto_decisao(dia, balanco)
     texto.append(
         f"{len(caminhoes)} caminhão(ões) com pulso na cidade. "
-        "Apoio é outro caminhão que entrou na rota e deixou pulsos suficientes. Só passar pelo polígono não conta."
+        "Apoio é outro caminhão que entrou na rota e deixou pulsos suficientes. Sem pulso a 45 m da rua, a passagem não conta."
     )
-    codigos_coleta = {
-        str(linha.get("codigo") or "")
-        for caminhao in caminhoes
-        for linha in (caminhao.get("tocados") or [])
-        if linha.get("papel") in {"ATUANDO", "APOIO"}
-    }
     return {
         "tipo": "frota",
         "data": dia.isoformat(),
         "titulo": "Frota do dia",
         "texto": texto,
-        "setores": [setor for setor in setores if str(setor.get("codigo") or "") in codigos_coleta],
+        "setores": setores,
         "caminhoes": caminhoes,
         "balanco": [
             {k: v for k, v in row.items() if k not in {"pontos", "poligonos", "placas"}}

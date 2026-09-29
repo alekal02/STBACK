@@ -521,15 +521,150 @@ def _preparar_vias(
     return _vias_no_poligono(dia, codigo, tracos)
 
 
-def _trajeto_no_eixo(
-    feitos: list[list[list[float]]],
+def _poligono_utm(aneis: list[list[list[float]]]):
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from .cobertura import TO_UTM
+
+    zonas = []
+    for anel in aneis or []:
+        xy = []
+        for ponto in anel:
+            if len(ponto) < 2:
+                continue
+            x, y = TO_UTM.transform(float(ponto[1]), float(ponto[0]))
+            xy.append((x, y))
+        if len(xy) >= 4:
+            try:
+                zonas.append(Polygon(xy))
+            except Exception:
+                continue
+    if not zonas:
+        return None
+    try:
+        return unary_union(zonas).buffer(90)
+    except Exception:
+        return zonas[0].buffer(90)
+
+
+def _recortar_gps_na_rota(
     tracos: list[list[list[float]]],
+    aneis: list[list[list[float]]],
 ) -> list[list[list[float]]]:
-    """Prefere a via oficial coberta (já no meio da rua). GPS só entra se não houver eixo."""
-    limpos = [linha for linha in (feitos or []) if isinstance(linha, list) and len(linha) >= 2]
-    if limpos:
-        return limpos
-    return [traco for traco in (tracos or []) if isinstance(traco, list) and len(traco) >= 2]
+    """Mantém só o trecho do GPS que entrou no polígono da rota (+90 m de borda)."""
+    from shapely.geometry import Point
+
+    from .cobertura import TO_UTM
+
+    zona = _poligono_utm(aneis)
+    if zona is None:
+        return [t for t in (tracos or []) if isinstance(t, list) and len(t) >= 2]
+    saida: list[list[list[float]]] = []
+    for traco in tracos or []:
+        atual: list[list[float]] = []
+        for ponto in traco:
+            if len(ponto) < 2:
+                continue
+            try:
+                lat, lon = float(ponto[0]), float(ponto[1])
+                x, y = TO_UTM.transform(lon, lat)
+            except (TypeError, ValueError):
+                continue
+            if zona.covers(Point(x, y)) or zona.distance(Point(x, y)) <= 1.0:
+                atual.append([lat, lon])
+            else:
+                if len(atual) >= 2:
+                    saida.append(atual)
+                atual = []
+        if len(atual) >= 2:
+            saida.append(atual)
+    return saida
+
+
+def _grudar_gps_na_via(
+    tracos: list[list[list[float]]],
+    vias: list[list[list[float]]],
+    raio_m: float = 40.0,
+) -> list[list[list[float]]]:
+    """Cola cada pulso na via oficial mais próxima (só visual). A ordem do GPS permanece."""
+    from shapely.geometry import LineString, Point
+    from shapely.strtree import STRtree
+
+    from .cobertura import TO_UTM, TO_WGS
+
+    geoms: list[LineString] = []
+    for via in vias or []:
+        xy = []
+        for ponto in via:
+            if len(ponto) < 2:
+                continue
+            x, y = TO_UTM.transform(float(ponto[1]), float(ponto[0]))
+            xy.append((x, y))
+        if len(xy) >= 2:
+            try:
+                geoms.append(LineString(xy))
+            except Exception:
+                continue
+    if not geoms:
+        return tracos
+    arvore = STRtree(geoms)
+    saida: list[list[list[float]]] = []
+    for traco in tracos or []:
+        atual: list[list[float]] = []
+        ultimo: tuple[float, float] | None = None
+        for ponto in traco:
+            if len(ponto) < 2:
+                continue
+            try:
+                lat, lon = float(ponto[0]), float(ponto[1])
+                x, y = TO_UTM.transform(lon, lat)
+            except (TypeError, ValueError):
+                continue
+            pt = Point(x, y)
+            indices = list(arvore.query(pt.buffer(raio_m)))
+            melhor = None
+            melhor_d = raio_m + 1
+            for idx in indices:
+                g = geoms[int(idx)]
+                d = g.distance(pt)
+                if d < melhor_d:
+                    melhor_d = d
+                    melhor = g
+            if melhor is None or melhor_d > raio_m:
+                if len(atual) >= 2:
+                    saida.append(atual)
+                atual = []
+                ultimo = None
+                continue
+            proj = melhor.interpolate(melhor.project(pt))
+            lon2, lat2 = TO_WGS.transform(proj.x, proj.y)
+            if ultimo is not None and abs(lat2 - ultimo[0]) < 1e-6 and abs(lon2 - ultimo[1]) < 1e-6:
+                continue
+            atual.append([float(lat2), float(lon2)])
+            ultimo = (float(lat2), float(lon2))
+        if len(atual) >= 2:
+            saida.append(atual)
+    return saida or tracos
+
+
+def _trajeto_do_caminhao(
+    aneis: list[list[list[float]]],
+    tracos: list[list[list[float]]],
+    vias_eixo: list[list[list[float]]] | None = None,
+) -> list[list[list[float]]]:
+    """Trajetória real do GPS na rota (ordem do tempo). Opcionalmente cola no eixo da rua."""
+    gps = [t for t in (tracos or []) if isinstance(t, list) and len(t) >= 2]
+    if not gps:
+        return []
+    dentro = _recortar_gps_na_rota(gps, aneis) if aneis else gps
+    if not dentro:
+        return gps
+    if vias_eixo:
+        colado = _grudar_gps_na_via(dentro, vias_eixo)
+        if colado:
+            return colado
+    return dentro
 
 
 def _mapa_da_rota(
@@ -542,13 +677,15 @@ def _mapa_da_rota(
     frota: list[dict[str, Any]],
 ) -> tuple[str, bytes, str]:
     del pontos
-    feitos, _faltando = _preparar_vias(dia, codigo, tracos, frota)
-    trajeto = _trajeto_no_eixo(feitos, tracos)
+    feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
+    # Cola o GPS em qualquer via da rota (feita ou em aberto), sem trocar o caminho por cobertura.
+    malha_rota = list(feitos or []) + list(faltando or [])
+    trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     if trajeto:
-        legenda = "Somente o executado. Azul: trajetória no eixo da rua. Sem pontos de coleta."
+        legenda = "Azul: caminho real do caminhão dentro da rota (GPS), colado no eixo da rua. Sem pontos de coleta."
     else:
-        legenda = "Programada para o dia. Nenhuma via foi executada neste turno."
+        legenda = "Programada para o dia. Nenhum pulso do caminhão entrou nesta rota."
     return (
         titulo,
         renderizar_mapa([base], trajeto, [], aneis, vias="feitas"),
@@ -567,7 +704,8 @@ def _folhas_da_rota(
 ) -> list[tuple[str, bytes, str]]:
     del pontos
     feitos, faltando = _preparar_vias(dia, codigo, tracos, frota)
-    trajeto = _trajeto_no_eixo(feitos, tracos)
+    malha_rota = list(feitos or []) + list(faltando or [])
+    trajeto = _trajeto_do_caminhao(aneis, tracos, malha_rota)
     base_feito = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     base_aberto = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": faltando}
     if faltando:
@@ -578,7 +716,7 @@ def _folhas_da_rota(
         (
             f"{titulo} · realizado",
             renderizar_mapa([base_feito], trajeto, [], aneis, vias="feitas"),
-            "Realizado. Azul: trajetória no eixo da rua. Sem pontos de coleta.",
+            "Realizado. Azul: caminho real do caminhão na rota (GPS). Sem pontos de coleta.",
         ),
         (
             f"{titulo} · em aberto",

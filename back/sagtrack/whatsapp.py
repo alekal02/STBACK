@@ -569,10 +569,11 @@ def _menu() -> str:
     return (
         "*Relatórios Segtrack*\n"
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
-        "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
-        "*dia 26* — marca o turno; depois peça o relatório\n"
-        "*dia 26 frota* ou *26/09 frota* — PDF da frota nesse turno\n"
-        "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
+        "Peça *frota* neste grupo: atualizo os pulsos e envio o PDF.\n"
+        "Antes, se quiser outro dia: *dia 26* ou *26/09*.\n\n"
+        "*frota* — atualiza a frota e manda o relatório\n"
+        "*dia 26 frota* ou *26/09 frota* — frota daquele turno\n"
+        "*04AD* ou *rota 04AD* — como está a rota\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n\n"
         "_Digite o comando neste grupo._"
     )
@@ -617,13 +618,64 @@ def mapear_mensagem(body: Any) -> dict[str, str] | None:
     }
 
 
-def _garantir_coleta(settings: Settings, dia: date) -> None:
-    if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+def _invalidar_cache_pdf(pasta: Path, tipo: str = "frota") -> None:
+    cache = pasta / "cache"
+    if not cache.is_dir():
         return
+    for item in cache.glob(f"{tipo}-*.pdf"):
+        try:
+            item.unlink()
+        except OSError:
+            pass
+
+
+def _atualizar_conta(
+    settings: Settings,
+    dia: date,
+    *,
+    forcar: bool = False,
+    aviso: str = "",
+) -> dict[str, Any] | None:
+    """Atualiza pulsos e conta do turno. Frota no WhatsApp sempre força a atualização."""
     from .config import aplicar_periodo
     from .motor import executar
+    from .server import JOB
 
-    executar(aplicar_periodo(settings, dia))
+    pasta = settings.output_dir / dia.isoformat()
+    if not forcar and (pasta / "resumo.json").is_file():
+        return None
+    ajustado = aplicar_periodo(settings, data=dia.isoformat())
+    with JOB["lock"]:
+        if JOB["rodando"]:
+            raise RuntimeError(
+                "A frota já está sendo atualizada. Aguarde alguns minutos e peça *frota* de novo."
+            )
+        JOB["rodando"] = True
+        JOB["desde"] = time.time()
+        JOB["erro"] = ""
+        JOB["data"] = dia.isoformat()
+        JOB["mensagens"] = [aviso or f"Pedido do grupo · {dia.isoformat()}"]
+
+    def progresso(msg: str) -> None:
+        print(msg, flush=True)
+        with JOB["lock"]:
+            JOB["mensagens"].append(msg)
+            del JOB["mensagens"][:-40]
+
+    try:
+        resumo = executar(ajustado, on_progress=progresso)
+        _invalidar_cache_pdf(pasta, "frota")
+        return resumo if isinstance(resumo, dict) else None
+    finally:
+        with JOB["lock"]:
+            JOB["rodando"] = False
+
+
+def _garantir_coleta(settings: Settings, dia: date) -> None:
+    """Garante que exista conta do dia (rota/placa). Frota usa _atualizar_conta com forcar."""
+    if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
+        return
+    _atualizar_conta(settings, dia, forcar=True, aviso=f"Pedido do grupo · {dia.isoformat()}")
 
 
 def _fontes_do_dia(pasta: Path) -> list[Path]:
@@ -699,9 +751,8 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
-    _garantir_coleta(settings, dia)
     pasta = settings.output_dir / dia.isoformat()
-    chave = f"{tipo}-{(consulta or '').strip().upper()}-ruas2.pdf"
+    chave = f"{tipo}-{(consulta or '').strip().upper()}-cores1.pdf"
     guardado = _cache_pdf(pasta, chave)
     if guardado is not None:
         if tipo == "frota":
@@ -720,11 +771,11 @@ def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[byt
 
 
 def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = None) -> None:
-    """Monta o PDF da frota assim que a coleta grava os arquivos, para o WhatsApp só enviar."""
+    """Monta o PDF da frota em segundo plano (painel). O WhatsApp gera o próprio arquivo no pedido."""
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return
-    chave = "frota--ruas2.pdf"
+    chave = "frota--cores1.pdf"
     if not _GERANDO.acquire(blocking=False):
         return
     try:
@@ -738,7 +789,7 @@ def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = 
         if _cache_pdf(pasta, chave) is None:
             _guardar_cache(pasta, chave, arquivo)
         if on_progress:
-            on_progress("PDF da frota pronto. No WhatsApp, peça frota para receber o arquivo.")
+            on_progress("PDF da frota pronto. No WhatsApp, peça *frota* para receber.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
@@ -802,26 +853,53 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             enviar_texto(
                 settings,
                 mensagem["grupo"],
-                "Ainda estou montando o PDF anterior. O resumo dele já foi enviado neste grupo.",
+                "Ainda estou atualizando a frota ou montando o PDF. Aguarde terminar e peça de novo se precisar.",
             )
             return
         try:
             inicio = time.perf_counter()
             _ULTIMO_ENVIO.clear()
-            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "resumo"})
-            resumo = (
-                _texto_frota(settings, dia)
-                if tipo == "frota"
-                else _texto_consulta(settings, tipo, consulta, dia)
-            )
-            if resumo:
-                enviar_texto(settings, mensagem["grupo"], resumo)
-            else:
+            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "coleta"})
+            if tipo == "frota":
                 enviar_texto(
                     settings,
                     mensagem["grupo"],
-                    f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+                    f"Recebi a frota. Atualizando os pulsos de {_rotulo_turno(dia)} "
+                    "e montando o PDF. Pode levar alguns minutos — já envio neste grupo.",
                 )
+                try:
+                    _atualizar_conta(
+                        settings,
+                        dia,
+                        forcar=True,
+                        aviso=f"WhatsApp frota · {dia.isoformat()}",
+                    )
+                except RuntimeError as exc:
+                    enviar_texto(settings, mensagem["grupo"], str(exc))
+                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
+                    return
+                _ULTIMO_ENVIO["fase"] = "resumo"
+                resumo = _texto_frota(settings, dia)
+                if resumo:
+                    enviar_texto(settings, mensagem["grupo"], resumo)
+                else:
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        "Conta atualizada. Montando o PDF com os mapas...",
+                    )
+            else:
+                _garantir_coleta(settings, dia)
+                _ULTIMO_ENVIO["fase"] = "resumo"
+                resumo = _texto_consulta(settings, tipo, consulta, dia)
+                if resumo:
+                    enviar_texto(settings, mensagem["grupo"], resumo)
+                else:
+                    enviar_texto(
+                        settings,
+                        mensagem["grupo"],
+                        f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
+                    )
             resumo_s = round(time.perf_counter() - inicio, 1)
             _ULTIMO_ENVIO["fase"] = "pdf"
             _ULTIMO_ENVIO["resumo_s"] = resumo_s

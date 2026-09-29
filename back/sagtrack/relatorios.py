@@ -752,16 +752,12 @@ def _gps_na_rota(
     aneis: list,
     placa: str,
     pontos_por_placa: dict[str, list],
-    pasta: Path,
 ) -> list[list[list[float]]]:
-    from .gps import tracos_na_ordem
-    from .pdfmapa import _dentro_da_rota, tracos_guardados
+    from .gps import trajetoria_uniforme
+    from .pdfmapa import _dentro_da_rota, _vias_oficiais
 
-    guardados = tracos_guardados(pasta, codigo, placa)
-    if guardados is not None:
-        return guardados
     brutos = _dentro_da_rota(pontos_por_placa.get(placa) or [], aneis)
-    return tracos_na_ordem(brutos)
+    return trajetoria_uniforme(brutos, _vias_oficiais(dia, codigo), dia=dia)
 
 
 def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool = True) -> dict[str, Any]:
@@ -833,7 +829,7 @@ def relatorio_rota(output_dir: Path, dia: date, consulta: str, *, com_gps: bool 
                 "faltando": faltando,
                 "paradas_pontos": cob.get("paradas_pontos") or [],
                 "gps": (
-                    _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos, pasta)
+                    _gps_na_rota(dia, codigo, setor.get("poligonos") or [], str(item.get("placa") or ""), pontos_salvos)
                     if com_gps and papel in {"ATUANDO", "APOIO"}
                     else []
                 )

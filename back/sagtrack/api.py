@@ -106,29 +106,9 @@ def historico_veiculo(
     if end <= begin:
         raise RuntimeError("Janela inválida: data final menor que a inicial")
     path = f"/events/interval/id/{vehicle_id}/begin/{begin}/end/{end}"
-    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(token), timeout=60)
+    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(token))
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     return [item for item in (data or []) if isinstance(item, dict)]
-
-
-def historico_com_tentativa(
-    settings: Settings,
-    vehicle_id: str,
-    inicio: datetime,
-    fim: datetime,
-    token: str,
-) -> list[dict[str, Any]]:
-    """Um pedido do turno inteiro por caminhão. Se a API falhar, tenta de novo uma vez."""
-    import time
-
-    try:
-        return historico_veiculo(settings, vehicle_id, inicio, fim, token)
-    except RuntimeError as exc:
-        texto = str(exc).lower()
-        if not any(marca in texto for marca in ("504", "500", "timed out", "sem conexão")):
-            raise
-        time.sleep(2)
-        return historico_veiculo(settings, vehicle_id, inicio, fim, token)
 
 
 def _ponto(evento: dict[str, Any], veiculo: str) -> dict[str, Any] | None:
@@ -272,25 +252,21 @@ def coletar_percursos(
             if ultimo is not None:
                 inicio_busca = max(inicio, ultimo - timedelta(minutes=2))
             try:
-                eventos_hist = historico_com_tentativa(settings, vid, inicio_busca, fim, token) if vid else []
+                eventos_hist = historico_veiculo(settings, vid, inicio_busca, fim, token) if vid else []
             except Exception as exc:
                 eventos_hist = []
-                erro = str(exc).split(":", 1)[0][:80]
-            if erro and salvos:
-                pontos = list(salvos)
-                origem = "falha"
-            else:
-                pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
-                novos = filtrar_pontos_periodo(
-                    pontos_brutos,
-                    dia,
-                    settings.hora_inicio,
-                    settings.hora_fim,
-                    data_fim=settings.data_fim,
-                )
-                novos = [p for p in novos if "latitude" in p]
-                pontos = _juntar_pontos(salvos, novos) if salvos else novos
-                origem = "falha" if erro else ("novo" if not salvos else "parcial")
+                erro = str(exc)
+            pontos_brutos = [p for p in (_ponto(ev, placa) for ev in eventos_hist) if p]
+            novos = filtrar_pontos_periodo(
+                pontos_brutos,
+                dia,
+                settings.hora_inicio,
+                settings.hora_fim,
+                data_fim=settings.data_fim,
+            )
+            novos = [p for p in novos if "latitude" in p]
+            pontos = _juntar_pontos(salvos, novos) if salvos else novos
+            origem = "novo" if not salvos else "parcial"
         if ate is not None:
             pontos = [p for p in pontos if _ate_o_corte(p, ate, dia)]
         pontos.sort(key=lambda p: str(p.get("timestamp") or ""))
@@ -314,7 +290,7 @@ def coletar_percursos(
     rotas: list[dict[str, Any]] = []
     if not alvos:
         return rotas
-    with ThreadPoolExecutor(max_workers=min(4, len(alvos))) as pool:
+    with ThreadPoolExecutor(max_workers=min(6, len(alvos))) as pool:
         futuros = {pool.submit(um, item): item for item in alvos}
         feitos = 0
         for fut in as_completed(futuros):
@@ -322,17 +298,12 @@ def coletar_percursos(
             rotas.append(rota)
             feitos += 1
             if on_progress:
-                nota = {
-                    "salvo": "sem pulso novo",
-                    "parcial": "só o trecho novo",
-                    "novo": "turno inteiro",
-                    "falha": "histórico indisponível",
-                }.get(str(rota.get("origem_pulso") or ""), "")
-                falha = f" · {rota.get('erro')}" if rota.get("erro") and not int(rota.get("total_pontos") or 0) else ""
+                nota = {"salvo": "sem pulso novo", "parcial": "só o trecho novo", "novo": "turno inteiro"}.get(
+                    str(rota.get("origem_pulso") or ""), ""
+                )
                 on_progress(
                     f"Pulsos {feitos}/{len(alvos)} · {rota.get('placa')}: {rota.get('total_pontos')} pontos"
                     + (f" · {nota}" if nota else "")
-                    + falha
                 )
     rotas = [item for item in rotas if int(item.get("pontos_na_cidade") or 0) > 0]
     rotas.sort(key=lambda item: str(item.get("prefixo") or item.get("placa") or ""))

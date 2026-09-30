@@ -180,6 +180,59 @@ def _vias_no_poligono(dia: date, codigo: str, tracos: list[list[list[float]]]) -
     return feitos, faltando
 
 
+def _eixos_da_rota(dia: date, codigo: str) -> list[list[list[float]]]:
+    """Eixos oficiais das ruas no polígono — base para colar o GPS na via."""
+    setor = next((item for item in _malha(dia) if str(item.get("codigo") or "") == codigo), None)
+    if setor is None or setor.get("geom") is None:
+        return []
+    geom = setor["geom"]
+    saida: list[list[list[float]]] = []
+    for rua in list(setor.get("ruas") or []):
+        try:
+            dentro = rua.intersection(geom)
+        except Exception:
+            continue
+        if dentro.is_empty:
+            continue
+        saida.extend(_linhas_wgs(dentro))
+    return saida
+
+
+def _quebrar_saltos_gps(
+    tracos: list[list[list[float]]],
+    max_m: float = 90.0,
+) -> list[list[list[float]]]:
+    """Corta o traço quando o pulso salta longe — evita diagonais por cima do quarteirão."""
+    from .gps import haversine_m
+
+    saida: list[list[list[float]]] = []
+    for traco in tracos or []:
+        if not isinstance(traco, list) or len(traco) < 2:
+            continue
+        atual: list[list[float]] = []
+        for ponto in traco:
+            if len(ponto) < 2:
+                continue
+            try:
+                lat, lon = float(ponto[0]), float(ponto[1])
+            except (TypeError, ValueError):
+                continue
+            if atual:
+                try:
+                    d = haversine_m((atual[-1][0], atual[-1][1]), (lat, lon))
+                except Exception:
+                    d = 0.0
+                if d > max_m:
+                    if len(atual) >= 2:
+                        saida.append(atual)
+                    atual = [[lat, lon]]
+                    continue
+            atual.append([lat, lon])
+        if len(atual) >= 2:
+            saida.append(atual)
+    return saida
+
+
 def _aneis(item: dict[str, Any]) -> list[list]:
     aneis = [anel for anel in (item.get("poligonos") or []) if anel and len(anel) >= 4]
     if aneis:
@@ -949,18 +1002,22 @@ def _trajeto_do_caminhao(
     tracos: list[list[list[float]]],
     vias_eixo: list[list[list[float]]] | None = None,
 ) -> list[list[list[float]]]:
-    """Trajetória real do GPS na rota (ordem do tempo). Opcionalmente cola no eixo da rua."""
+    """Trajetória real do GPS na rota (ordem do tempo), colada no eixo da rua."""
     gps = [t for t in (tracos or []) if isinstance(t, list) and len(t) >= 2]
     if not gps:
         return []
     dentro = _recortar_gps_na_rota(gps, aneis) if aneis else gps
     if not dentro:
-        return gps
+        return []
+    dentro = _quebrar_saltos_gps(dentro, max_m=90.0)
+    if not dentro:
+        return []
     if vias_eixo:
-        colado = _grudar_gps_na_via(dentro, vias_eixo)
+        colado = _grudar_gps_na_via(dentro, vias_eixo, raio_m=45.0)
         if colado:
-            return colado
-    return dentro
+            # Simplifica só depois de colar — mantém a forma da via.
+            return _simplificar_tracos(colado, 0.000035)
+    return _simplificar_tracos(dentro, 0.00004)
 
 
 def _pintar_por_placa(
@@ -1011,46 +1068,37 @@ def _mapa_da_rota(
 ) -> tuple[str, bytes, str]:
     # Frota: GPS colado no eixo das vias do polígono. Não desenha ruas em aberto.
     del pontos
-    # Modo leve (WhatsApp): sem rematch de malha — só desenha o GPS já salvo.
-    if _MAPA_LEVE:
-        feitos, faltando = [], []
-    else:
-        feitos, faltando = _preparar_vias(
-            dia,
-            codigo,
-            [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
-            frota,
-        )
+    # Eixos oficiais para colar o GPS (sempre — sem isso o traço vira “espaguete”).
+    feitos, faltando = _preparar_vias(
+        dia,
+        codigo,
+        [t for gps in (gps_por_placa or {}).values() for t in gps] if gps_por_placa else tracos,
+        frota,
+    )
     malha = list(feitos or []) + list(faltando or [])
+    if not malha:
+        malha = _eixos_da_rota(dia, codigo)
     pintados: list[tuple[list[list[float]], tuple[int, int, int]]] = []
     legendas: list[tuple[str, tuple[int, int, int]]] = []
     if gps_por_placa:
-        passo = 4 if _MAPA_LEVE else 2
-        eps = 0.00012 if _MAPA_LEVE else 0.00006
-        leve = {
-            placa: _simplificar_tracos(_afinar_gps(gps, passo), eps)
-            for placa, gps in gps_por_placa.items()
-            if gps
-        }
-        pintados, legendas = _pintar_por_placa(aneis, leve, malha)
-        if not pintados:
-            pintados, legendas = _pintar_por_placa(aneis, leve, [])
+        # Não afinar antes do snap: manter ordem e densidade do GPS; o snap limpa o caminho.
+        bruto = {placa: gps for placa, gps in gps_por_placa.items() if gps}
+        pintados, legendas = _pintar_por_placa(aneis, bruto, malha)
+        if not pintados and malha:
+            # Sem colagem possível: ainda recorta/quebra saltos, sem inventar diagonais.
+            pintados, legendas = _pintar_por_placa(aneis, bruto, [])
     else:
-        trajeto = _trajeto_do_caminhao(
-            aneis,
-            _simplificar_tracos(_afinar_gps(tracos, 4 if _MAPA_LEVE else 2), 0.00012 if _MAPA_LEVE else 0.00006),
-            malha or None,
-        )
+        trajeto = _trajeto_do_caminhao(aneis, tracos, malha or None)
         pintados = [(t, (29, 78, 217)) for t in trajeto]
     base = {"aneis": aneis, "rotulo": codigo, "feitos": [], "faltando": []}
     if pintados:
         if len(legendas) > 1:
             nomes = ", ".join(p for p, _c in legendas)
-            legenda = f"Cada cor é um caminhão ({nomes}). Caminho GPS na rota."
+            legenda = f"Cada cor é um caminhão ({nomes}). Caminho GPS colado nas vias da rota."
         elif legendas:
-            legenda = f"{legendas[0][0]}: caminho GPS na rota."
+            legenda = f"{legendas[0][0]}: caminho GPS colado nas vias da rota."
         else:
-            legenda = "Caminho GPS do caminhão na rota."
+            legenda = "Caminho GPS do caminhão colado nas vias da rota."
     else:
         legenda = "Programada para o dia. Nenhum pulso do caminhão entrou nesta rota."
     return (
@@ -1418,15 +1466,24 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         str(caminhao.get("placa") or ""): list(caminhao.get("gps") or [])
         for caminhao in (resumo.get("caminhoes") or [])
     }
-    # Fallback GPS por rota/placa sem manter frota inteira na memória dos mapas.
+    # GPS da cobertura desta rota (preferência) + eixos feitos/faltando para colar na via.
     gps_rota_placa: dict[tuple[str, str], list] = {}
+    vias_rota: dict[str, tuple[list, list]] = {}
     for item in frota:
         placa = str(item.get("placa") or "")
         for cob in item.get("coberturas_inlog") or []:
             codigo = str(cob.get("codigo_rota") or "")
+            if not codigo:
+                continue
             trechos = cob.get("trechos_gps") or []
-            if placa and codigo and trechos:
+            if placa and trechos:
                 gps_rota_placa[(codigo, placa)] = list(trechos)
+            feitos = [t for t in (cob.get("trechos_feitos") or []) if t and len(t) >= 2]
+            faltando = [t for t in (cob.get("trechos_faltando") or []) if t and len(t) >= 2]
+            if feitos or faltando:
+                atual = vias_rota.get(codigo)
+                if atual is None or len(feitos) > len(atual[0]):
+                    vias_rota[codigo] = (feitos, faltando)
     periodo = resumo.get("periodo") or _turno(dia)
     corte = str(resumo.get("congelado_em") or "")
     if len(corte) >= 16:
@@ -1443,24 +1500,40 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
             pass
 
     mapas: list[tuple[str, Path, str, tuple[float, float, float]]] = []
-    _abrir_prazo_mapa(60 if _MAPA_LEVE else 120)
+    _abrir_prazo_mapa(90 if _MAPA_LEVE else 120)
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
         placas = [str(p) for p in (row.get("placas") or []) if str(p).strip()]
         codigo = str(row.get("codigo") or "")
-        por_placa = {placa: gps_por_placa.get(placa) or [] for placa in placas}
-        if not any(por_placa.values()):
-            for placa in placas:
-                trechos = gps_rota_placa.get((codigo, placa)) or []
-                if trechos:
-                    por_placa[placa] = trechos
+        # Preferir GPS já recortado nesta rota; senão usa o dia inteiro (será recortado/snap).
+        por_placa: dict[str, list] = {}
+        for placa in placas:
+            rota_gps = gps_rota_placa.get((codigo, placa)) or []
+            por_placa[placa] = rota_gps if rota_gps else (gps_por_placa.get(placa) or [])
         tracos = [traco for gps in por_placa.values() for traco in gps]
         estado = _rotulo_andamento(row)
         titulo = (
             f"{row['codigo']} {row['nome']} · {estado} · {_fmt_pct(row['percentual'])} · {_faixa_agenda(row)}"
         )
         cor = _COR_SITUACAO[row["situacao"]]
+        # frota mínima só com eixos desta rota (para _preparar_vias/_ruas).
+        frota_min = []
+        if codigo in vias_rota:
+            feitos, faltando = vias_rota[codigo]
+            frota_min = [
+                {
+                    "placa": placas[0] if placas else "",
+                    "coberturas_inlog": [
+                        {
+                            "codigo_rota": codigo,
+                            "trechos_feitos": feitos,
+                            "trechos_faltando": faltando,
+                            "percentual": row.get("percentual") or 0,
+                        }
+                    ],
+                }
+            ]
         try:
             folha_titulo, jpeg, legenda = _mapa_da_rota(
                 titulo,
@@ -1469,7 +1542,7 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
                 tracos,
                 [],
                 dia,
-                [],
+                frota_min,
                 gps_por_placa=por_placa,
             )
         except Exception as exc:
@@ -1478,11 +1551,11 @@ def pdf_frota(output_dir: Path, dia: date) -> tuple[bytes, str]:
         destino = cache_mapas / f"{codigo}.jpg"
         destino.write_bytes(jpeg)
         print(f"PDF frota mapa {codigo} ({len(jpeg)} bytes)", flush=True)
-        del jpeg, tracos, por_placa
+        del jpeg, tracos, por_placa, frota_min
         mapas.append((folha_titulo, destino, legenda, cor))
         gc.collect()
 
-    del gps_por_placa, gps_rota_placa
+    del gps_por_placa, gps_rota_placa, vias_rota
     gc.collect()
     return _pdf_frota_fiscal(dia, periodo, balanco, mapas), f"frota-{dia.isoformat()}.pdf"
 

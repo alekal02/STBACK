@@ -29,11 +29,6 @@ services:
         value: http://24.199.86.195:8080
       - key: ALLOW_VERCEL_PREVIEWS
         value: "true"
-      - key: SAGTRACK_MAPA_BASE
-        value: "mapbox"
-      # Token Mapbox (Static Images) — valor só no painel/API, não no git.
-      - key: MAPBOX_ACCESS_TOKEN
-        sync: false
       - key: FULLTRACK_BASE_URL
         value: https://web-service2.ftdata.com.br
       - key: FULLTRACK_USERNAME

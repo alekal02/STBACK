@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import threading
@@ -11,7 +10,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +28,6 @@ _MANTER = True
 _ULTIMO_ENVIO: dict[str, Any] = {}
 _GRUPO_PADRAO = "120363429863984066@g.us"
 _NOME_PADRAO = "Eu"
-_PACOTE_MIN = max(5, int(os.getenv("WHATSAPP_PACOTE_MIN", "30") or "30"))
-_REGRAS_SITUACAO = "70/20-r22-apoio2"
-_MAPA_PDF = "html-link-v1"
 def _caminho_config() -> Path:
     from .config import pasta_dados
 
@@ -47,9 +43,6 @@ def _norm(texto: str) -> str:
 def _comando_simples(cmd: str) -> tuple[str, str] | None:
     if cmd in {"MENU", "AJUDA", "COMANDOS", "OI", "OLA", "INICIO"}:
         return "menu", ""
-    # Comando interno: força novo casamento Segtrack + PDF (ignora pacote de 30 min).
-    if cmd in {"FROTA ATUAL", "ATUAL FROTA"}:
-        return "frota_atual", ""
     if cmd in {"FROTA", "RELATORIO", "RELATORIO FROTA", "RELATORIO DA FROTA"}:
         return "frota", ""
     rota = re.fullmatch(r"(?:RELATORIO\s+)?ROTA\s+(.+)", cmd)
@@ -576,13 +569,10 @@ def _menu() -> str:
     return (
         "*Relatórios Segtrack*\n"
         "O turno vai das *06:00* até *05:59* do dia seguinte.\n"
-        "Peça *frota*: mando o resumo e um *link* com mapas (abre na hora).\n"
-        f"Por {_PACOTE_MIN} min, *frota*/rota/placa reutilizam a mesma conta.\n"
-        "Antes, se quiser outro dia: *dia 26* ou *26/09*.\n\n"
-        "*frota* — link do relatório com a conta salva\n"
-        "*frota atual* — remapeia pulsos Segtrack e manda link novo\n"
-        "*dia 26 frota* ou *26/09 frota* — frota daquele turno\n"
-        "*04AD* ou *rota 04AD* — como está a rota\n"
+        "Antes do relatório, diga o dia: *dia 26* (mês atual) ou *26/09*.\n\n"
+        "*dia 26* — marca o turno; depois peça o relatório\n"
+        "*dia 26 frota* ou *26/09 frota* — PDF da frota nesse turno\n"
+        "*04AD* ou *rota 04AD* — como está a rota e qual caminhão coletou\n"
         "*SDG-1J76* ou *placa SDG-1J76* — trajeto do caminhão\n\n"
         "_Digite o comando neste grupo._"
     )
@@ -627,196 +617,13 @@ def mapear_mensagem(body: Any) -> dict[str, str] | None:
     }
 
 
-def _invalidar_cache_pdf(pasta: Path, tipo: str = "frota") -> None:
-    cache = pasta / "cache"
-    if not cache.is_dir():
-        return
-    for item in cache.glob(f"{tipo}-*.pdf"):
-        try:
-            item.unlink()
-        except OSError:
-            pass
-
-
-def _chave_pacote(tipo: str, consulta: str) -> str:
-    return f"{tipo}-{(consulta or '').strip().upper()}"
-
-
-def _caminho_pacote(pasta: Path) -> Path:
-    return pasta / "pacote-whatsapp.json"
-
-
-def _pasta_arquivos_pacote(pasta: Path) -> Path:
-    return pasta / "pacote"
-
-
-def _hora_br(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone(timedelta(hours=-3))).strftime("%H:%M")
-
-
-def _ler_pacote(pasta: Path) -> dict[str, Any] | None:
-    arquivo = _caminho_pacote(pasta)
-    if not arquivo.is_file():
-        return None
-    try:
-        dado = json.loads(arquivo.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return dado if isinstance(dado, dict) else None
-
-
-def _pacote_ativo(pasta: Path) -> dict[str, Any] | None:
-    pac = _ler_pacote(pasta)
-    if not pac:
-        return None
-    if str(pac.get("regras_situacao") or "") != _REGRAS_SITUACAO:
-        return None
-    if str(pac.get("mapa_pdf") or "") != _MAPA_PDF:
-        return None
-    try:
-        valido_ate = float(pac.get("valido_ate") or 0)
-    except (TypeError, ValueError):
-        return None
-    if valido_ate <= time.time():
-        return None
-    return pac
-
-
-def _invalidar_pacote(pasta: Path) -> None:
-    arquivo = _caminho_pacote(pasta)
-    if arquivo.is_file():
-        try:
-            arquivo.unlink()
-        except OSError:
-            pass
-    pasta_arq = _pasta_arquivos_pacote(pasta)
-    if pasta_arq.is_dir():
-        for item in pasta_arq.glob("*.pdf"):
-            try:
-                item.unlink()
-            except OSError:
-                pass
-
-
-def _gravar_pacote(pasta: Path, pac: dict[str, Any]) -> None:
-    pasta.mkdir(parents=True, exist_ok=True)
-    _caminho_pacote(pasta).write_text(
-        json.dumps(pac, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _abrir_pacote(pasta: Path, *, congelado_em: str = "") -> dict[str, Any]:
-    agora = time.time()
-    pac = {
-        "criado_em": agora,
-        "valido_ate": agora + _PACOTE_MIN * 60,
-        "congelado_em": congelado_em,
-        "regras_situacao": _REGRAS_SITUACAO,
-        "mapa_pdf": _MAPA_PDF,
-        "arquivos": {},
-        "textos": {},
-    }
-    _pasta_arquivos_pacote(pasta).mkdir(parents=True, exist_ok=True)
-    _gravar_pacote(pasta, pac)
-    return pac
-
-
-def _guardar_no_pacote(
-    pasta: Path,
-    pac: dict[str, Any],
-    tipo: str,
-    consulta: str,
-    arquivo: bytes,
-    nome: str,
-    texto: str = "",
-) -> Path:
-    chave = _chave_pacote(tipo, consulta)
-    destino = _pasta_arquivos_pacote(pasta) / f"{chave}.pdf"
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    destino.write_bytes(arquivo)
-    arquivos = dict(pac.get("arquivos") or {})
-    arquivos[chave] = {"rel": f"pacote/{chave}.pdf", "nome": nome, "bytes": len(arquivo)}
-    pac["arquivos"] = arquivos
-    if texto:
-        textos = dict(pac.get("textos") or {})
-        textos[chave] = texto
-        pac["textos"] = textos
-    _gravar_pacote(pasta, pac)
-    return destino
-
-
-def _pdf_do_pacote(pasta: Path, pac: dict[str, Any], tipo: str, consulta: str) -> tuple[bytes, str] | None:
-    chave = _chave_pacote(tipo, consulta)
-    info = (pac.get("arquivos") or {}).get(chave)
-    if not isinstance(info, dict):
-        return None
-    caminho = pasta / str(info.get("rel") or "")
-    if not caminho.is_file():
-        return None
-    nome = str(info.get("nome") or caminho.name)
-    return caminho.read_bytes(), nome
-
-
-def _texto_do_pacote(pac: dict[str, Any], tipo: str, consulta: str) -> str:
-    chave = _chave_pacote(tipo, consulta)
-    return str((pac.get("textos") or {}).get(chave) or "")
-
-
-def _aviso_pacote(pac: dict[str, Any]) -> str:
-    criado = _hora_br(float(pac.get("criado_em") or time.time()))
-    valido = _hora_br(float(pac.get("valido_ate") or time.time()))
-    return f"Pacote {criado}–{valido}. Mesmo relatório."
-
-
-def _atualizar_conta(
-    settings: Settings,
-    dia: date,
-    *,
-    forcar: bool = False,
-    aviso: str = "",
-) -> dict[str, Any] | None:
-    """Atualiza pulsos e conta do turno. Frota no WhatsApp sempre força a atualização."""
-    from .config import aplicar_periodo
-    from .motor import executar
-    from .server import JOB
-
-    pasta = settings.output_dir / dia.isoformat()
-    if not forcar and (pasta / "resumo.json").is_file():
-        return None
-    ajustado = aplicar_periodo(settings, data=dia.isoformat())
-    with JOB["lock"]:
-        if JOB["rodando"]:
-            raise RuntimeError(
-                "A frota já está sendo atualizada. Aguarde alguns minutos e peça *frota* de novo."
-            )
-        JOB["rodando"] = True
-        JOB["desde"] = time.time()
-        JOB["erro"] = ""
-        JOB["data"] = dia.isoformat()
-        JOB["mensagens"] = [aviso or f"Pedido do grupo · {dia.isoformat()}"]
-
-    def progresso(msg: str) -> None:
-        print(msg, flush=True)
-        with JOB["lock"]:
-            JOB["mensagens"].append(msg)
-            del JOB["mensagens"][:-40]
-
-    try:
-        resumo = executar(ajustado, on_progress=progresso)
-        _invalidar_cache_pdf(pasta, "frota")
-        _invalidar_pacote(pasta)
-        return resumo if isinstance(resumo, dict) else None
-    finally:
-        with JOB["lock"]:
-            JOB["rodando"] = False
-
-
 def _garantir_coleta(settings: Settings, dia: date) -> None:
-    """Garante que exista conta do dia (rota/placa). Frota usa _atualizar_conta com forcar."""
     if (settings.output_dir / dia.isoformat() / "resumo.json").is_file():
         return
-    _atualizar_conta(settings, dia, forcar=True, aviso=f"Pedido do grupo · {dia.isoformat()}")
+    from .config import aplicar_periodo
+    from .motor import executar
+
+    executar(aplicar_periodo(settings, dia))
 
 
 def _fontes_do_dia(pasta: Path) -> list[Path]:
@@ -842,43 +649,38 @@ def _guardar_cache(pasta: Path, chave: str, arquivo: bytes) -> None:
 
 def _texto_frota(settings: Settings, dia: date) -> str:
     from .pdfmapa import _ler, _rotulo_andamento
-    from .relatorios import _fmt_pct, _frota_com_papeis, balanco_frota
+    from .relatorios import _fmt_pct, balanco_frota
 
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return ""
-    frota = _frota_com_papeis(_ler(pasta, "frota.json") or [])
-    balanco = balanco_frota(_ler(pasta, "setores.json") or [], frota)
+    balanco = balanco_frota(_ler(pasta, "setores.json") or [], _ler(pasta, "frota.json") or [])
     feitas = sum(1 for row in balanco if row["situacao"] == "Feita")
     parciais = sum(1 for row in balanco if row["situacao"] == "Parcial")
     nao = sum(1 for row in balanco if row["situacao"] == "Não feita")
     resumo_dia = _ler(pasta, "resumo.json") or {}
     corte = str(resumo_dia.get("congelado_em") or "")
-    n_apoio = sum(
-        1
-        for item in frota
-        for cob in (item.get("coberturas_inlog") or [])
-        if cob.get("papel") == "APOIO"
-    )
     linhas = [
-        f"*Frota {dia.strftime('%d/%m/%Y')}* · {feitas} feitas · {parciais} parciais · {nao} não feitas",
+        f"*Frota {dia.strftime('%d/%m/%Y')}*",
+        f"{len(balanco)} programadas · {feitas} feitas · {parciais} parciais · {nao} não feitas.",
+        "Feita só a partir de 90%. De 45% a 89% é parcial.",
     ]
-    if n_apoio:
-        linhas[0] += f" · {n_apoio} apoios"
     if len(corte) >= 16:
-        linhas.append(f"Pulsos até {corte[11:16]}.")
+        linhas.append(f"Pulsos até {corte[11:16]}. Nenhum pulso depois desse horário entrou na conta.")
+    linhas.append("")
     for row in balanco:
         if int(row.get("paradas") or 0) <= 0:
             continue
-        apoio = [c for c in (row.get("caminhoes") or []) if "apoio" in str(c).lower()]
-        extra = f" · apoio: {', '.join(apoio)}" if apoio else ""
         linhas.append(
-            f"{row['codigo']} {row['nome']} · {_fmt_pct(row['percentual'])} · {_rotulo_andamento(row)}{extra}"
+            f"{row['codigo']} {row['nome']} · {_fmt_pct(row['percentual'])} · {_rotulo_andamento(row)}"
         )
     vazias = [str(row["codigo"]) for row in balanco if int(row.get("paradas") or 0) <= 0]
     if vazias:
+        linhas.append("")
         linhas.append("Sem coleta: " + ", ".join(vazias))
-    return "\n".join(linhas)[:3500]
+    linhas.append("")
+    linhas.append("O PDF com os mapas segue agora.")
+    return "\n".join(linhas)[:3900]
 
 
 def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> str:
@@ -890,120 +692,57 @@ def _texto_consulta(settings: Settings, tipo: str, consulta: str, dia: date) -> 
     linhas = [str(item) for item in (rel.get("texto") or []) if str(item).strip()]
     if not linhas:
         return ""
-    return "\n".join(linhas[:8])[:2500]
+    linhas.append("O PDF segue agora.")
+    return "\n".join(linhas[:12])[:3900]
 
 
 def _gerar(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[bytes, str]:
-    from . import pdfmapa
     from .pdfmapa import pdf_frota, pdf_placa, pdf_rota
 
+    _garantir_coleta(settings, dia)
     pasta = settings.output_dir / dia.isoformat()
-    chave = f"{tipo}-{(consulta or '').strip().upper()}-cores1.pdf"
+    chave = f"{tipo}-{(consulta or '').strip().upper()}-ruas2.pdf"
     guardado = _cache_pdf(pasta, chave)
     if guardado is not None:
         if tipo == "frota":
             return guardado.read_bytes(), f"frota-{dia.isoformat()}.pdf"
         return guardado.read_bytes(), f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
     selos = {item: item.stat().st_mtime for item in _fontes_do_dia(pasta) if item.is_file()}
-    pdfmapa._MAPA_LEVE = tipo in {"frota", "rota", "placa"}
-    try:
-        if tipo == "frota":
-            arquivo, nome = pdf_frota(settings.output_dir, dia)
-        elif tipo == "rota":
-            arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
-        else:
-            arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
-    finally:
-        pdfmapa._MAPA_LEVE = False
+    if tipo == "frota":
+        arquivo, nome = pdf_frota(settings.output_dir, dia)
+    elif tipo == "rota":
+        arquivo, nome = pdf_rota(settings.output_dir, dia, consulta)
+    else:
+        arquivo, nome = pdf_placa(settings.output_dir, dia, consulta)
     if selos and all(item.is_file() and item.stat().st_mtime == selo for item, selo in selos.items()):
         _guardar_cache(pasta, chave, arquivo)
     return arquivo, nome
 
 
-def entrega_pdf(settings: Settings, tipo: str, consulta: str, dia: date) -> tuple[int, bytes, str]:
-    """PDF sob demanda na página HTML. Se já houver cache, devolve; senão monta em background."""
-    pasta = settings.output_dir / dia.isoformat()
-    chave = f"{tipo}-{(consulta or '').strip().upper()}-cores1.pdf"
-    pronto = _cache_pdf(pasta, chave)
-    if pronto is not None:
-        nome = f"frota-{dia.isoformat()}.pdf" if tipo == "frota" else f"{tipo}-{consulta}-{dia.isoformat()}.pdf"
-        return 200, pronto.read_bytes(), nome
-    if not (pasta / "resumo.json").is_file():
-        return 404, b"", ""
-
-    def _montar() -> None:
-        if not _GERANDO.acquire(blocking=False):
-            return
-        try:
-            if _cache_pdf(pasta, chave) is not None:
-                return
-            arquivo, nome = _gerar(settings, tipo, consulta, dia)
-            _guardar_cache(pasta, chave, arquivo)
-            print(f"PDF sob demanda pronto: {nome} ({len(arquivo)} bytes)", flush=True)
-        except Exception as exc:
-            print(f"PDF sob demanda falhou: {exc}", flush=True)
-        finally:
-            _GERANDO.release()
-
-    threading.Thread(target=_montar, daemon=True).start()
-    return 202, b"", ""
-
-
-def _com_link(corpo: str, url: str) -> str:
-    base = (corpo or "").strip()
-    rodape = (
-        f"\n\nAbra o relatório: {url}\n"
-        "A página abre na hora com os mapas. PDF opcional no botão da página."
-    )
-    if not base:
-        return rodape.strip()
-    return (base + rodape)[:3900]
-
-
-def _enviar_link(
-    settings: Settings,
-    grupo: str,
-    tipo: str,
-    consulta: str,
-    dia: date,
-) -> str:
-    from .vista import emitir
-
-    url = emitir(settings, tipo, consulta, dia)
-    corpo = _texto_frota(settings, dia) if tipo == "frota" else _texto_consulta(settings, tipo, consulta, dia)
-    enviar_texto(settings, grupo, _com_link(corpo, url))
-    return url
-
-
 def preparar_pdf_frota(settings: Settings, dia: date, on_progress: Any | None = None) -> None:
-    """Pré-monta PDF em segundo plano (opcional). O WhatsApp manda o link HTML."""
+    """Monta o PDF da frota assim que a coleta grava os arquivos, para o WhatsApp só enviar."""
     pasta = settings.output_dir / dia.isoformat()
     if not (pasta / "resumo.json").is_file():
         return
-    chave = "frota--cores1.pdf"
+    chave = "frota--ruas2.pdf"
     if not _GERANDO.acquire(blocking=False):
         return
     try:
         if _cache_pdf(pasta, chave) is not None:
             return
         if on_progress:
-            on_progress("Pré-montando PDF opcional da frota...")
-        from . import pdfmapa
+            on_progress("Montando o PDF da frota com os pulsos já salvos...")
         from .pdfmapa import pdf_frota
 
-        pdfmapa._MAPA_LEVE = True
-        try:
-            arquivo, _nome = pdf_frota(settings.output_dir, dia)
-        finally:
-            pdfmapa._MAPA_LEVE = False
+        arquivo, _nome = pdf_frota(settings.output_dir, dia)
         if _cache_pdf(pasta, chave) is None:
             _guardar_cache(pasta, chave, arquivo)
         if on_progress:
-            on_progress("PDF opcional pronto. No WhatsApp o link abre a página.")
+            on_progress("PDF da frota pronto. No WhatsApp, peça frota para receber o arquivo.")
     except Exception as exc:
         print(f"PDF da frota: {exc}", flush=True)
         if on_progress:
-            on_progress("Conta salva. Use o link do WhatsApp para ver o relatório.")
+            on_progress("A frota foi salva. O PDF sai quando pedirem frota no WhatsApp.")
     finally:
         _GERANDO.release()
 
@@ -1063,86 +802,45 @@ def processar(body: Any, settings: Settings | None = None) -> None:
             enviar_texto(
                 settings,
                 mensagem["grupo"],
-                "Ainda estou atualizando a frota. Aguarde terminar e peça de novo se precisar.",
+                "Ainda estou montando o PDF anterior. O resumo dele já foi enviado neste grupo.",
             )
             return
         try:
             inicio = time.perf_counter()
             _ULTIMO_ENVIO.clear()
-            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "link"})
-            pasta_dia = settings.output_dir / dia.isoformat()
-
-            # frota atual: remapeia Segtrack e manda link HTML.
-            if tipo == "frota_atual":
-                tipo = "frota"
-                _ULTIMO_ENVIO["tipo"] = "frota_atual"
-                _invalidar_pacote(pasta_dia)
-                _invalidar_cache_pdf(pasta_dia, "frota")
+            _ULTIMO_ENVIO.update({"tipo": tipo, "consulta": consulta, "fase": "resumo"})
+            resumo = (
+                _texto_frota(settings, dia)
+                if tipo == "frota"
+                else _texto_consulta(settings, tipo, consulta, dia)
+            )
+            if resumo:
+                enviar_texto(settings, mensagem["grupo"], resumo)
+            else:
                 enviar_texto(
                     settings,
                     mensagem["grupo"],
-                    f"Frota atual: remapeando os pulsos de {_rotulo_turno(dia)}. "
-                    "Assim que fechar a conta, mando o link do relatório.",
+                    f"Montando o PDF de {_rotulo_turno(dia)}. Já envio neste grupo.",
                 )
-                try:
-                    _atualizar_conta(
-                        settings,
-                        dia,
-                        forcar=True,
-                        aviso=f"WhatsApp frota atual · {dia.isoformat()}",
-                    )
-                except RuntimeError as exc:
-                    enviar_texto(settings, mensagem["grupo"], str(exc))
-                    _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
-                    return
-                url = _enviar_link(settings, mensagem["grupo"], "frota", "", dia)
-                total_s = round(time.perf_counter() - inicio, 1)
-                _abrir_pacote(pasta_dia)
-                _ULTIMO_ENVIO.update(
-                    {
-                        "fase": "enviado",
-                        "link": url,
-                        "total_s": total_s,
-                        "frota_atual": True,
-                    }
-                )
-                print(f"WhatsApp: link frota atual em {total_s}s → {url}", flush=True)
-                return
-
-            if tipo == "frota":
-                tem_conta = (pasta_dia / "resumo.json").is_file() and (pasta_dia / "frota.json").is_file()
-                if not tem_conta:
-                    enviar_texto(
-                        settings,
-                        mensagem["grupo"],
-                        f"Ainda não há conta de {_rotulo_turno(dia)}. "
-                        "Atualizando os pulsos e mando o link em seguida.",
-                    )
-                    try:
-                        _atualizar_conta(
-                            settings,
-                            dia,
-                            forcar=True,
-                            aviso=f"WhatsApp frota · {dia.isoformat()}",
-                        )
-                    except RuntimeError as exc:
-                        enviar_texto(settings, mensagem["grupo"], str(exc))
-                        _ULTIMO_ENVIO.update({"fase": "erro", "erro": str(exc)})
-                        return
-                url = _enviar_link(settings, mensagem["grupo"], "frota", "", dia)
-                total_s = round(time.perf_counter() - inicio, 1)
-                _abrir_pacote(pasta_dia)
-                _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s})
-                print(f"WhatsApp: link frota em {total_s}s → {url}", flush=True)
-                return
-
-            # rota / placa: conta salva + link (mapa sob demanda na página).
-            _garantir_coleta(settings, dia)
-            url = _enviar_link(settings, mensagem["grupo"], tipo, consulta, dia)
+            resumo_s = round(time.perf_counter() - inicio, 1)
+            _ULTIMO_ENVIO["fase"] = "pdf"
+            _ULTIMO_ENVIO["resumo_s"] = resumo_s
+            arquivo, nome = _gerar(settings, tipo, consulta, dia)
+            pdf_s = round(time.perf_counter() - inicio, 1)
+            print(f"WhatsApp: enviando {nome} ({len(arquivo)} bytes)", flush=True)
+            enviar_pdf(settings, mensagem["grupo"], arquivo, nome)
             total_s = round(time.perf_counter() - inicio, 1)
-            _abrir_pacote(pasta_dia)
-            _ULTIMO_ENVIO.update({"fase": "enviado", "link": url, "total_s": total_s})
-            print(f"WhatsApp: link {tipo} em {total_s}s → {url}", flush=True)
+            _ULTIMO_ENVIO.update(
+                {
+                    "fase": "enviado",
+                    "nome": nome,
+                    "bytes": len(arquivo),
+                    "resumo_s": resumo_s,
+                    "pdf_s": pdf_s,
+                    "total_s": total_s,
+                }
+            )
+            print(f"WhatsApp: {nome} enviado em {total_s}s", flush=True)
         finally:
             _GERANDO.release()
     except Exception as exc:

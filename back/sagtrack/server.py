@@ -4,7 +4,6 @@ import json
 import mimetypes
 import os
 import threading
-import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,23 +18,10 @@ FRONT = ROOT / "front"
 JOB: dict[str, Any] = {
     "lock": threading.Lock(),
     "rodando": False,
-    "desde": 0.0,
     "mensagens": [],
     "erro": "",
     "data": "",
 }
-
-
-def _rota_vista(caminho: str) -> tuple[str, str] | None:
-    import re
-
-    pagina = re.fullmatch(r"/r/([A-Za-z0-9_-]{8,}\.[A-Za-z0-9]{16,})", caminho)
-    if pagina:
-        return pagina.group(1), "pagina"
-    api = re.fullmatch(r"/api/r/([A-Za-z0-9_-]{8,}\.[A-Za-z0-9]{16,})(?:/(mapa|pdf))?", caminho)
-    if api:
-        return api.group(1), api.group(2) or "json"
-    return None
 
 
 def _aplicar(settings: Settings, corpo: dict[str, Any]) -> Settings:
@@ -116,45 +102,6 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-    def _bytes(self, codigo: int, dados: bytes, tipo: str, nome: str = "") -> None:
-        self.send_response(codigo)
-        self._cors()
-        self.send_header("Content-Type", tipo)
-        self.send_header("Content-Length", str(len(dados)))
-        self.send_header("Cache-Control", "no-store")
-        if nome:
-            self.send_header("Content-Disposition", f'attachment; filename="{nome}"')
-        self.end_headers()
-        self.wfile.write(dados)
-
-    def _vista(self, destino: tuple[str, str], url: Any) -> None:
-        from .vista import abrir, dados, html_pagina, mapa, pdf
-
-        token, modo = destino
-        if modo == "pagina":
-            self._bytes(200, html_pagina().encode("utf-8"), "text/html; charset=utf-8")
-            return
-        claims = abrir(token)
-        if claims is None:
-            self._json(410, {"erro": "Este link expirou. Peça o relatório de novo no grupo."})
-            return
-        if modo == "json":
-            self._json(200, dados(self.settings, claims))
-            return
-        if modo == "mapa":
-            codigo = (parse_qs(url.query).get("codigo") or [""])[0]
-            self._json(200, mapa(self.settings, claims, codigo))
-            return
-        try:
-            codigo, arquivo, nome = pdf(self.settings, claims)
-        except Exception as exc:
-            self._json(500, {"erro": str(exc)})
-            return
-        if codigo == 202:
-            self._json(202, {"estado": "montando"})
-            return
-        self._bytes(200, arquivo, "application/pdf", nome)
-
     def _arquivo(self, caminho: Path) -> None:
         if not caminho.is_file():
             self.send_error(404)
@@ -182,10 +129,6 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/health":
             self._json(200, {"status": "ok", "servico": "segtrack"})
-            return
-        vista = _rota_vista(url.path)
-        if vista is not None:
-            self._vista(vista, url)
             return
         if url.path == "/config.js":
             self._arquivo(FRONT / "config.js")
@@ -328,7 +271,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             settings = _aplicar(self.settings, corpo)
             JOB["rodando"] = True
-            JOB["desde"] = time.time()
             JOB["erro"] = ""
             JOB["data"] = settings.data_rota.isoformat()
             JOB["mensagens"] = [f"Iniciando {JOB['data']}"]

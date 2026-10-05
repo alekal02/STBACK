@@ -22,7 +22,7 @@ services:
       - key: PDF_MAP_CONCURRENCY
         value: "1"
       - key: ANALISE_WORKERS
-        value: "1"
+        value: "2"
       - key: MALLOC_ARENA_MAX
         value: "2"
       - key: PLAYWRIGHT_BROWSERS_PATH

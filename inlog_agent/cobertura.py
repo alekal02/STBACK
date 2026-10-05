@@ -4,7 +4,7 @@ import math
 from typing import Any, Iterable
 
 from pyproj import Transformer
-from shapely import contains_xy
+from shapely import contains_xy, covers_xy
 from shapely.geometry import LineString, MultiPoint, Point
 from shapely.ops import linemerge, unary_union
 
@@ -153,7 +153,7 @@ def cobertura_espacial(
         coords.append(par)
     if not coords:
         return {"percentual": 0.0, "area_pct": 0.0, "metodo": "mapa"}
-    pintado = MultiPoint(coords).buffer(raio_m).intersection(geom)
+    pintado = MultiPoint(coords).buffer(raio_m, quad_segs=3).intersection(geom)
     area_pct = 100.0 * pintado.area / geom.area if geom.area else 0.0
     area_pct = round(min(100.0, area_pct), 1)
     return {
@@ -417,17 +417,22 @@ def passagens_na_rota(
     from .gps import _datetime_do_timestamp
     from .traco_agente import _chave_tempo
 
-    itens: list[tuple[datetime | None, dict[str, Any], tuple[float, float], bool]] = []
+    bruto: list[tuple[datetime | None, dict[str, Any], tuple[float, float]]] = []
     for ponto in pontos:
         xy = _xy(ponto)
         if not xy:
             continue
         dt = _datetime_do_timestamp(str(ponto.get("timestamp") or ""), dia)
-        try:
-            dentro = bool(geom.covers(Point(xy)))
-        except Exception:
-            dentro = False
-        itens.append((dt, ponto, xy, dentro))
+        bruto.append((dt, ponto, xy))
+    if not bruto:
+        return []
+    try:
+        mascara = covers_xy(geom, [xy[0] for _, _, xy in bruto], [xy[1] for _, _, xy in bruto])
+    except Exception:
+        mascara = [False] * len(bruto)
+    itens: list[tuple[datetime | None, dict[str, Any], tuple[float, float], bool]] = [
+        (dt, ponto, xy, bool(flag)) for (dt, ponto, xy), flag in zip(bruto, mascara)
+    ]
     itens.sort(key=lambda item: (_chave_tempo(item[1]), item[0] or datetime.min))
     if not itens:
         return []

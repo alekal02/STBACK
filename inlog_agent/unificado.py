@@ -306,12 +306,15 @@ def _bbox_cruza(geom, bbox: tuple[float, float, float, float] | None) -> bool:
 
 
 def _trabalhadores_analise() -> int:
-    """No Render (512 MB) um polígono por vez. No executável local, os oito de sempre."""
+    """No Render (512 MB) dois polígonos ao mesmo tempo. No executável local, os oito de sempre."""
     bruto = (os.getenv("ANALISE_WORKERS") or "").strip()
+    no_render = (os.getenv("RENDER") or "").strip().lower() in {"1", "true", "yes", "sim"}
+    if no_render:
+        if bruto.isdigit() and int(bruto) >= 2:
+            return min(8, int(bruto))
+        return 2
     if bruto.isdigit():
         return max(1, min(8, int(bruto)))
-    if (os.getenv("RENDER") or "").strip().lower() in {"1", "true", "yes", "sim"}:
-        return 1
     return 8
 
 
@@ -440,8 +443,8 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
         zona_geom = setor.get("_zona")
         nucleo_geom = setor.get("_nucleo")
     elif geom is not None:
-        zona_geom = geom.buffer(BORDA_M)
-        nucleo_geom = geom.buffer(DENTRO_M)
+        zona_geom = geom.buffer(BORDA_M, quad_segs=2)
+        nucleo_geom = geom.buffer(DENTRO_M, quad_segs=2)
     else:
         zona_geom = None
         nucleo_geom = None
@@ -1399,7 +1402,7 @@ def gerar_relatorio_unificado(
     return payload
 
 
-_GPS_FRESCO_S = 8 * 60
+_GPS_FRESCO_S = 12 * 60
 _ultimo_gps: dict[str, float] = {}
 
 
@@ -1426,8 +1429,11 @@ def atualizar_gps_ciclo(
         f"{getattr(settings, 'data_fim', None)}"
     )
     agora = time.time()
-    if not forcar and agora - _ultimo_gps.get(chave, 0) < _GPS_FRESCO_S:
-        progress("Pulsos recém consultados. Cruzando de novo neste polígono.")
+    salvo = settings.output_dir / "segtrack" / dia.isoformat() / "rotas.json"
+    fresco_memoria = agora - _ultimo_gps.get(chave, 0) < _GPS_FRESCO_S
+    fresco_disco = salvo.is_file() and salvo.stat().st_size > 1000 and (agora - salvo.stat().st_mtime) < _GPS_FRESCO_S
+    if not forcar and (fresco_memoria or fresco_disco):
+        progress("GPS desta coleta já está salvo. Indo direto para o relatório.")
         return {"extraidos": {}, "falhas": {}, "reaproveitado": True}
 
     extraidos: dict[str, dict[str, Any]] = {}
@@ -1490,7 +1496,7 @@ def executar_coleta_do_dia(
                 "06:00 de um dia até 05:59 do outro."
             )
         progress("3/7 — Buscando o GPS da frota na Segtrack (placa a placa).")
-        gps = atualizar_gps_ciclo(settings, headed=headed, on_progress=on_progress, forcar=True)
+        gps = atualizar_gps_ciclo(settings, headed=headed, on_progress=on_progress, forcar=False)
         extraidos = gps.get("extraidos") or {}
         falhas = gps.get("falhas") or {}
         progress("4/7 — GPS recebido. Cruzando com o mapa oficial de rotas...")

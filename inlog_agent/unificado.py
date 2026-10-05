@@ -1880,7 +1880,7 @@ def _html(
       .barra .nome { font-size: 11px; }
       .barra b { font-size: 14px; }
     """
-    nome_fonte = "SEGTRACK"
+    nome_fonte = "SEGTRACK · FULLTRACK"
     dia_br = rotulo_periodo(dia, hora_inicio, hora_fim, data_fim)
     header = (tpl / "header.html").read_text(encoding="utf-8")
     header = header.replace("{{FONTE}}", _esc(nome_fonte)).replace("{{DIA}}", _esc(dia_br))

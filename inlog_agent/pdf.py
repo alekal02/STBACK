@@ -1037,7 +1037,7 @@ def _codigo_setor(setor: str) -> tuple[str, str]:
 
 
 def _fonte_nome(fonte: str) -> str:
-    return "SEGTRACK"
+    return "SEGTRACK · FULLTRACK"
 
 
 def _legenda_html(frota: list[dict[str, Any]]) -> str:

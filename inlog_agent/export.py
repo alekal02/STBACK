@@ -225,13 +225,36 @@ def write_mapa_html(
     .pino-hora {{ background: #0f1c24; color: #fff; border: 0; border-radius: 3px; padding: 1px 4px; font: 10px/1.1 Segoe UI, sans-serif; }}
     .pino-hora::before {{ display: none; }}
     button.todos {{ margin: 8px 0; padding: 6px 10px; }}
+    .toggle {{ display: none; }}
+    .linha-rota {{ display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }}
+    @media (max-width: 720px) {{
+      .toggle {{
+        display: block; width: 100%; background: #12232e; color: #fff;
+        border: 0; border-radius: 10px; padding: 11px 12px; font-weight: 700;
+      }}
+      .painel {{
+        top: auto; right: 0; bottom: 0; left: 0; width: auto;
+        max-height: 42%;
+        border-radius: 16px 16px 0 0;
+        padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+      }}
+      .painel.fechado {{ max-height: 56px; overflow: hidden; }}
+      .painel.fechado .titulo-mapa,
+      .painel.fechado .legenda-mapa,
+      .painel.fechado #ver-todos,
+      .painel.fechado #lista {{ display: none; }}
+      .titulo-mapa, .legenda-mapa {{ display: none; }}
+      .item .detalhe {{ display: none; }}
+      .item {{ padding: 11px 2px; }}
+    }}
   </style>
 </head>
 <body>
   <div id="mapa"></div>
-  <aside class="painel">
-    <strong>{_xml(titulo)}</strong>
-    <p><small>Faixa preta + laranja = deliminação oficial da rota. Área amarela = polígono. Cada cor de linha = um caminhão. Tracejado = lacuna de sinal. Pino verde = entrada. Pino vermelho = saída.</small></p>
+  <aside class="painel" id="painel">
+    <button class="toggle" type="button" id="toggle-painel">Rotas e %</button>
+    <strong class="titulo-mapa">{_xml(titulo)}</strong>
+    <p class="legenda-mapa"><small>Faixa preta + laranja = deliminação oficial da rota. Área amarela = polígono. Cada cor de linha = um caminhão. Tracejado = lacuna de sinal. Pino verde = entrada. Pino vermelho = saída.</small></p>
     <button class="todos" type="button" id="ver-todos">Ver todos</button>
     <div id="lista"></div>
   </aside>
@@ -247,6 +270,16 @@ def write_mapa_html(
     const grupo = [];
     const linhasGps = [];
     const lista = document.getElementById("lista");
+    const painel = document.getElementById("painel");
+    const estreito = window.matchMedia("(max-width: 720px)").matches;
+    if (estreito && painel) painel.classList.add("fechado");
+    const togglePainel = document.getElementById("toggle-painel");
+    if (togglePainel && painel) {{
+      togglePainel.onclick = () => {{
+        painel.classList.toggle("fechado");
+        setTimeout(() => mapa.invalidateSize(), 180);
+      }};
+    }}
     function cor(pct, rota) {{
       const sit = String((rota && (rota.execucao || rota.veredicto)) || "");
       if (rota && rota.ontem) return "#2c6fbb";
@@ -391,9 +424,9 @@ def write_mapa_html(
       const chips = frota.map((cam) => `<span style="display:inline-block;width:10px;height:10px;background:${{cam.cor || '#c0392b'}};border-radius:2px;margin-right:4px"></span>${{cam.placa || cam.veiculo || "—"}} <small>${{cam.papel || "passagem"}} ${{Number(cam.percentual || 0).toFixed(0)}}%${{cam.horario ? " · " + cam.horario : ""}}</small>`).join("<br>");
       const box = document.createElement("div");
       box.className = "item";
-      box.innerHTML = `<div><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>
-        <small>${{sit}} · Segtrack<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
-        <div style="margin-top:6px;font-size:12px;line-height:1.45">${{chips}}</div>
+      box.innerHTML = `<div class="linha-rota"><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>
+        <div class="detalhe"><small>${{sit}} · Segtrack<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
+        <div style="margin-top:6px;font-size:12px;line-height:1.45">${{chips}}</div></div>
         <div class="barra"><span style="width:${{Math.min(pct,100)}}%;background:${{c}}"></span></div>`;
       box.onclick = () => focar(idx);
       lista.appendChild(box);
@@ -421,6 +454,7 @@ def write_mapa_html(
         }} else if (pecas.length) {{
           mapa.fitBounds(L.featureGroup(pecas).getBounds(), {{ padding: [40, 40], maxZoom: 16 }});
         }}
+        if (estreito && painel) painel.classList.add("fechado");
       }}
     }}
     document.getElementById("ver-todos").onclick = () => {{

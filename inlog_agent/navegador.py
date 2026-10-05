@@ -39,6 +39,13 @@ def _tentativas() -> list[dict[str, str]]:
 
 def abrir_chromium(pw: Any, **kwargs: Any):
     ultimo: Exception | None = None
+    args = list(kwargs.get("args") or [])
+    if os.getenv("PORT") or os.getenv("RENDER"):
+        for flag in ("--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"):
+            if flag not in args:
+                args.append(flag)
+    if args:
+        kwargs["args"] = args
     for extra in _tentativas():
         try:
             return pw.chromium.launch(**kwargs, **extra)

@@ -225,7 +225,12 @@ def html_mapa_print(
     const tiles = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{{z}}/{{y}}/{{x}}", {{
       maxZoom: 19
     }});
-    tiles.on("load", () => {{ window.__tilesOk = true; }});
+    let depoisDoEnquadramento = false;
+    tiles.on("load", () => {{
+      if (!depoisDoEnquadramento) return;
+      window.__tilesOk = true;
+      window.__capturaPronta = true;
+    }});
     tiles.addTo(mapa);
     const polys = [];
     const linhasGps = [];
@@ -359,6 +364,9 @@ def html_mapa_print(
     }});
     function enquadrar() {{
       mapa.invalidateSize(true);
+      depoisDoEnquadramento = true;
+      window.__tilesOk = false;
+      window.__capturaPronta = false;
       const soInspecao = rotas.length === 1 && rotas[0] && rotas[0].inspecao;
       const alvo = soInspecao && polys.length
         ? polys
@@ -379,8 +387,10 @@ def html_mapa_print(
         mapa.setView([-16.82, -49.24], 13);
       }}
       window.__mapaPronto = true;
+      if (window.__tilesOk) window.__capturaPronta = true;
+      setTimeout(() => {{ window.__capturaPronta = true; }}, 2200);
     }}
-    setTimeout(enquadrar, 250);
+    setTimeout(enquadrar, 80);
     """
     return (
         "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='utf-8'/>"

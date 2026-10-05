@@ -34,6 +34,8 @@ PDF_JOB: dict[str, Any] = {
     "lock": threading.Lock(),
     "rodando": False,
     "data": "",
+    "turno": "",
+    "chave": "",
     "erro": "",
     "cancelado": False,
 }
@@ -773,12 +775,20 @@ def _pdf_atualizado(pasta: Path) -> bool:
     return alvo.stat().st_mtime >= max(arq.stat().st_mtime for arq in existentes)
 
 
-def _iniciar_pdf_unificado(data: str, pasta: Path) -> None:
+def _iniciar_pdf_unificado(data: str, pasta_dia: Path, turno: str) -> str:
+    from .pdf_cache import resolver_trabalho
+
+    trabalho = resolver_trabalho(pasta_dia, turno or None)
+    chave = f"{data}|{turno or 'atual'}"
     with PDF_JOB["lock"]:
+        if PDF_JOB["rodando"] and PDF_JOB.get("chave") == chave:
+            return chave
         if PDF_JOB["rodando"]:
-            return
+            return ""
         PDF_JOB["rodando"] = True
         PDF_JOB["data"] = data
+        PDF_JOB["turno"] = turno
+        PDF_JOB["chave"] = chave
         PDF_JOB["erro"] = ""
         PDF_JOB["cancelado"] = False
 
@@ -786,10 +796,11 @@ def _iniciar_pdf_unificado(data: str, pasta: Path) -> None:
         try:
             if PDF_JOB.get("cancelado"):
                 return
-            _rodar_rastreado(
-                [sys.executable, "-u", "-m", "inlog_agent", "pdf", "--data", data, "--unificado"]
-            )
-            if not (pasta / "relatorio-rotas.pdf").is_file():
+            cmd = [sys.executable, "-u", "-m", "inlog_agent", "pdf", "--data", data, "--unificado"]
+            if turno in {"diurno", "noturno"}:
+                cmd.extend(["--turno", turno])
+            _rodar_rastreado(cmd)
+            if not (trabalho / "relatorio-rotas.pdf").is_file() and not (pasta_dia / "relatorio-rotas.pdf").is_file():
                 raise RuntimeError("Falha ao gerar o PDF da frota.")
         except Exception as exc:
             with PDF_JOB["lock"]:
@@ -799,9 +810,12 @@ def _iniciar_pdf_unificado(data: str, pasta: Path) -> None:
                 PDF_JOB["rodando"] = False
 
     threading.Thread(target=_rodar, daemon=True, name="pdf-unificado").start()
+    return chave
 
 
-def _status_pdf_unificado(data: str) -> dict[str, Any]:
+def _status_pdf_unificado(data: str, turno: str = "") -> dict[str, Any]:
+    from .pdf_cache import ler_progresso, pdf_inteiro_valido, resolver_trabalho, turno_de
+
     settings = load_settings()
     pasta = _pasta_unificado(settings.output_dir, data)
     if pasta is None or not (pasta / "relatorio-diario.json").is_file():
@@ -809,31 +823,56 @@ def _status_pdf_unificado(data: str) -> dict[str, Any]:
     if pasta is None or not (pasta / "relatorio-diario.json").is_file():
         raise FileNotFoundError("Monte o relatório único deste dia (Coletar GPS) antes de baixar o PDF.")
     data_real = pasta.name
+    pedido = (turno or turno_de(pasta) or "").strip().lower()
+    trabalho = resolver_trabalho(pasta, pedido or None)
+    chave = f"{data_real}|{pedido or 'atual'}"
+    pronto = pdf_inteiro_valido(trabalho)
     with PDF_JOB["lock"]:
-        gerando = bool(PDF_JOB["rodando"] and PDF_JOB["data"] == data_real)
-        erro = str(PDF_JOB["erro"] or "") if PDF_JOB["data"] == data_real else ""
-    if _pdf_atualizado(pasta) and not gerando:
+        gerando = bool(PDF_JOB["rodando"] and PDF_JOB.get("chave") == chave)
+        erro = str(PDF_JOB["erro"] or "") if PDF_JOB.get("chave") == chave else ""
+    if pronto and not gerando:
         return {
             "ok": True,
             "pronto": True,
-            "url": _url_saida(pasta, "relatorio-rotas.pdf"),
-            "nome": f"frota-rotas-{data_real}.pdf",
+            "progresso": 100,
+            "job": chave,
+            "url": _url_saida(trabalho, "relatorio-rotas.pdf"),
+            "nome": f"frota-rotas-{pedido or 'dia'}-{data_real}.pdf",
         }
-    if not gerando:
-        _iniciar_pdf_unificado(data_real, pasta)
+    with PDF_JOB["lock"]:
+        ocupado = bool(PDF_JOB["rodando"] and PDF_JOB.get("chave") != chave)
+    if ocupado:
         return {
             "ok": True,
             "pronto": False,
             "gerando": True,
-            "msg": "Montando o PDF da frota com os mapas. Pode levar alguns minutos.",
+            "progresso": 0,
+            "job": chave,
+            "msg": "Outro PDF está sendo montado. Este entra em seguida.",
         }
-    if erro:
-        return {"ok": False, "pronto": False, "gerando": False, "erro": erro}
+    if not gerando and not erro:
+        _iniciar_pdf_unificado(data_real, pasta, pedido)
+        return {
+            "ok": True,
+            "pronto": False,
+            "gerando": True,
+            "progresso": 5,
+            "job": chave,
+            "msg": "Preparando o PDF.",
+        }
+    if erro and not gerando:
+        with PDF_JOB["lock"]:
+            if PDF_JOB.get("chave") == chave:
+                PDF_JOB["erro"] = ""
+        return {"ok": False, "pronto": False, "gerando": False, "erro": erro, "job": chave}
+    andamento = ler_progresso(trabalho)
     return {
         "ok": True,
         "pronto": False,
         "gerando": True,
-        "msg": "Montando o PDF da frota com os mapas. Pode levar alguns minutos.",
+        "progresso": int(andamento.get("progresso") or 8),
+        "job": chave,
+        "msg": str(andamento.get("msg") or "Montando o PDF da frota com os mapas."),
     }
 
 
@@ -1303,7 +1342,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not data:
                     self._json(400, {"erro": "Informe a data do relatório único."})
                     return
-                info = _status_pdf_unificado(data)
+                turno = (parse_qs(parsed.query).get("turno") or [""])[0]
+                info = _status_pdf_unificado(data, turno)
                 self._json(200 if info.get("ok", True) else 500, info)
             except Exception as exc:
                 self._json(500, {"erro": str(exc)})

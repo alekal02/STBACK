@@ -7,7 +7,7 @@ services:
     runtime: python
     plan: starter
     region: oregon
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && (python -m playwright install chromium || true)
     startCommand: python -m inlog_agent servir
     healthCheckPath: /api/health
     disk:
@@ -19,6 +19,8 @@ services:
         value: "3.12.8"
       - key: HOST
         value: 0.0.0.0
+      - key: PDF_MAP_CONCURRENCY
+        value: "3"
       - key: OUTPUT_DIR
         value: /var/sagtrack/output
       - key: HORA_INICIO

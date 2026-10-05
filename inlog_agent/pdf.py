@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from io import BytesIO
@@ -18,6 +19,15 @@ from .config import rotulo_periodo
 from .gps import tracos_realistas
 from .pdf_mapa import PALETA, completar_extremos_rota, hora_curta, html_mapa_print
 from .relatorio_diario import coberturas_relatorio
+from .pdf_cache import (
+    concorrencia,
+    digest,
+    gravar_cache,
+    gravar_progresso,
+    ler_cache,
+    limpar_jpeg_orfaos,
+    pdf_inteiro_valido,
+)
 from .verificacao import rotulo_papel_relatorio
 
 _TPL = Path(__file__).resolve().parent / "templates" / "relatorio"
@@ -163,11 +173,85 @@ def _capturar_mapas_dia_sync(pasta: Path) -> dict[str, Any]:
     with sync_playwright() as pw:
         browser = abrir_chromium(pw, headless=True)
         try:
-            cap = _montar_capturas(browser, dados, dia_br, fonte, rotas_mapa, detalhes)
+            cap = _montar_capturas(browser, dados, dia_br, fonte, rotas_mapa, detalhes, pasta)
         finally:
             browser.close()
     _salvar_mapas_cache(pasta, cap)
     return cap
+
+
+def _arred(valor: Any, casas: int = 5) -> Any:
+    if isinstance(valor, float):
+        return round(valor, casas)
+    if isinstance(valor, list):
+        return [_arred(item, casas) for item in valor]
+    if isinstance(valor, dict):
+        return {chave: _arred(item, casas) for chave, item in valor.items()}
+    return valor
+
+
+def _pacote_mapa(item: dict[str, Any], *, detalhe: bool, zoom: int) -> dict[str, Any]:
+    leve = _simplificar_rota(item, 1400 if detalhe else 450, 400 if detalhe else 180, detalhe=detalhe)
+    caminhoes = []
+    for cam in leve.get("caminhoes") or []:
+        caminhoes.append(
+            {
+                "placa": cam.get("placa") or cam.get("veiculo") or "",
+                "trechos": cam.get("trechos") or [],
+                "passagens": cam.get("passagens") or [],
+                "ponto_inicio": cam.get("ponto_inicio") or [],
+                "ponto_fim": cam.get("ponto_fim") or [],
+                "hora_inicio": cam.get("hora_inicio") or "",
+                "hora_fim": cam.get("hora_fim") or "",
+                "papel": cam.get("papel") or "",
+            }
+        )
+    return _arred(
+        {
+            "detalhe": detalhe,
+            "zoom": zoom,
+            "tela": [1600, 1180],
+            "poligonos": leve.get("poligonos") or [],
+            "trechos": leve.get("trechos") or [],
+            "vias": leve.get("vias") or [],
+            "caminhoes": caminhoes,
+        }
+    )
+
+
+def _texto_folha(item: dict[str, Any]) -> dict[str, Any]:
+    campos = _folha_campos(item)
+    campos.pop("caminhoes", None)
+    return {
+        "setor": campos.get("setor"),
+        "placa": campos.get("placa"),
+        "percentual": campos.get("percentual"),
+        "km_coleta": campos.get("km_coleta"),
+        "km_total": campos.get("km_total"),
+        "horario": campos.get("horario"),
+        "hora_inicio": campos.get("hora_inicio"),
+        "hora_fim": campos.get("hora_fim"),
+        "veredicto": campos.get("veredicto"),
+        "sem_gps": campos.get("sem_gps"),
+    }
+
+
+def _hash_pdf(dados: dict[str, Any], geral_hash: str, folhas: list[tuple[str, dict[str, Any]]]) -> str:
+    return digest(
+        {
+            "visual": 1,
+            "geral": geral_hash,
+            "linhas": [
+                {
+                    "setor": row.get("Setor"),
+                    "status": row.get("Status"),
+                    "pct": row.get("% Concluída") or row.get("percentual"),
+                }
+                for row in (dados.get("linhas") or [])
+            ],
+            "folhas": [{"mapa": h, "texto": texto} for h, texto in folhas],
+        }
+    )
 
 
 def _montar_capturas(
@@ -177,71 +261,151 @@ def _montar_capturas(
     fonte: str,
     rotas_mapa: list[dict[str, Any]],
     detalhes: list[dict[str, Any]],
+    pasta: Path | None = None,
 ) -> dict[str, Any]:
+    t0 = time.perf_counter()
     frota = _rotas_frota(rotas_mapa, detalhes)
-    print(f"Mapa geral ({len(frota)} camadas)...", flush=True)
-    geral = _capturar_mapa(browser, frota, max_zoom=13, detalhe=False)
-    folhas: list[dict[str, Any]] = []
-    lote = 3
-    for ini in range(0, len(detalhes), lote):
-        fatia = detalhes[ini : ini + lote]
-        print(
-            f"Mapas {ini + 1}-{ini + len(fatia)}/{len(detalhes)}...",
-            flush=True,
+    cache_dir = (Path(pasta) / "mapas_relatorio") if pasta else None
+    if cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    geral_hash = digest(
+        _arred(
+            {
+                "zoom": 13,
+                "tela": [1600, 1180],
+                "rotas": [
+                    {
+                        "trechos": rota.get("trechos") or [],
+                        "executada": rota.get("executada") or [],
+                        "poligonos": rota.get("poligonos") or [],
+                    }
+                    for rota in frota
+                ],
+            }
         )
-        folhas.extend(_capturar_lote(browser, fatia))
+    )
+    geral_nome = f"geral-{geral_hash[:20]}.jpg"
+    geral_arq = cache_dir / geral_nome if cache_dir else None
+    if geral_arq and geral_arq.is_file():
+        print("[MAP] geral CACHE HIT", flush=True)
+        geral = geral_arq.read_bytes()
+    else:
+        t = time.perf_counter()
+        print(f"[MAP] geral RENDER ({len(frota)} camadas)", flush=True)
+        geral = _capturar_mapa(browser, frota, max_zoom=13, detalhe=False)
+        if geral_arq:
+            geral_arq.write_bytes(geral)
+        print(f"[MAP] geral RENDER {time.perf_counter() - t:.1f}s", flush=True)
+
+    total = max(1, len(detalhes))
+    folhas_idx: list[tuple[int, dict[str, Any]]] = []
+    pendentes: list[tuple[int, dict[str, Any], Path | None]] = []
+    hashes: list[tuple[str, dict[str, Any]]] = []
+    manter = {geral_nome}
+    for i, item in enumerate(detalhes):
+        h = digest(_pacote_mapa(item, detalhe=True, zoom=16))
+        hashes.append((h, _texto_folha(item)))
+        nome = f"{h[:20]}.jpg"
+        manter.add(nome)
+        arq = cache_dir / nome if cache_dir else None
+        rotulo = str(item.get("setor") or item.get("placa") or i + 1)
+        if arq and arq.is_file():
+            print(f"[MAP] {rotulo} CACHE HIT", flush=True)
+            folhas_idx.append((i, {**_folha_campos(item), "img": arq.read_bytes()}))
+        else:
+            pendentes.append((i, item, arq))
+    if pasta:
+        feitos = total - len(pendentes)
+        gravar_progresso(pasta, 15 + int(60 * feitos / total), f"Mapas em cache {feitos}/{total}")
+
+    lote = concorrencia()
+    for ini in range(0, len(pendentes), lote):
+        fatia = pendentes[ini : ini + lote]
+        t = time.perf_counter()
+        capturadas = _capturar_lote(browser, [item for _i, item, _arq in fatia])
+        for (i, item, arq), folha in zip(fatia, capturadas):
+            if arq:
+                arq.write_bytes(folha["img"])
+            rotulo = str(item.get("setor") or item.get("placa") or i + 1)
+            print(f"[MAP] {rotulo} RENDER {time.perf_counter() - t:.1f}s", flush=True)
+            folhas_idx.append((i, folha))
+        if pasta:
+            feitos = total - len(pendentes) + ini + len(fatia)
+            gravar_progresso(pasta, 15 + int(67 * feitos / total), f"Gerando mapas {min(feitos, total)}/{total}")
+    folhas_idx.sort(key=lambda par: par[0])
+    if cache_dir:
+        limpar_jpeg_orfaos(pasta, manter)
+    print(f"[PDF] Mapas: {time.perf_counter() - t0:.1f}s", flush=True)
     return {
         "dados": dados,
         "dia_br": dia_br,
         "fonte": fonte,
         "frota": frota,
         "geral": geral,
-        "folhas": folhas,
+        "folhas": [folha for _i, folha in folhas_idx],
         "legenda": _legenda_html(frota),
+        "pdf_hash": _hash_pdf(dados, geral_hash, hashes),
+        "mapas": {h[:20]: f"{h[:20]}.jpg" for h, _texto in hashes} | {"geral": geral_nome},
     }
 
 
 def _gerar_pdf_dia_sync(pasta: Path) -> Path:
     pasta = Path(pasta)
     dest = pasta / "relatorio-rotas.pdf"
-    cache = _carregar_mapas_cache(pasta)
+    t0 = time.perf_counter()
+    pronto = pdf_inteiro_valido(pasta)
+    if pronto:
+        print(f"[PDF] CACHE HIT pdf {time.perf_counter() - t0:.1f}s", flush=True)
+        print(f"[PDF] TOTAL: {time.perf_counter() - t0:.1f}s", flush=True)
+        gravar_progresso(pasta, 100, "Concluído")
+        return pronto
+    gravar_progresso(pasta, 5, "Preparando dados")
+    mapa = pasta / "mapa.html"
+    diario = pasta / "relatorio-diario.json"
+    dados = json.loads(diario.read_text(encoding="utf-8"))
+    dia_iso = str(dados.get("data") or pasta.name)
+    hora_inicio = str(dados.get("hora_inicio") or "00:00")
+    hora_fim = str(dados.get("hora_fim") or "23:59")
+    data_fim_raw = str(dados.get("data_fim") or "").strip() or None
+    try:
+        dia = date.fromisoformat(dia_iso)
+        dia_br = str(dados.get("periodo") or rotulo_periodo(dia, hora_inicio, hora_fim, data_fim_raw))
+    except ValueError:
+        dia_br = dia_iso
+    gravar_progresso(pasta, 10, "Verificando cache dos mapas")
+    rotas_mapa = json.loads(_extrair_rotas_js(mapa))
+    detalhes = _paginas_detalhe(pasta, rotas_mapa)
+    fonte = str(dados.get("fonte") or "")
+    if not fonte:
+        fonte = pasta.parent.name if pasta.parent.name in {"argos", "segtrack", "diurno", "noturno"} else "inlog"
     with sync_playwright() as pw:
         browser = abrir_chromium(pw, headless=True)
         try:
-            if cache:
-                cap = cache
+            cap = _montar_capturas(browser, dados, dia_br, fonte, rotas_mapa, detalhes, pasta)
+            guardado = ler_cache(pasta)
+            if guardado.get("pdf_hash") == cap.get("pdf_hash") and dest.is_file() and dest.stat().st_size >= 20_000:
+                print("[PDF] CACHE HIT montagem", flush=True)
             else:
-                mapa = pasta / "mapa.html"
-                diario = pasta / "relatorio-diario.json"
-                dados = json.loads(diario.read_text(encoding="utf-8"))
-                dia_iso = str(dados.get("data") or pasta.name)
-                hora_inicio = str(dados.get("hora_inicio") or "00:00")
-                hora_fim = str(dados.get("hora_fim") or "23:59")
-                data_fim_raw = str(dados.get("data_fim") or "").strip() or None
-                try:
-                    dia = date.fromisoformat(dia_iso)
-                    dia_br = str(dados.get("periodo") or rotulo_periodo(dia, hora_inicio, hora_fim, data_fim_raw))
-                except ValueError:
-                    dia_br = dia_iso
-                rotas_mapa = json.loads(_extrair_rotas_js(mapa))
-                detalhes = _paginas_detalhe(pasta, rotas_mapa)
-                fonte = str(dados.get("fonte") or "")
-                if not fonte:
-                    fonte = pasta.parent.name if pasta.parent.name in {"argos", "segtrack"} else "inlog"
-                cap = _montar_capturas(browser, dados, dia_br, fonte, rotas_mapa, detalhes)
-                _salvar_mapas_cache(pasta, cap)
-            folhas = [{**folha, "img": _data_jpeg(folha["img"])} for folha in cap["folhas"]]
-            htmls = _html_pdf(
-                cap["dia_br"],
-                cap["dados"],
-                _data_jpeg(cap["geral"]),
-                folhas,
-                cap["fonte"],
-                cap["legenda"],
-            )
-            dest.write_bytes(_pdf_paginas(browser, htmls))
+                t_pdf = time.perf_counter()
+                gravar_progresso(pasta, 90, "Montando PDF")
+                folhas = [{**folha, "img": _data_jpeg(folha["img"])} for folha in cap["folhas"]]
+                htmls = _html_pdf(
+                    cap["dia_br"],
+                    cap["dados"],
+                    _data_jpeg(cap["geral"]),
+                    folhas,
+                    cap["fonte"],
+                    cap["legenda"],
+                )
+                parcial = pasta / "relatorio-rotas.pdf.part"
+                parcial.write_bytes(_pdf_paginas(browser, htmls))
+                parcial.replace(dest)
+                print(f"[PDF] Montagem: {time.perf_counter() - t_pdf:.1f}s", flush=True)
+            gravar_cache(pasta, str(cap.get("pdf_hash") or ""), cap.get("mapas") or {})
         finally:
             browser.close()
+    gravar_progresso(pasta, 100, "Concluído")
+    print(f"[PDF] TOTAL: {time.perf_counter() - t0:.1f}s", flush=True)
     return dest
 
 
@@ -381,7 +545,7 @@ def _pdf_paginas(browser, htmls: list[str]) -> bytes:
     page = browser.new_page(viewport={"width": 900, "height": 1270})
     try:
         for html in htmls:
-            page.set_content(html, wait_until="load")
+            page.set_content(html, wait_until="domcontentloaded")
             blob = page.pdf(
                 format="A4",
                 landscape=False,
@@ -737,14 +901,9 @@ def _simplificar_rota(rota: dict[str, Any], max_linha: int = 450, max_poly: int 
 
 def _esperar_mapa(page, detalhe: bool) -> None:
     try:
-        page.wait_for_function("() => window.__mapaPronto === true", timeout=10_000)
+        page.wait_for_function("() => window.__capturaPronta === true", timeout=4_000)
     except Exception:
-        pass
-    try:
-        page.wait_for_function("() => window.__tilesOk === true", timeout=5_000)
-    except Exception:
-        pass
-    page.wait_for_timeout(280 if detalhe else 200)
+        print("[MAP] timeout de tile; a foto segue com o que já carregou", flush=True)
 
 
 def _folha_campos(item: dict[str, Any]) -> dict[str, Any]:

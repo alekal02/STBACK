@@ -788,6 +788,7 @@
     let aba = "uni";
     let geracaoAbort = null;
     let gerandoArquivo = false;
+    let turnoUnificado = "";
     let inspecaoRota = "";
 
     function isoHoje() {
@@ -1880,6 +1881,7 @@
     async function rodarUnificado(extrair, turno) {
       const data = $("data-uni").value;
       const p = janelaTurno(turno, data) || periodoDe("uni");
+      turnoUnificado = p.turno || turnoUnificado;
       if (!p.data) {
         pintarAndamento("Escolha o dia.", 0, "Escolha o dia.");
         return;
@@ -1973,7 +1975,10 @@
         const limite = Date.now() + 12 * 60 * 1000;
         while (Date.now() < limite) {
           if (geracaoAbort && geracaoAbort.signal.aborted) throw new Error("Geração interrompida.");
-          const info = await api("/api/pdf-unificado?data=" + encodeURIComponent(p.data), { signal: geracaoAbort.signal });
+          const info = await api(
+            "/api/pdf-unificado?data=" + encodeURIComponent(p.data) + "&turno=" + encodeURIComponent(turnoUnificado || ""),
+            { signal: geracaoAbort.signal }
+          );
           if (info.pronto && info.url) {
             const a = document.createElement("a");
             a.href = urlApi(info.url);
@@ -1986,7 +1991,7 @@
             return;
           }
           if (info.erro) throw new Error(info.erro);
-          pintarAndamento(info.msg || "Montando o PDF com os mapas. Aguarde...", 55, null, { seguir: true });
+          pintarAndamento(info.msg || "Montando o PDF com os mapas. Aguarde...", Number(info.progresso) || 55, null, { seguir: true });
           await new Promise((ok) => setTimeout(ok, 2000));
         }
         throw new Error("O PDF está demorando demais. Clique de novo em um minuto.");

@@ -134,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     pdf.add_argument("--argos", action="store_true", help="Gera o PDF do relatório Argos")
     pdf.add_argument("--segtrack", action="store_true", help="Gera o PDF do relatório Segtrack")
     pdf.add_argument("--unificado", action="store_true", help="Gera o PDF da frota e rotas do dia (3 empresas)")
+    pdf.add_argument("--turno", choices=["diurno", "noturno"], default=None)
 
     argos = sub.add_parser("argos-rotas", help="Extrai a frota e o rastreio do Argos")
     argos.add_argument("--data", help="Data no formato YYYY-MM-DD (padrão: hoje)")
@@ -187,7 +188,9 @@ def main(argv: list[str] | None = None) -> None:
         elif args.segtrack:
             pasta = settings.output_dir / "segtrack" / args.data
         elif args.unificado:
-            pasta = settings.output_dir / "unificado" / args.data
+            from .pdf_cache import resolver_trabalho
+
+            pasta = resolver_trabalho(settings.output_dir / "unificado" / args.data, getattr(args, "turno", None))
         else:
             pasta = settings.output_dir / "rotas" / args.data
         caminho = gerar_pdf_dia(pasta)

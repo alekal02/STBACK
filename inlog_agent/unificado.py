@@ -1318,6 +1318,10 @@ def gerar_relatorio_setores(
         },
     }
     write_json(pasta / "relatorio.json", payload)
+    if pedido in {"diurno", "noturno"}:
+        from .pdf_cache import espelhar_turno
+
+        espelhar_turno(pasta, pedido)
     progress(
         f"Pronto: {payload['feitas']} feitas, {payload['parciais']} parciais, "
         f"{payload['apoios']} apoios, {payload['nao_feitas']} da grade ainda sem coleta"
@@ -1496,6 +1500,10 @@ def executar_coleta_do_dia(
     payload["falhas"] = falhas
     pasta = settings.output_dir / "unificado" / dia.isoformat()
     write_json(pasta / "relatorio.json", payload)
+    if (turno or "").strip().lower() in {"diurno", "noturno"}:
+        from .pdf_cache import espelhar_turno
+
+        espelhar_turno(pasta, turno)
     if falhas:
         progress("Atenção: " + " · ".join(f"{k}: {v}" for k, v in falhas.items()))
     return payload

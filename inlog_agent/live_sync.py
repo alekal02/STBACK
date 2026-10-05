@@ -11,7 +11,7 @@ import json
 import os
 import threading
 import time
-from datetime import date, datetime, time as hora, timedelta
+from datetime import date, datetime, time as hora, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -39,6 +39,17 @@ GPS_S = 120
 ATRASO_S = 15 * 60
 _RECON_ESPERA_S = (0, 180, 480, 900)
 _CICLOS = 0
+try:
+    from zoneinfo import ZoneInfo
+
+    _BRT = ZoneInfo("America/Sao_Paulo")
+except Exception:
+    _BRT = timezone(timedelta(hours=-3))
+
+
+def agora_brt() -> datetime:
+    """Relógio do turno. No Render o processo está em UTC; a operação é em Brasília."""
+    return datetime.now(_BRT).replace(tzinfo=None)
 
 
 def ocupada() -> bool:
@@ -62,7 +73,7 @@ def espera_reconstrucao(tentativas: int) -> int:
 
 
 def turno_operacional(agora: datetime | None = None) -> tuple[date, str]:
-    momento = agora or datetime.now()
+    momento = agora or agora_brt()
     if momento.hour >= 19:
         return momento.date(), "noturno"
     if momento.hour < 6:
@@ -71,7 +82,7 @@ def turno_operacional(agora: datetime | None = None) -> tuple[date, str]:
 
 
 def janela_ainda_aberta(dia: date, turno: str, agora: datetime | None = None) -> bool:
-    momento = agora or datetime.now()
+    momento = agora or agora_brt()
     if turno == "noturno":
         fim = datetime.combine(dia + timedelta(days=1), hora(5, 59, 59))
     else:
@@ -121,7 +132,7 @@ def codigos_com_ponto_novo(
 
 
 def classificar_telemetria(ultimo: str | None, agora: datetime | None = None) -> str:
-    momento = agora or datetime.now()
+    momento = agora or agora_brt()
     lido = _parse_ts(ultimo or "")
     if lido is None:
         return "sem_comunicacao"
@@ -279,7 +290,7 @@ def ciclo_gps(
 
     pedido = (turno or "").strip().lower()
     dia = parse_data(data) or date.today()
-    momento = agora or datetime.now()
+    momento = agora or agora_brt()
     con = conectar()
     try:
         _importar_json_se_vazio(con, output_dir, dia, pedido)
@@ -461,7 +472,7 @@ def ciclo_posicao(
 
     pedido = (turno or "").strip().lower()
     dia = parse_data(data) or date.today()
-    momento = agora or datetime.now()
+    momento = agora or agora_brt()
     con = conectar()
     try:
         if not turno_existe(con, dia.isoformat(), pedido):

@@ -4,7 +4,7 @@ import math
 from typing import Any, Iterable
 
 from pyproj import Transformer
-from shapely import contains_xy, covers_xy
+from shapely import contains_xy, covers, points
 from shapely.geometry import LineString, MultiPoint, Point
 from shapely.ops import linemerge, unary_union
 
@@ -427,7 +427,10 @@ def passagens_na_rota(
     if not bruto:
         return []
     try:
-        mascara = covers_xy(geom, [xy[0] for _, _, xy in bruto], [xy[1] for _, _, xy in bruto])
+        mascara = covers(
+            geom,
+            points([xy[0] for _, _, xy in bruto], [xy[1] for _, _, xy in bruto]),
+        )
     except Exception:
         mascara = [False] * len(bruto)
     itens: list[tuple[datetime | None, dict[str, Any], tuple[float, float], bool]] = [

@@ -505,20 +505,9 @@ def write_mapa_html(
       const idx = indiceRota(codigo);
       if (idx >= 0) focar(idx);
     }}
-    const marcasVivas = {{}};
     window.addEventListener("message", (ev) => {{
       const d = ev.data || {{}};
       if (d.tipo === "focar-rota") focarCodigo(d.codigo);
-      if (d.tipo === "posicoes" && Array.isArray(d.lista)) {{
-        d.lista.forEach((item) => {{
-          if (!item || item.lat == null || item.lon == null) return;
-          const chave = String(item.placa || "");
-          if (!chave) return;
-          const ll = [Number(item.lat), Number(item.lon)];
-          if (marcasVivas[chave]) marcasVivas[chave].setLatLng(ll);
-          else marcasVivas[chave] = L.circleMarker(ll, {{ radius: 7, color: "#fff", weight: 2, fillColor: "#12232e", fillOpacity: 1 }}).addTo(mapa).bindTooltip(chave, {{ permanent: false }});
-        }});
-      }}
     }});
     const hash = (location.hash || "").replace(/^#/, "");
     if (hash) focarCodigo(hash);

@@ -357,48 +357,6 @@ def analisar_setores(
     return saida
 
 
-def analisar_codigos(
-    dia: date,
-    caminhoes: list[dict[str, Any]],
-    codigos: set[str],
-    turno: str | None = None,
-) -> list[dict[str, Any]]:
-    """O mesmo cálculo de analisar_setores, só nos códigos que receberam GPS novo."""
-    pedidos = {str(codigo or "").upper() for codigo in codigos if str(codigo or "").strip()}
-    if not pedidos:
-        return []
-    pedido = (turno or "").strip().lower()
-    todos = []
-    for setor in carregar_setores(None):
-        codigo = str(setor.get("codigo") or "").upper()
-        if codigo not in pedidos:
-            continue
-        freq = str(setor.get("frequencia") or "")
-        if not _freq_do_dia(freq, dia):
-            continue
-        if pedido in {"diurno", "noturno"} and not _casa_turno(freq, pedido):
-            continue
-        todos.append(setor)
-    for cam in caminhoes:
-        cam["_pares"] = preparar_pontos(cam.get("pontos") or [])
-        cam["_bbox"] = _bbox_pontos(cam.get("pontos") or [])
-    saida: list[dict[str, Any]] = []
-    trabalhadores = min(_trabalhadores_analise(), max(1, len(todos)))
-    if not todos:
-        return []
-
-    def _uma(setor: dict[str, Any]) -> dict[str, Any]:
-        row = _analisar_setor(setor, caminhoes, dia)
-        row["grade_do_dia"] = _freq_do_dia(str(setor.get("frequencia") or ""), dia)
-        return row
-
-    with ThreadPoolExecutor(max_workers=trabalhadores) as pool:
-        for row in pool.map(_uma, todos):
-            saida.append(row)
-    saida.sort(key=lambda row: str(row.get("codigo") or ""))
-    return saida
-
-
 def _passou_no_setor(dentro: list, zona: list, km_zona: float) -> bool:
     """GPS no polígono (ou via interna), não no vizinho. 3 pulsos dentro = passagem certa."""
     if len(dentro) >= PASSAGEM_PTS_DENTRO:

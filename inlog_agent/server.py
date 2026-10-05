@@ -363,6 +363,33 @@ def _arquivos_publicos(output_dir: Path, pasta: Path | None) -> list[dict[str, s
     return itens
 
 
+def _rotas_painel(pasta: Path | None) -> list[dict[str, Any]]:
+    if not pasta:
+        return []
+    arq = pasta / "relatorio-diario.json"
+    if not arq.is_file():
+        return []
+    try:
+        dados = json.loads(arq.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    saida: list[dict[str, Any]] = []
+    for row in dados.get("linhas") or []:
+        setor = str(row.get("Setor") or "")
+        achado = re.search(r"\b(\d{2}[A-Z]{2,4})\b", setor, re.I)
+        saida.append(
+            {
+                "codigo": achado.group(1).upper() if achado else "",
+                "setor": setor,
+                "status": str(row.get("Status") or ""),
+                "percentual": str(row.get("% Concluída") or ""),
+                "placa": str(row.get("Placa") or ""),
+                "horario": str(row.get("Horário") or ""),
+            }
+        )
+    return saida
+
+
 def status_payload(
     data: str | None = None,
     data_argos: str | None = None,
@@ -523,6 +550,7 @@ def status_payload(
         "unificado_apoios": uni_rel.get("apoios"),
         "unificado_nao_feitas": uni_rel.get("nao_feitas"),
         "unificado_fontes": uni_rel.get("fontes") or {},
+        "unificado_rotas": _rotas_painel(pasta_uni),
         "job": JOB.snapshot(),
         "chatbot_envio": chatbot_envio_publico(),
     }

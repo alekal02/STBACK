@@ -135,7 +135,8 @@ def diagnostico() -> dict[str, Any]:
                 """
                 SELECT data, turno, ultima_sincronizacao, falha, telemetria,
                        reconstrucao_em, reconstrucao_tentativas, reconstrucao_duracao_s,
-                       reconstrucao_memoria_mb, reconstrucao_pontos
+                       reconstrucao_memoria_mb, reconstrucao_pontos,
+                       situacao, consolidar_ate
                 FROM turno
                 WHERE data = ? AND turno = ?
                 """,
@@ -146,9 +147,15 @@ def diagnostico() -> dict[str, Any]:
                 info["turno"] = turno_op
                 info["pontos"] = 0
                 info["rotas"] = 0
-                info["modo"] = "reconstrucao"
                 info["ultimo_sync_hora"] = ""
                 info["ultimo_gps_hora"] = ""
+                info["veiculos"] = 0
+                info["veiculos_com_cursor"] = 0
+                info["situacao_turno"] = ""
+                info["consolidar_ate"] = ""
+                from .live_turno import situacao_pelo_relogio
+
+                info["situacao_turno"] = situacao_pelo_relogio(dia_op, turno_op) or "ABERTO"
             if row and row["ultima_sincronizacao"]:
                 info["ultimo_sync"] = str(row["ultima_sincronizacao"])
             if row:
@@ -205,13 +212,30 @@ def diagnostico() -> dict[str, Any]:
 
                 info["rotas"] = len(rotas)
                 info["resumo"] = _resumo(rotas)
-                info["modo"] = (
-                    "incremental"
-                    if info["veiculos"] and info["veiculos"] == info["veiculos_com_cursor"]
-                    else "reconstrucao"
-                )
+                info["situacao_turno"] = str(row["situacao"] or "")
+                info["consolidar_ate"] = str(row["consolidar_ate"] or "")
                 info["ultimo_sync_hora"] = _hora_diag(info.get("ultimo_sync") or "")
                 info["ultimo_gps_hora"] = _hora_diag(info.get("ultimo_gps") or "")
+            from .live_sync import metricas_ciclo, reconstruindo
+
+            info["placas_com_cursor"] = int(info.get("veiculos_com_cursor") or 0)
+            info["placas_sem_cursor"] = max(0, int(info.get("veiculos") or 0) - info["placas_com_cursor"])
+            info["modo"] = "reconstrucao" if reconstruindo() else "incremental"
+            info.update(metricas_ciclo())
+            from .live_turno import candidatos
+
+            fechando = [item for item in candidatos() if item[0] == "FINALIZANDO"]
+            info["turno_finalizando"] = ""
+            if fechando:
+                _sit, dia_f, turno_f = fechando[0]
+                extra = con.execute(
+                    "SELECT situacao, consolidar_ate FROM turno WHERE data = ? AND turno = ?",
+                    (dia_f.isoformat(), turno_f),
+                ).fetchone()
+                if extra is not None:
+                    info["turno_finalizando"] = f"{dia_f.isoformat()} {turno_f}"
+                    info["situacao_finalizando"] = str(extra["situacao"] or "")
+                    info["consolidar_ate_finalizando"] = str(extra["consolidar_ate"] or "")
             caminho = Path(info["banco"])
             tamanho = 0
             for extra in (caminho, Path(str(caminho) + "-wal"), Path(str(caminho) + "-shm")):
@@ -320,10 +344,33 @@ def _schema(con: sqlite3.Connection) -> None:
         "reconstrucao_duracao_s": "REAL NOT NULL DEFAULT 0",
         "reconstrucao_memoria_mb": "REAL NOT NULL DEFAULT 0",
         "reconstrucao_pontos": "INTEGER NOT NULL DEFAULT 0",
+        "situacao": "TEXT NOT NULL DEFAULT ''",
+        "consolidar_ate": "TEXT NOT NULL DEFAULT ''",
+        "aberto_em": "TEXT NOT NULL DEFAULT ''",
+        "fechado_em": "TEXT NOT NULL DEFAULT ''",
+        "fechado_origem": "TEXT NOT NULL DEFAULT ''",
+        "primeiro_gps": "TEXT NOT NULL DEFAULT ''",
+        "ultimo_gps_turno": "TEXT NOT NULL DEFAULT ''",
+        "resumo_json": "TEXT NOT NULL DEFAULT ''",
     }
     for nome, tipo in extras.items():
         if nome not in colunas:
             con.execute(f"ALTER TABLE turno ADD COLUMN {nome} {tipo}")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS turno_evento (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            turno TEXT NOT NULL,
+            acao TEXT NOT NULL,
+            quando TEXT NOT NULL,
+            origem TEXT NOT NULL DEFAULT '',
+            usuario TEXT,
+            antes TEXT NOT NULL DEFAULT '',
+            depois TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     colunas_rota = {str(row[1]) for row in con.execute("PRAGMA table_info(rota)")}
     extras_rota = {
         "entrada_lat": "REAL",
@@ -338,6 +385,10 @@ def _schema(con: sqlite3.Connection) -> None:
     for nome, tipo in extras_rota.items():
         if nome not in colunas_rota:
             con.execute(f"ALTER TABLE rota ADD COLUMN {nome} {tipo}")
+    con.commit()
+    from .live_turno import classificar_vazios
+
+    classificar_vazios(con)
     con.commit()
 
 
@@ -364,7 +415,7 @@ def gravar_turno(con: sqlite3.Connection, campos: dict[str, Any]) -> None:
             :ultima_sincronizacao, :ultima_fulltrack, :falha, :telemetria, :atualizado_em
         )
         ON CONFLICT(data, turno) DO UPDATE SET
-            aberto = excluded.aberto,
+            aberto = CASE WHEN situacao = 'ENCERRADO' THEN aberto ELSE excluded.aberto END,
             periodo = excluded.periodo,
             hora_inicio = excluded.hora_inicio,
             hora_fim = excluded.hora_fim,
@@ -645,7 +696,8 @@ def atualizar_turno(con: sqlite3.Connection, data: str, turno: str, **campos: An
 
 
 def fechar_turno(con: sqlite3.Connection, data: str, turno: str) -> None:
-    con.execute(
-        "UPDATE turno SET aberto = 0, atualizado_em = ? WHERE data = ? AND turno = ?",
-        (agora_iso(), data, turno),
-    )
+    from datetime import date as data_tipo
+
+    from .live_turno import encerrar_turno
+
+    encerrar_turno(con, data_tipo.fromisoformat(data), turno, "automatico")

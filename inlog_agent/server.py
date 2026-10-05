@@ -1582,6 +1582,25 @@ class Handler(BaseHTTPRequestHandler):
         if acao == "parar":
             self._json(200, cancelar_execucao())
             return
+        if path in {"/api/live-report/encerrar", "/api/live-report/reabrir"}:
+            from .config import load_settings
+            from .live_sync import comando_turno
+
+            corpo = payload if isinstance(payload, dict) else {}
+            acao_turno = "encerrar" if path.endswith("/encerrar") else "reabrir"
+            try:
+                status, resposta = comando_turno(
+                    load_settings().output_dir,
+                    str(corpo.get("data") or ""),
+                    str(corpo.get("turno") or ""),
+                    str(corpo.get("confirmacao") or ""),
+                    acao_turno,
+                )
+            except Exception as exc:
+                self._json(400, {"ok": False, "erro": str(exc)})
+                return
+            self._json(status, resposta)
+            return
         if path == "/api/live-report/sync":
             from .live_report import pedir_atualizacao
 

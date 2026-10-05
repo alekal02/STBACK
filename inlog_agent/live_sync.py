@@ -39,6 +39,13 @@ GPS_S = 120
 ATRASO_S = 15 * 60
 _RECON_ESPERA_S = (0, 180, 480, 900)
 _CICLOS = 0
+_RECONSTRUINDO = False
+_ULTIMO_CICLO_S = 0.0
+_MAIOR_CICLO_S = 0.0
+_ROTAS_CICLO = 0
+_DURACAO_ABERTO_S = 0.0
+_DURACAO_FINALIZANDO_S = 0.0
+ORCAMENTO_S = 90.0
 try:
     from zoneinfo import ZoneInfo
 
@@ -63,6 +70,29 @@ def sincronizacao_ativa() -> bool:
 
 def ciclos_executados() -> int:
     return _CICLOS
+
+
+def reconstruindo() -> bool:
+    return _RECONSTRUINDO
+
+
+def metricas_ciclo() -> dict[str, float | int]:
+    return {
+        "ultimo_ciclo_duracao_s": round(_ULTIMO_CICLO_S, 3),
+        "rotas_recalculadas_ultimo_ciclo": _ROTAS_CICLO,
+        "maior_ciclo_duracao_s": round(_MAIOR_CICLO_S, 3),
+        "duracao_aberto_s": round(_DURACAO_ABERTO_S, 3),
+        "duracao_finalizando_s": round(_DURACAO_FINALIZANDO_S, 3),
+    }
+
+
+def _anotar_ciclo(total: float, rotas: int, aberto_s: float, finalizando_s: float) -> None:
+    global _ULTIMO_CICLO_S, _MAIOR_CICLO_S, _ROTAS_CICLO, _DURACAO_ABERTO_S, _DURACAO_FINALIZANDO_S
+    _ULTIMO_CICLO_S = total
+    _MAIOR_CICLO_S = max(_MAIOR_CICLO_S, total)
+    _ROTAS_CICLO = rotas
+    _DURACAO_ABERTO_S = aberto_s
+    _DURACAO_FINALIZANDO_S = finalizando_s
 
 
 def espera_reconstrucao(tentativas: int) -> int:
@@ -181,6 +211,15 @@ def ler_painel(
         return estado
     cab = view["turno"]
     rotas = view["rotas"]
+    situacao = str(cab["situacao"] or "") if "situacao" in cab.keys() else ""
+    if not situacao:
+        situacao = "ENCERRADO" if not cab["aberto"] else "ABERTO"
+    from .live_turno import resumo_guardado
+
+    resumo = _resumo(rotas)
+    guardado = resumo_guardado(cab["resumo_json"]) if situacao == "ENCERRADO" and "resumo_json" in cab.keys() else None
+    if guardado:
+        resumo = guardado
     atualizado = str(cab["atualizado_em"] or cab["ultima_sincronizacao"] or "")
     falha = str(cab["falha"] or "")
     aviso = ""
@@ -210,8 +249,13 @@ def ler_painel(
         "aviso": aviso,
         "telemetria": str(cab["telemetria"] or ""),
         "aberto": bool(cab["aberto"]),
+        "situacao": situacao,
+        "consolidar_ate": str(cab["consolidar_ate"] or "") if "consolidar_ate" in cab.keys() else "",
+        "fechado_em": str(cab["fechado_em"] or "") if "fechado_em" in cab.keys() else "",
+        "fechado_origem": str(cab["fechado_origem"] or "") if "fechado_origem" in cab.keys() else "",
+        "historico": situacao == "ENCERRADO",
         "mapa_url": _mapa_url(output_dir, pasta),
-        "resumo": _resumo(rotas),
+        "resumo": resumo,
         "rotas": rotas,
         "posicoes": view["posicoes"],
     }
@@ -275,6 +319,50 @@ def pedir(
     return ler_painel(output_dir, data, turno)
 
 
+def comando_turno(
+    output_dir: Path,
+    data: str | None,
+    turno: str | None,
+    confirmacao: str,
+    acao: str,
+) -> tuple[int, dict[str, Any]]:
+    """Fechamento ou reabertura. A confirmação é validada de novo no servidor."""
+    from .config import parse_data
+    from .live_turno import confirmacao_confere, encerrar_turno, reabrir_turno
+
+    dia = parse_data(data)
+    pedido = (turno or "").strip().lower()
+    if dia is None or pedido not in {"diurno", "noturno"}:
+        return 400, {"ok": False, "erro": "Data ou turno inválido."}
+    if not confirmacao_confere(confirmacao, dia, pedido):
+        return 400, {"ok": False, "erro": "Confirme exatamente a data e o turno."}
+    with _SYNC:
+        con = conectar()
+        try:
+            if not con.in_transaction:
+                con.execute("BEGIN IMMEDIATE")
+            if acao == "encerrar":
+                resultado = encerrar_turno(
+                    con,
+                    dia,
+                    pedido,
+                    "manual",
+                    acao="ENCERRAMENTO_MANUAL",
+                )
+            else:
+                resultado = reabrir_turno(con, dia, pedido)
+            con.commit()
+        finally:
+            con.close()
+    if not resultado.get("ok"):
+        status = 409 if resultado.get("codigo") == "historico_antigo" else 400
+        return status, resultado
+    estado = ler_painel(output_dir, dia.isoformat(), pedido)
+    estado["ok"] = True
+    estado["ja_encerrado"] = bool(resultado.get("ja_encerrado"))
+    return 200, estado
+
+
 def ciclo_gps(
     output_dir: Path,
     data: str | None,
@@ -311,15 +399,11 @@ def ciclo_gps(
                 },
             )
             con.commit()
-        cab = con.execute(
-            "SELECT aberto FROM turno WHERE data = ? AND turno = ?",
-            (dia.isoformat(), pedido),
-        ).fetchone()
-        if cab and not cab["aberto"]:
-            return {"novos": 0, "rotas": [], "fechado": True}
-        if not janela_ainda_aberta(dia, pedido, momento):
-            fechar_turno(con, dia.isoformat(), pedido)
-            con.commit()
+        from .live_turno import aplicar_relogio, fim_da_consulta, ponto_pertence, turno_aceita_sync
+
+        aplicar_relogio(con, dia, pedido, momento)
+        con.commit()
+        if not turno_aceita_sync(con, dia, pedido, momento):
             return {"novos": 0, "rotas": [], "fechado": True}
         inicio_turno, _fim = janela_datetime(
             dia,
@@ -382,36 +466,53 @@ def ciclo_gps(
         novos_total = 0
         pontos_novos: list[dict[str, Any]] = []
         falha = ""
-        for placa in placas:
-            cursor = str(placa["last_gps_timestamp"] or "")
-            começo = inicio_da_consulta(cursor, inicio_turno)
-            try:
-                eventos = (buscar_historico or _historico_fulltrack)(
-                    placa["placa"],
-                    str(placa["vehicle_id"] or ""),
-                    começo,
-                    momento,
-                )
-            except Exception as exc:
-                falha = str(exc)
-                continue
-            recebidos = [_ponto_local(item, placa["placa"]) for item in eventos]
-            recebidos = [item for item in recebidos if item]
-            gravados = inserir_pontos(con, dia.isoformat(), pedido, placa["placa"], recebidos)
-            novos_total += gravados
-            if gravados:
-                maior = max(str(item["timestamp"]) for item in recebidos if item.get("timestamp"))
-                marcar_placa(
-                    con,
-                    dia.isoformat(),
-                    pedido,
-                    placa["placa"],
-                    last_gps_timestamp=maior,
-                    telemetria=classificar_telemetria(maior, momento),
-                )
-                for item in recebidos:
-                    if str(item.get("timestamp") or "") > cursor:
-                        pontos_novos.append(item)
+        limite = fim_da_consulta(dia, pedido, momento)
+        global _RECONSTRUINDO
+        if inicio_pesada:
+            _RECONSTRUINDO = True
+        try:
+            for placa in placas:
+                con.commit()
+                if not turno_aceita_sync(con, dia, pedido, momento):
+                    break
+                cursor = str(placa["last_gps_timestamp"] or "")
+                começo = inicio_da_consulta(cursor, inicio_turno)
+                if começo > limite:
+                    continue
+                try:
+                    eventos = (buscar_historico or _historico_fulltrack)(
+                        placa["placa"],
+                        str(placa["vehicle_id"] or ""),
+                        começo,
+                        limite,
+                    )
+                except Exception as exc:
+                    falha = str(exc)
+                    continue
+                recebidos = [_ponto_local(item, placa["placa"]) for item in eventos]
+                recebidos = [
+                    item
+                    for item in recebidos
+                    if item and ponto_pertence(str(item.get("timestamp") or ""), dia, pedido)
+                ]
+                gravados = inserir_pontos(con, dia.isoformat(), pedido, placa["placa"], recebidos)
+                novos_total += gravados
+                if gravados:
+                    maior = max(str(item["timestamp"]) for item in recebidos if item.get("timestamp"))
+                    marcar_placa(
+                        con,
+                        dia.isoformat(),
+                        pedido,
+                        placa["placa"],
+                        last_gps_timestamp=maior,
+                        telemetria=classificar_telemetria(maior, momento),
+                    )
+                    for item in recebidos:
+                        if str(item.get("timestamp") or "") > cursor:
+                            pontos_novos.append(item)
+        finally:
+            if inicio_pesada:
+                _RECONSTRUINDO = False
         caixas = limites if limites is not None else _limites(dia, pedido)
         from .cobertura import _xy
 
@@ -477,15 +578,14 @@ def ciclo_posicao(
     try:
         if not turno_existe(con, dia.isoformat(), pedido):
             return {"ok": False}
-        cab = con.execute(
-            "SELECT aberto FROM turno WHERE data = ? AND turno = ?",
-            (dia.isoformat(), pedido),
-        ).fetchone()
-        if not cab or not cab["aberto"] or not janela_ainda_aberta(dia, pedido, momento):
-            if cab and cab["aberto"] and not janela_ainda_aberta(dia, pedido, momento):
-                fechar_turno(con, dia.isoformat(), pedido)
-                con.commit()
+        from .live_turno import aplicar_relogio, situacao_pelo_relogio, turno_aceita_sync
+
+        aplicar_relogio(con, dia, pedido, momento)
+        con.commit()
+        if not turno_aceita_sync(con, dia, pedido, momento):
             return {"ok": True, "fechado": True}
+        if situacao_pelo_relogio(dia, pedido, momento) != "ABERTO":
+            return {"ok": True, "posicao": False}
         try:
             eventos = (buscar_eventos or _eventos_fulltrack)()
             falha = ""
@@ -547,7 +647,6 @@ def _loop() -> None:
         if ocupada():
             continue
         agora = time.time()
-        dia, pedido = turno_operacional()
         try:
             from .config import load_settings
 
@@ -556,7 +655,7 @@ def _loop() -> None:
             continue
         if agora - ultima_posicao >= POSICAO_S and _entrar():
             try:
-                ciclo_posicao(settings.output_dir, dia.isoformat(), pedido)
+                atender_turnos(settings.output_dir, "posicao")
             except Exception as exc:
                 _avisar_disco(exc)
             finally:
@@ -564,16 +663,60 @@ def _loop() -> None:
             ultima_posicao = time.time()
         if agora - ultima_gps >= GPS_S and _entrar():
             try:
-                ciclo_gps(settings.output_dir, dia.isoformat(), pedido)
+                atender_turnos(settings.output_dir, "gps")
             except Exception as exc:
                 _avisar_disco(exc)
-                try:
-                    _registrar_falha(settings.output_dir, dia.isoformat(), pedido, str(exc))
-                except Exception as falha_registro:
-                    _avisar_disco(falha_registro)
             finally:
                 _sair()
             ultima_gps = time.time()
+
+
+def atender_turnos(
+    output_dir: Path,
+    tipo: str,
+    *,
+    agora: datetime | None = None,
+    ciclo_gps_fn: Callable[..., dict[str, Any]] | None = None,
+    ciclo_posicao_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Um ciclo, uma thread. Primeiro o turno ABERTO. O FINALIZANDO só entra se couber."""
+    from .live_turno import avaliar_persistidos, candidatos, turno_aceita_sync
+
+    momento = agora or agora_brt()
+    con = conectar()
+    try:
+        avaliar_persistidos(con, momento)
+        con.commit()
+        fila = [
+            (sit, dia, turno)
+            for sit, dia, turno in candidatos(momento)
+            if turno_aceita_sync(con, dia, turno, momento)
+        ]
+    finally:
+        con.close()
+    duracao = {"ABERTO": 0.0, "FINALIZANDO": 0.0}
+    ordem: list[str] = []
+    rotas = 0
+    inicio = time.perf_counter()
+    gps = ciclo_gps_fn or ciclo_gps
+    posicao = ciclo_posicao_fn or ciclo_posicao
+    for sit, dia, turno in fila:
+        if sit == "FINALIZANDO" and duracao["ABERTO"] >= ORCAMENTO_S:
+            continue
+        t0 = time.perf_counter()
+        if tipo == "posicao":
+            if sit == "ABERTO":
+                posicao(output_dir, dia.isoformat(), turno, agora=momento)
+                ordem.append(sit)
+        else:
+            resultado = gps(output_dir, dia.isoformat(), turno, agora=momento)
+            rotas += len(resultado.get("rotas") or [])
+            ordem.append(sit)
+        duracao[sit] = time.perf_counter() - t0
+    total = time.perf_counter() - inicio
+    if tipo == "gps":
+        _anotar_ciclo(total, rotas, duracao["ABERTO"], duracao["FINALIZANDO"])
+    return {"ordem": ordem, "duracao": duracao, "total_s": total, "rotas": rotas}
 
 
 def _entrar() -> bool:
@@ -623,8 +766,15 @@ def _registrar_falha(output_dir: Path, data: str | None, turno: str | None, text
 
 def _importar_json_se_vazio(con, output_dir: Path, dia: date, turno: str) -> None:
     from .live_report import montar_estado
+    from .live_turno import situacao_pelo_relogio
 
     if turno_existe(con, dia.isoformat(), turno):
+        atual = con.execute(
+            "SELECT situacao FROM turno WHERE data = ? AND turno = ?",
+            (dia.isoformat(), turno),
+        ).fetchone()
+        if atual is not None and str(atual["situacao"] or "") == "ENCERRADO":
+            return
         _importar_pontos_json(con, output_dir, dia, turno)
         return
     estado = montar_estado(output_dir, dia.isoformat(), turno)
@@ -635,7 +785,7 @@ def _importar_json_se_vazio(con, output_dir: Path, dia: date, turno: str) -> Non
         {
             "data": dia.isoformat(),
             "turno": turno,
-            "aberto": 1 if janela_ainda_aberta(dia, turno) else 0,
+            "aberto": 1 if situacao_pelo_relogio(dia, turno) in {"ABERTO", "FINALIZANDO"} else 0,
             "periodo": estado.get("periodo") or "",
             "hora_inicio": estado.get("hora_inicio") or "",
             "hora_fim": estado.get("hora_fim") or "",

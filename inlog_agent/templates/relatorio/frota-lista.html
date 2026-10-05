@@ -1,0 +1,20 @@
+<section class="page capa">
+  {{HEADER}}
+  <div class="body">
+    <p class="kicker">Frota do dia</p>
+    <h1>Caminhões com GPS</h1>
+    <div class="regra"></div>
+    <p class="sub">Toda a frota rastreada neste dia nas três empresas. Pontos = amostras de GPS no período.</p>
+    <table class="tabela-densa">
+      <thead>
+        <tr>
+          <th>Empresa</th><th>Caminhão</th><th>Placa</th><th>Inlog</th><th>Pontos GPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{LINHAS}}
+      </tbody>
+    </table>
+  </div>
+  <footer class="rodape"><span>Fonte: {{FONTE}} · gerado em {{GERADO}} · uso interno</span><span>{{DIA}}</span></footer>
+</section>

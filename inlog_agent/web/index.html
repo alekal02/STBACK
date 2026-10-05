@@ -1,0 +1,2265 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sala técnica</title>
+  <script src="config.js"></script>
+  <style>
+    :root {
+      --ink: #102028;
+      --navy: #12232e;
+      --sidebar: #0c1820;
+      --teal: #0f7a80;
+      --teal-soft: #e8f5f5;
+      --bg: #eef1f4;
+      --card: #ffffff;
+      --line: #e1e7eb;
+      --text: #14242c;
+      --muted: #5d717c;
+      --argos: #1b8a5a;
+      --segtrack: #c56a1a;
+      --ok: #1b8a5a;
+      --warn: #c56a1a;
+      --err: #b34145;
+      --shadow: 0 1px 2px #1020280d, 0 8px 24px #10202808;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; overflow-anchor: none; }
+    body {
+      margin: 0;
+      font: 14.5px/1.45 "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .shell { display: flex; min-height: 100%; }
+    .sidebar {
+      width: 248px;
+      flex: none;
+      background: var(--sidebar);
+      color: #d7e4ea;
+      padding: 20px 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 0 8px; }
+    .marca {
+      width: 42px;
+      height: 42px;
+      border-radius: 11px;
+      background: linear-gradient(160deg, #1aa3aa, #0d6c71);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      letter-spacing: .4px;
+      font-size: 15px;
+    }
+    .brand strong { display: block; color: #fff; font-size: 17px; letter-spacing: -.2px; }
+    .brand small { color: #8eacb7; font-size: 12px; }
+    .tabs { display: flex; flex-direction: column; gap: 4px; }
+    .nav-grupo {
+      margin: 12px 8px 4px;
+      color: #6e8b96;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .8px;
+      text-transform: uppercase;
+    }
+    .tabs > button {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: #b7c9d1;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-weight: 650;
+    }
+    .tabs > button:hover { filter: none; background: #17303b; color: #fff; }
+    .tabs > button.ativo { background: #173844; color: #fff; border-color: #245261; }
+    .tabs > button.ativo.inlog { box-shadow: inset 3px 0 0 var(--teal); }
+    .tabs > button.ativo.argos { box-shadow: inset 3px 0 0 var(--argos); }
+    .tabs > button.ativo.segtrack { box-shadow: inset 3px 0 0 var(--segtrack); }
+    .tabs > .campo-side {
+      margin: 0 0 4px;
+    }
+    #sel-empresa.emp-inlog { box-shadow: inset 3px 0 0 var(--teal); }
+    #sel-empresa.emp-argos { box-shadow: inset 3px 0 0 var(--argos); }
+    #sel-empresa.emp-segtrack { box-shadow: inset 3px 0 0 var(--segtrack); }
+    .sidebar-base { margin-top: auto; padding: 0 8px; display: grid; gap: 8px; }
+    .sidebar-base small { color: #7f97a2; font-size: 11px; letter-spacing: .3px; }
+    .chatbot-box {
+      margin-top: 4px;
+      padding-top: 10px;
+      border-top: 1px solid #245261;
+    }
+    .chatbot-box summary {
+      cursor: pointer;
+      color: #8ee0d6;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      list-style: none;
+    }
+    .chatbot-box .campo-side { margin-top: 6px; font-size: 12px; }
+    .chatbot-box .chk-side {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      color: #b7c9d1;
+      font-size: 12px;
+      margin: 8px 0 4px;
+    }
+    .chatbot-box button {
+      width: 100%;
+      margin-top: 6px;
+      font-size: 12px;
+      padding: 7px 8px;
+      background: #17303b;
+      color: #d7e4ea;
+      border: 1px solid #245261;
+      border-radius: 8px;
+    }
+    .chatbot-box button.principal {
+      background: #0f7a80;
+      color: #fff;
+      border-color: #0f7a80;
+    }
+    .chatbot-box button.desligar {
+      background: #5c2a2a;
+      color: #ffd4d4;
+      border-color: #8a3d3d;
+    }
+    #chatbot-qr {
+      display: none;
+      width: 100%;
+      max-width: 188px;
+      margin: 8px auto 0;
+      border-radius: 10px;
+      background: #fff;
+      padding: 6px;
+    }
+    #chatbot-qr.visivel { display: block; }
+    #chatbot-msg { color: #9cb8c2; font-size: 11px; line-height: 1.45; margin-top: 8px; }
+    .sidebar-rota { padding: 0 8px; display: grid; gap: 8px; }
+    .tabs .sidebar-rota { margin: 4px 0 8px; padding: 0; }
+    .sidebar-rota > small {
+      color: #7f97a2;
+      font-size: 11px;
+      letter-spacing: .3px;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .campo-side {
+      width: 100%;
+      background: #17303b;
+      border: 1px solid #245261;
+      color: #fff;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+    .campo-side::placeholder { color: #7f97a2; }
+    select.campo-side {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238ee0d6' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 28px;
+    }
+    select.campo-side option { color: #12232e; background: #fff; }
+    .sidebar-rota button {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .sidebar-rota button.sec {
+      background: #17303b;
+      color: #d7e4ea;
+      border: 1px solid #245261;
+    }
+    .rota-info { color: #9cb8c2; font-size: 12px; line-height: 1.4; }
+    #rota-caminhoes { display: grid; gap: 5px; max-height: 260px; overflow: auto; }
+    .cam-row {
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      gap: 7px;
+      align-items: baseline;
+      color: #d7e4ea;
+      font-size: 12px;
+    }
+    .cam-row i { width: 10px; height: 10px; border-radius: 2px; align-self: center; }
+    .cam-row small { color: #7f97a2; }
+    .app { flex: 1; min-width: 0; overflow-anchor: none; display: flex; flex-direction: column; }
+    .topbar {
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: 16px 24px 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 8;
+    }
+    .topbar .kicker {
+      margin: 0 0 3px;
+      font-size: 11px;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      color: var(--teal);
+      font-weight: 700;
+    }
+    .topbar h1 { margin: 0; font-size: 22px; letter-spacing: -.3px; color: var(--ink); }
+    .topbar .desc { margin: 5px 0 0; color: var(--muted); font-size: 13px; max-width: 560px; }
+    .topbar-acoes {
+      display: none;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    body[data-pagina="uni"] .barra-uni,
+    body[data-pagina="inlog"] .barra-inlog,
+    body[data-pagina="argos"] .barra-argos,
+    body[data-pagina="segtrack"] .barra-segtrack { display: flex; }
+    .ciclo-avancado {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .ciclo-avancado summary {
+      cursor: pointer;
+      list-style: none;
+      font-weight: 650;
+      color: var(--teal);
+    }
+    .topbar-lado { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; max-width: 100%; }
+    .number { display: none; }
+    main.painel { padding: 16px 24px 36px; display: none; gap: 14px; }
+    main.painel.ativo { display: grid; }
+    main[hidden] { display: none !important; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .card h2 { margin: 0 0 10px; font-size: 15px; display: flex; align-items: center; color: var(--ink); }
+    .card.visor { padding: 12px 14px 14px; }
+    .vistas {
+      display: flex;
+      gap: 4px;
+      background: #eef3f5;
+      border-radius: 10px;
+      padding: 4px;
+      width: fit-content;
+    }
+    .vistas button {
+      background: transparent;
+      color: var(--navy);
+      padding: 7px 14px;
+      font-size: 13px;
+    }
+    .vistas button.ativo { background: #fff; color: var(--teal); box-shadow: 0 1px 2px #10202814; }
+    .vista { display: none; }
+    .vista.ativo { display: block; }
+    .number {
+      display: inline-flex;
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      align-items: center;
+      justify-content: center;
+      background: var(--teal-soft);
+      color: var(--teal);
+      margin-right: 10px;
+      font-size: 12px;
+      font-weight: 700;
+      flex: none;
+    }
+    .status { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); margin-top: 12px; }
+    .status span {
+      background: #f4f7f8;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+    }
+    .status b { color: var(--text); font-weight: 650; }
+    .acoes { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; align-items: center; }
+    button, .campo {
+      border-radius: 8px;
+      border: 1px solid #c8d4da;
+      background: #fff;
+      color: var(--text);
+      padding: 9px 13px;
+      font: inherit;
+    }
+    button {
+      cursor: pointer;
+      background: var(--teal);
+      border-color: transparent;
+      color: #fff;
+      font-weight: 650;
+    }
+    button:hover { filter: brightness(.97); }
+    button.sec { background: #eef3f5; color: var(--navy); }
+    button.principal { padding: 10px 16px; font-size: 14px; }
+    button.noturno { background: #24324a; }
+    button.argos { background: var(--argos); color: #fff; }
+    button.segtrack { background: var(--segtrack); color: #fff; }
+    button.parar { background: #a53d40; color: #fff; }
+    button:disabled { opacity: .45; cursor: default; }
+    .chk {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      user-select: none;
+    }
+    .menu { position: relative; }
+    .menu-lista {
+      display: none;
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      min-width: 200px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 6px;
+      z-index: 20;
+    }
+    .menu.aberto .menu-lista { display: grid; gap: 2px; }
+    .menu-lista button {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: var(--text);
+      font-weight: 600;
+      padding: 8px 10px;
+    }
+    .menu-lista button:hover { background: var(--teal-soft); color: var(--teal); }
+    .log-caixa { margin-top: 10px; }
+    .log-caixa summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .campo { width: 168px; }
+    .campo.hora { width: 112px; }
+    .campo:focus { outline: 2px solid #9fd4d6; outline-offset: 1px; }
+    .data-br {
+      position: relative;
+      width: 168px;
+      flex: none;
+    }
+    .data-br .data-texto {
+      width: 100%;
+      padding-right: 36px;
+    }
+    .data-br .data-picker {
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 36px;
+      height: 100%;
+      padding: 0;
+      margin: 0;
+      border: 0;
+      background: transparent;
+      color: transparent;
+    }
+    .data-br .data-picker::-webkit-datetime-edit,
+    .data-br .data-picker::-webkit-datetime-edit-fields-wrapper,
+    .data-br .data-picker::-webkit-datetime-edit-text,
+    .data-br .data-picker::-webkit-datetime-edit-month-field,
+    .data-br .data-picker::-webkit-datetime-edit-day-field,
+    .data-br .data-picker::-webkit-datetime-edit-year-field,
+    .data-br .data-picker::-webkit-inner-spin-button {
+      display: none;
+    }
+    .data-br .data-picker::-webkit-calendar-picker-indicator {
+      opacity: .75;
+      cursor: pointer;
+      width: 16px;
+      height: 16px;
+      margin-right: 8px;
+    }
+    .ciclo {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: #f6f8f9;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .ciclo-lado { display: grid; gap: 4px; }
+    .ciclo-lado .linha { display: flex; gap: 6px; align-items: center; }
+    .hora-lbl { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
+    .hora-lbl.ate { align-self: end; padding-bottom: 10px; text-transform: none; letter-spacing: 0; font-size: 12px; }
+    .andamento { margin-top: 14px; }
+    .andamento-topo { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+    .andamento-topo span { color: var(--text); font-size: 13px; }
+    .andamento-topo strong { color: var(--teal); font-size: 13px; }
+    .track { height: 8px; background: #e8eff2; border-radius: 6px; overflow: hidden; }
+    .fill { width: 0; height: 100%; background: var(--teal); transition: width .35s ease; }
+    #log, #log-argos, #log-segtrack, #log-uni {
+      min-height: 168px;
+      max-height: 280px;
+      overflow: auto;
+      overflow-anchor: none;
+      white-space: pre-wrap;
+      font: 12px/1.65 Consolas, "Cascadia Mono", monospace;
+      background: #0f1c24;
+      border-radius: 10px;
+      padding: 13px 14px;
+      color: #9ec3c6;
+    }
+    iframe {
+      width: 100%;
+      min-height: 420px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+    }
+    #mapa, #argos-mapa, #segtrack-mapa, #unificado-mapa { height: 68vh; min-height: 540px; }
+    #diario, #argos-diario, #segtrack-diario, #unificado-diario { min-height: 520px; }
+    .titulo-linha {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .titulo-linha h2 { margin: 0; }
+    .legenda { color: var(--muted); font-size: 13px; }
+    .dias { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+    .dias button {
+      background: #eef3f5;
+      color: var(--navy);
+      font-weight: 600;
+      padding: 6px 10px;
+    }
+    .dias button.ativo { background: var(--teal); color: #fff; }
+    #dias-argos button.ativo { background: var(--argos); color: #fff; }
+    #dias-segtrack button.ativo { background: var(--segtrack); color: #fff; }
+    .badge {
+      display: inline-flex;
+      width: fit-content;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      text-transform: uppercase;
+      border: 1px solid #34515c;
+      background: #16303a;
+      color: #9cb8c2;
+    }
+    .badge.ok { border-color: #2f7c74; color: #8ee0d6; }
+    .badge.run { border-color: #8a6b2b; color: #f0d48a; }
+    .badge.err { border-color: #8a3d3d; color: #f0a8a6; }
+    a { color: var(--teal); }
+    .hint { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 4px; }
+    #arquivos-uni, #arquivos, #arquivos-argos, #arquivos-segtrack { display: grid; gap: 6px; }
+    #arquivos-uni a, #arquivos a, #arquivos-argos a, #arquivos-segtrack a {
+      display: inline-block;
+      padding: 7px 10px;
+      background: #f6f8f9;
+      border-radius: 8px;
+      text-decoration: none;
+    }
+    @media (max-width: 860px) {
+      .shell { display: block; }
+      .sidebar { width: auto; }
+      .tabs { flex-direction: row; flex-wrap: wrap; }
+      .tabs > button { width: auto; }
+      .topbar { position: static; }
+    }
+  </style>
+</head>
+<body data-pagina="uni">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="marca">ST</span>
+        <div>
+          <strong>Sala técnica</strong>
+          <small>Aparecida de Goiânia</small>
+        </div>
+      </div>
+      <nav class="tabs">
+        <button type="button" id="tab-uni" class="nav-item ativo" onclick="mostrarAba('uni')">Relatório do dia</button>
+        <p class="nav-grupo">Uma rota</p>
+        <div class="sidebar-rota" style="padding:0; gap:8px;">
+          <select id="filtro-rota" class="campo-side" title="Rotas da grade do dia">
+            <option value="">Escolha a rota</option>
+          </select>
+          <small class="rota-info">Ao escolher, consulta os pulsos e desenha a trajetória dentro da rota.</small>
+          <button type="button" id="btn-ver-rota" onclick="verRota(true)">Ver PDF desta rota</button>
+          <a id="rota-pdf-link" class="rota-info" hidden target="_blank" rel="noopener">Abrir PDF da rota</a>
+          <button type="button" class="sec" id="btn-mapa-dia" onclick="voltarMapaDia()" hidden>Voltar ao mapa do dia</button>
+          <div id="rota-info" class="rota-info"></div>
+          <div id="rota-caminhoes"></div>
+        </div>
+        <p class="nav-grupo">Por empresa</p>
+        <select id="sel-empresa" class="campo-side" title="GPS de uma empresa só" onchange="abrirEmpresa(this.value)">
+          <option value="">Escolher...</option>
+          <option value="inlog">Inlog</option>
+          <option value="argos">Argos</option>
+          <option value="segtrack">Segtrack</option>
+        </select>
+      </nav>
+      <div class="sidebar-base">
+        <span id="badge" class="badge ok">parado</span>
+        <small>Diurno 06:00–18:59 · Noturno 19:00–05:59</small>
+        <details class="chatbot-box" id="chatbot-box">
+          <summary>Chatbot WhatsApp</summary>
+          <img id="chatbot-qr" alt="QR do WhatsApp" />
+          <select class="campo-side" id="chatbot-grupo" title="Grupo que recebe o relatório">
+            <option value="">Escolher grupo...</option>
+          </select>
+          <label class="chk-side"><input type="checkbox" id="chatbot-auto" checked /> Enviar PDF ao gerar relatório</label>
+          <label class="chk-side"><input type="checkbox" id="chatbot-2h" /> A cada 2 h gera o relatório e envia no grupo</label>
+          <button type="button" class="principal" id="btn-chatbot-sessao" onclick="alternarSessaoChatbot()">Conectar WhatsApp</button>
+          <button type="button" onclick="salvarChatbot()">Salvar grupo</button>
+          <button type="button" class="acao-job" id="btn-chatbot-enviar" onclick="enviarChatbot()">Gerar e enviar no grupo</button>
+          <small id="chatbot-msg">Conecte o WhatsApp, escolha o grupo e clique em Gerar e enviar no grupo. Esta mensagem mostra o retorno: aviso enviado, PDF enviado ou o erro. Escrever no WhatsApp nao gera o relatorio.</small>
+        </details>
+      </div>
+    </aside>
+    <div class="app">
+      <header class="topbar">
+        <div>
+          <p class="kicker" id="kicker-pagina">Relatório</p>
+          <h1 id="titulo-pagina">Relatório do dia</h1>
+          <p class="desc" id="desc-pagina">Escolha o dia e gere o relatório diurno ou o noturno.</p>
+          <p class="hint" id="hint-ciclo-uni">Diurno 06:00–18:59. Noturno a partir das 19:00 até 05:59, com os polígonos do dia e a trajetória dentro deles.</p>
+        </div>
+        <div class="topbar-lado">
+          <div class="ciclo">
+            <div class="ciclo-lado">
+              <span class="hora-lbl">Dia da coleta</span>
+              <div class="linha">
+                <input class="campo" id="data-uni" type="date" title="Dia da coleta" />
+              </div>
+            </div>
+            <details class="ciclo-avancado">
+              <summary>Horário (6h → 5h59)</summary>
+              <div class="linha" style="margin-top:8px">
+                <input class="campo hora" id="hora-ini-uni" type="time" value="06:00" step="60" title="Hora inicial" />
+                <span class="hora-lbl ate">até</span>
+                <input class="campo" id="data-fim-uni" type="date" title="Data final" />
+                <input class="campo hora" id="hora-fim-uni" type="time" value="05:59" step="60" title="Hora final" />
+              </div>
+            </details>
+          </div>
+          <div class="topbar-acoes barra-uni">
+            <label class="chk"><input type="checkbox" id="chk-so-gps" /> Já tenho o GPS</label>
+            <button type="button" class="principal acao-job" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'diurno')" title="06:00 até 18:59, polígonos diurnos do dia">Relatório diurno</button>
+            <button type="button" class="principal noturno acao-job" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'noturno')" title="19:00 até 05:59, polígonos noturnos do dia">Relatório noturno</button>
+            <div class="menu">
+              <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
+              <div class="menu-lista">
+                <button type="button" id="btn-pdf-uni" class="acao-job" onclick="baixarPdfUnificado()">PDF do relatório</button>
+                <button type="button" id="btn-word-uni" class="acao-job" onclick="baixarWordUnificado()">Word</button>
+              </div>
+            </div>
+            <button type="button" class="parar" onclick="pararGeracao('log-uni')">Parar</button>
+          </div>
+          <div class="topbar-acoes barra-inlog">
+            <input class="campo" id="veiculos" placeholder="Frota (CCL)" value="CCL" title="Filtro da frota Inlog" />
+            <button type="button" class="acao-job" onclick="rodar('rotas')">Buscar GPS Inlog</button>
+            <div class="menu">
+              <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
+              <div class="menu-lista">
+                <button type="button" id="btn-pdf" class="acao-job" onclick="baixarPdf()">PDF</button>
+                <button type="button" id="btn-gpkg" class="acao-job" onclick="baixarGpkg()">GPKG</button>
+              </div>
+            </div>
+            <button type="button" class="parar" onclick="pararGeracao('log')">Parar</button>
+          </div>
+          <div class="topbar-acoes barra-argos">
+            <button type="button" class="argos acao-job" onclick="rodarArgos('argos-rotas')">Buscar GPS Argos</button>
+            <div class="menu">
+              <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
+              <div class="menu-lista">
+                <button type="button" id="btn-pdf-argos" class="acao-job" onclick="baixarPdfArgos()">PDF</button>
+                <button type="button" id="btn-gpkg-argos" class="acao-job" onclick="baixarGpkgArgos()">GPKG</button>
+              </div>
+            </div>
+            <button type="button" class="parar" onclick="pararGeracao('log-argos')">Parar</button>
+          </div>
+          <div class="topbar-acoes barra-segtrack">
+            <button type="button" class="segtrack acao-job" onclick="rodarSegtrack('segtrack-rotas')">Buscar GPS Segtrack</button>
+            <div class="menu">
+              <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
+              <div class="menu-lista">
+                <button type="button" id="btn-pdf-segtrack" class="acao-job" onclick="baixarPdfSegtrack()">PDF</button>
+                <button type="button" id="btn-gpkg-segtrack" class="acao-job" onclick="baixarGpkgSegtrack()">GPKG</button>
+              </div>
+            </div>
+            <button type="button" class="parar" onclick="pararGeracao('log-segtrack')">Parar</button>
+          </div>
+        </div>
+      </header>
+
+  <main id="aba-uni" class="painel ativo">
+    <section class="card">
+      <div class="status" id="status-uni"></div>
+      <div class="andamento">
+        <div class="andamento-topo">
+          <span id="msg-uni">Pronto para começar.</span>
+          <strong id="pct-uni">0%</strong>
+        </div>
+        <div class="track"><div class="fill" id="fill-uni"></div></div>
+      </div>
+      <details class="log-caixa">
+        <summary>Ver etapas</summary>
+        <div id="log-uni">As etapas aparecem aqui enquanto o relatório é montado.</div>
+      </details>
+    </section>
+    <section class="card visor">
+      <div class="titulo-linha">
+        <div class="vistas" data-alvo="uni">
+          <button type="button" class="ativo" data-vista="mapa">Mapa</button>
+          <button type="button" data-vista="relatorio">Relatório</button>
+          <button type="button" data-vista="arquivos">Arquivos</button>
+        </div>
+        <span class="legenda" id="legenda-uni">Faixa preta + laranja = limite oficial da rota. Cada cor = um caminhão.</span>
+        <a id="unificado-mapa-link" href="#" target="_blank" hidden>Tela cheia</a>
+      </div>
+      <div id="dias-uni" class="dias"></div>
+      <div class="vista ativo" data-vista-panel="mapa">
+        <p class="hint"><span id="titulo-uni">—</span></p>
+        <iframe id="unificado-mapa" title="Mapa unificado"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="relatorio">
+        <p class="hint">Conclusão de rota · <span id="titulo-uni-dia">—</span></p>
+        <iframe id="unificado-diario" title="Relatório unificado"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="arquivos">
+        <div id="arquivos-uni">Nenhum arquivo deste dia ainda.</div>
+      </div>
+    </section>
+  </main>
+
+  <main id="aba-inlog" class="painel">
+    <section class="card">
+      <div class="status" id="status"></div>
+      <details class="log-caixa">
+        <summary>Ver etapas</summary>
+        <div id="log">Aguardando comando...</div>
+      </details>
+    </section>
+    <section class="card visor">
+      <div class="titulo-linha">
+        <div class="vistas" data-alvo="inlog">
+          <button type="button" class="ativo" data-vista="mapa">Mapa</button>
+          <button type="button" data-vista="relatorio">Relatório</button>
+          <button type="button" data-vista="arquivos">Arquivos</button>
+        </div>
+        <span class="legenda">Cinza = setor oficial · colorida = GPS Inlog</span>
+        <a id="mapa-link" href="#" target="_blank" hidden>Tela cheia</a>
+      </div>
+      <div id="dias" class="dias"></div>
+      <div class="vista ativo" data-vista-panel="mapa">
+        <p class="hint"><span id="titulo-mapa">—</span></p>
+        <iframe id="mapa" title="Mapa Inlog"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="relatorio">
+        <p class="hint">Relatório Inlog · <span id="titulo-dia">—</span></p>
+        <iframe id="diario" title="Relatório diário Inlog"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="arquivos">
+        <div id="arquivos">Nenhuma extração Inlog deste dia.</div>
+      </div>
+    </section>
+  </main>
+
+  <main id="aba-argos" class="painel" hidden>
+    <section class="card">
+      <div class="status" id="status-argos"></div>
+      <details class="log-caixa">
+        <summary>Ver etapas</summary>
+        <div id="log-argos">Aguardando comando do Argos...</div>
+      </details>
+    </section>
+    <section class="card visor">
+      <div class="titulo-linha">
+        <div class="vistas" data-alvo="argos">
+          <button type="button" class="ativo" data-vista="mapa">Mapa</button>
+          <button type="button" data-vista="relatorio">Relatório</button>
+          <button type="button" data-vista="arquivos">Arquivos</button>
+        </div>
+        <span class="legenda">Cinza = setor oficial · colorida = GPS Argos</span>
+        <a id="argos-mapa-link" href="#" target="_blank" hidden>Tela cheia</a>
+      </div>
+      <div id="dias-argos" class="dias"></div>
+      <div class="vista ativo" data-vista-panel="mapa">
+        <p class="hint"><span id="titulo-argos">—</span></p>
+        <iframe id="argos-mapa" title="Mapa Argos"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="relatorio">
+        <p class="hint">Relatório Argos · <span id="titulo-argos-dia">—</span></p>
+        <iframe id="argos-diario" title="Relatório Argos"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="arquivos">
+        <div id="arquivos-argos">Nenhuma extração Argos deste dia.</div>
+      </div>
+    </section>
+  </main>
+
+  <main id="aba-segtrack" class="painel" hidden>
+    <section class="card">
+      <div class="status" id="status-segtrack"></div>
+      <details class="log-caixa">
+        <summary>Ver etapas</summary>
+        <div id="log-segtrack">Aguardando comando da Segtrack...</div>
+      </details>
+    </section>
+    <section class="card visor">
+      <div class="titulo-linha">
+        <div class="vistas" data-alvo="segtrack">
+          <button type="button" class="ativo" data-vista="mapa">Mapa</button>
+          <button type="button" data-vista="relatorio">Relatório</button>
+          <button type="button" data-vista="arquivos">Arquivos</button>
+        </div>
+        <span class="legenda">Cada cor = um caminhão que entrou no polígono</span>
+        <a id="segtrack-mapa-link" href="#" target="_blank" hidden>Tela cheia</a>
+      </div>
+      <div id="dias-segtrack" class="dias"></div>
+      <div class="vista ativo" data-vista-panel="mapa">
+        <p class="hint"><span id="titulo-segtrack">—</span></p>
+        <iframe id="segtrack-mapa" title="Mapa Segtrack"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="relatorio">
+        <p class="hint">Relatório Segtrack · <span id="titulo-segtrack-dia">—</span></p>
+        <iframe id="segtrack-diario" title="Relatório Segtrack"></iframe>
+      </div>
+      <div class="vista" data-vista-panel="arquivos">
+        <div id="arquivos-segtrack">Nenhuma extração Segtrack deste dia.</div>
+      </div>
+    </section>
+  </main>
+  <div id="datas-espelho" hidden>
+    <input id="data" type="date" />
+    <input id="hora-ini-inlog" type="time" value="06:00" />
+    <input id="data-fim-inlog" type="date" />
+    <input id="hora-fim-inlog" type="time" value="05:59" />
+    <input id="data-argos" type="date" />
+    <input id="hora-ini-argos" type="time" value="06:00" />
+    <input id="data-fim-argos" type="date" />
+    <input id="hora-fim-argos" type="time" value="05:59" />
+    <input id="data-segtrack" type="date" />
+    <input id="hora-ini-segtrack" type="time" value="06:00" />
+    <input id="data-fim-segtrack" type="date" />
+    <input id="hora-fim-segtrack" type="time" value="05:59" />
+  </div>
+    </div>
+  </div>
+
+    <script>
+    const API_BASE = String(window.SAGTRACK_API || "").replace(/\/$/, "");
+    function urlApi(path) {
+      const texto = String(path || "");
+      if (!API_BASE || !texto || /^(https?:|blob:|data:)/i.test(texto)) return texto;
+      if (texto.startsWith("/")) return API_BASE + texto;
+      return texto;
+    }
+    const fetchOriginal = window.fetch.bind(window);
+    window.fetch = (input, init) => fetchOriginal(typeof input === "string" ? urlApi(input) : input, init);
+    const $ = (id) => document.getElementById(id);
+    let pedindoDia = "";
+    let pedindoArgos = "";
+    let pedindoSegtrack = "";
+    let aba = "uni";
+    let geracaoAbort = null;
+    let gerandoArquivo = false;
+    let inspecaoRota = "";
+
+    function isoHoje() {
+      const agora = new Date();
+      return [
+        agora.getFullYear(),
+        String(agora.getMonth() + 1).padStart(2, "0"),
+        String(agora.getDate()).padStart(2, "0"),
+      ].join("-");
+    }
+
+    function fmtDia(iso) {
+      if (!iso) return "—";
+      const [ano, mes, dia] = iso.split("-");
+      return `${dia}/${mes}/${ano}`;
+    }
+
+    function isoParaBr(iso) {
+      const achado = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || "").trim());
+      return achado ? `${achado[3]}/${achado[2]}/${achado[1]}` : "";
+    }
+
+    function brParaIso(br) {
+      const dig = String(br || "").replace(/\D/g, "");
+      if (dig.length !== 8) return "";
+      const dia = Number(dig.slice(0, 2));
+      const mes = Number(dig.slice(2, 4));
+      const ano = Number(dig.slice(4, 8));
+      const dt = new Date(ano, mes - 1, dia);
+      if (dt.getFullYear() !== ano || dt.getMonth() !== mes - 1 || dt.getDate() !== dia) return "";
+      return `${String(ano).padStart(4, "0")}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+    }
+
+    function mascararBr(texto) {
+      const dig = String(texto || "").replace(/\D/g, "").slice(0, 8);
+      if (dig.length <= 2) return dig;
+      if (dig.length <= 4) return dig.slice(0, 2) + "/" + dig.slice(2);
+      return dig.slice(0, 2) + "/" + dig.slice(2, 4) + "/" + dig.slice(4);
+    }
+
+    function iniciarDatasBr() {
+      const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      document.querySelectorAll('input[type="date"]').forEach((nativo) => {
+        if (nativo.closest(".data-br")) return;
+        const wrap = document.createElement("div");
+        wrap.className = "data-br";
+        const texto = document.createElement("input");
+        texto.type = "text";
+        texto.className = "campo data-texto";
+        texto.inputMode = "numeric";
+        texto.placeholder = "dd/mm/aaaa";
+        texto.maxLength = 10;
+        texto.autocomplete = "off";
+        texto.title = nativo.title || "Data (dd/mm/aaaa)";
+        texto.setAttribute("aria-label", nativo.title || "Data");
+        nativo.classList.add("data-picker");
+        nativo.classList.remove("campo");
+        nativo.lang = "pt-BR";
+        nativo.parentNode.insertBefore(wrap, nativo);
+        wrap.appendChild(texto);
+        wrap.appendChild(nativo);
+        if (desc && desc.get && desc.set) {
+          Object.defineProperty(nativo, "value", {
+            get() { return desc.get.call(this); },
+            set(v) {
+              desc.set.call(this, v);
+              texto.value = isoParaBr(v);
+            },
+          });
+        }
+        texto.value = isoParaBr(nativo.value);
+        nativo.addEventListener("input", () => { texto.value = isoParaBr(nativo.value); });
+        nativo.addEventListener("change", () => { texto.value = isoParaBr(nativo.value); });
+        texto.addEventListener("input", () => { texto.value = mascararBr(texto.value); });
+        const aplicar = () => {
+          const iso = brParaIso(texto.value);
+          if (iso) {
+            if (nativo.value !== iso) {
+              nativo.value = iso;
+              nativo.dispatchEvent(new Event("change", { bubbles: true }));
+            } else {
+              texto.value = isoParaBr(iso);
+            }
+          } else {
+            texto.value = isoParaBr(nativo.value);
+          }
+        };
+        texto.addEventListener("change", aplicar);
+        texto.addEventListener("blur", aplicar);
+      });
+    }
+
+    function horaDe(id, padrao) {
+      const v = (($(id) && $(id).value) || "").trim();
+      if (!v) return padrao;
+      return v.slice(0, 5);
+    }
+
+    function isoDia(d) {
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+
+    function somarDia(iso, n) {
+      if (!iso) return "";
+      const [y, m, d] = iso.split("-").map(Number);
+      const dt = new Date(y, m - 1, d);
+      dt.setDate(dt.getDate() + n);
+      return isoDia(dt);
+    }
+
+    function hojeIso() {
+      return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Sao_Paulo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+    }
+
+    function cicloDiario(ref) {
+      const data = ref ? isoDia(ref) : hojeIso();
+      return {
+        data,
+        data_fim: somarDia(data, 1),
+        hora_inicio: "06:00",
+        hora_fim: "05:59",
+      };
+    }
+
+    function atualizarHintCiclo(p) {
+      const el = $("hint-ciclo-uni");
+      if (!el || !p || !p.data) return;
+      el.textContent = "Ciclo de hoje: " + fmtPeriodo(p.data, p.hora_inicio || "06:00", p.hora_fim || "05:59", p.data_fim) + ". O painel abre sempre no dia atual.";
+    }
+
+    function logPertoDoFim(el) {
+      if (!el) return true;
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    }
+
+    function escreverLog(el, texto, seguir) {
+      if (!el || texto == null || el.textContent === texto) return;
+      const grudado = seguir && logPertoDoFim(el);
+      el.textContent = texto;
+      if (grudado) el.scrollTop = el.scrollHeight;
+    }
+
+    function setHtml(id, html) {
+      const el = $(id);
+      if (!el || el.dataset.html === html) return;
+      el.dataset.html = html;
+      el.innerHTML = html;
+    }
+
+    function pintarAndamento(msg, pct, texto, opts) {
+      if ($("msg-uni") && msg) $("msg-uni").textContent = msg;
+      if ($("pct-uni") && pct != null) $("pct-uni").textContent = pct + "%";
+      if ($("fill-uni") && pct != null) $("fill-uni").style.width = Math.max(0, Math.min(100, pct)) + "%";
+      if (texto != null) escreverLog($("log-uni"), texto, !!(opts && opts.seguir));
+    }
+
+    function fmtPeriodo(iso, ini, fim, isoFim) {
+      const inicio = (ini || "00:00").slice(0, 5);
+      const final = (fim || "23:59").slice(0, 5);
+      if (!iso) return "—";
+      if ((!isoFim || isoFim === iso) && inicio === "00:00" && final === "23:59") return fmtDia(iso);
+      if (!isoFim || isoFim === iso) return fmtDia(iso) + " · " + inicio + "–" + final;
+      return fmtDia(iso) + " " + inicio + " → " + fmtDia(isoFim) + " " + final;
+    }
+
+    function periodoDe(prefix) {
+      const ids = {
+        uni: ["data-uni", "hora-ini-uni", "data-fim-uni", "hora-fim-uni"],
+        inlog: ["data", "hora-ini-inlog", "data-fim-inlog", "hora-fim-inlog"],
+        argos: ["data-argos", "hora-ini-argos", "data-fim-argos", "hora-fim-argos"],
+        segtrack: ["data-segtrack", "hora-ini-segtrack", "data-fim-segtrack", "hora-fim-segtrack"],
+      };
+      const [d, i, df, f] = ids[prefix];
+      return {
+        data: $(d).value || null,
+        data_fim: $(df).value || $(d).value || null,
+        hora_inicio: horaDe(i, "00:00"),
+        hora_fim: horaDe(f, "23:59"),
+      };
+    }
+
+    function aplicarPeriodo(p) {
+      if (p.data) {
+        $("data-uni").value = p.data;
+        $("data").value = p.data;
+        $("data-argos").value = p.data;
+        $("data-segtrack").value = p.data;
+      }
+      const fim = p.data_fim || (p.data ? somarDia(p.data, 1) : "");
+      if (fim) {
+        $("data-fim-uni").value = fim;
+        $("data-fim-inlog").value = fim;
+        $("data-fim-argos").value = fim;
+        $("data-fim-segtrack").value = fim;
+      }
+      const iniH = p.hora_inicio || "06:00";
+      const fimH = p.hora_fim || "05:59";
+      ["hora-ini-uni", "hora-ini-inlog", "hora-ini-argos", "hora-ini-segtrack"].forEach((id) => {
+        $(id).value = iniH;
+      });
+      ["hora-fim-uni", "hora-fim-inlog", "hora-fim-argos", "hora-fim-segtrack"].forEach((id) => {
+        $(id).value = fimH;
+      });
+      atualizarHintCiclo({
+        data: p.data || $("data-uni").value,
+        data_fim: fim || $("data-fim-uni").value,
+        hora_inicio: iniH,
+        hora_fim: fimH,
+      });
+    }
+
+    async function fetchGeracao(url) {
+      if (geracaoAbort) geracaoAbort.abort();
+      geracaoAbort = new AbortController();
+      gerandoArquivo = true;
+      document.querySelectorAll("button.parar").forEach((btn) => { btn.disabled = false; });
+      try {
+        return await fetch(url, { signal: geracaoAbort.signal });
+      } catch (e) {
+        if (e && e.name === "AbortError") throw new Error("Geração interrompida.");
+        throw new Error(erroPainel(e));
+      }
+    }
+
+    async function pararGeracao(logId) {
+      const el = logId ? $(logId) : null;
+      if (logId === "log-uni") pintarAndamento("Parando a geração...", 0, "Parando a geração...", { seguir: true });
+      else if (el) escreverLog(el, "Parando a geração...", true);
+      if (geracaoAbort) geracaoAbort.abort();
+      geracaoAbort = null;
+      try {
+        const info = await api("/api/parar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (logId === "log-uni") pintarAndamento(info.msg || "Parado.", 0, info.msg || "Parado.", { seguir: true });
+        else if (el) escreverLog(el, info.msg || "Parado.", true);
+      } catch (e) {
+        if (el) el.textContent = e.message;
+      }
+      gerandoArquivo = false;
+      return atualizar();
+    }
+
+    const paginas = {
+      uni: ["Relatório", "Relatório do dia", "Diurno: 06:00–18:59. Noturno: a partir das 19:00 até 05:59. Cada um traz os polígonos do dia e desenha a trajetória dentro deles."],
+      inlog: ["Por empresa", "Inlog", "Busca só o GPS da Inlog, no dia escolhido no topo."],
+      argos: ["Por empresa", "Argos", "Busca só o GPS da Argos, no dia escolhido no topo."],
+      segtrack: ["Por empresa", "Segtrack", "Busca só o GPS da Segtrack, no dia escolhido no topo."],
+    };
+
+    function abrirEmpresa(nome) {
+      if (nome === "inlog" || nome === "argos" || nome === "segtrack") {
+        mostrarAba(nome);
+        return;
+      }
+      mostrarAba("uni");
+    }
+
+    function mostrarAba(nome) {
+      aba = nome;
+      document.body.dataset.pagina = nome;
+      ["uni", "inlog", "argos", "segtrack"].forEach((id) => {
+        const el = $("aba-" + id);
+        const on = nome === id;
+        el.hidden = !on;
+        el.classList.toggle("ativo", on);
+      });
+      $("tab-uni").className = nome === "uni" ? "nav-item ativo" : "nav-item";
+      const sel = $("sel-empresa");
+      if (sel) {
+        sel.value = (nome === "inlog" || nome === "argos" || nome === "segtrack") ? nome : "";
+        sel.className = "campo-side" + (sel.value ? " emp-" + sel.value : "");
+      }
+      const pagina = paginas[nome] || paginas.uni;
+      if ($("kicker-pagina")) $("kicker-pagina").textContent = pagina[0];
+      if ($("titulo-pagina")) $("titulo-pagina").textContent = pagina[1];
+      if ($("desc-pagina")) $("desc-pagina").textContent = pagina[2];
+      if (nome === "argos") carregarDiaArgos(false);
+      if (nome === "segtrack") carregarDiaSegtrack(false);
+      if (nome === "uni") atualizar();
+    }
+
+    function toggleMenu(btn) {
+      const menu = btn.closest(".menu");
+      document.querySelectorAll(".menu.aberto").forEach((el) => {
+        if (el !== menu) el.classList.remove("aberto");
+      });
+      if (menu) menu.classList.toggle("aberto");
+    }
+
+    function mostrarVista(alvo, nome) {
+      const root = $("aba-" + alvo);
+      if (!root) return;
+      root.querySelectorAll(".vistas button").forEach((b) => b.classList.toggle("ativo", b.dataset.vista === nome));
+      root.querySelectorAll("[data-vista-panel]").forEach((p) => p.classList.toggle("ativo", p.dataset.vistaPanel === nome));
+    }
+
+    function erroPainel(e) {
+      const t = String((e && e.message) || e || "");
+      if (/Failed to fetch|NetworkError|ERR_CONNECTION|Load failed|Network request failed/i.test(t)) {
+        return "O servidor do painel fechou. Feche esta aba, clique de novo em iniciar.bat e NAO feche a janela preta. O relatorio so funciona com ela aberta.";
+      }
+      return t || "Falha na API";
+    }
+
+    let chatbotPoll = 0;
+    let chatbotMsgAte = 0;
+    let chatbotGrupoSalvo = "";
+
+    function msgChatbot(texto) {
+      $("chatbot-msg").textContent = texto || "";
+      chatbotMsgAte = Date.now() + 180000;
+    }
+
+    function aplicarChatbot(c) {
+      if (!c) return;
+      $("chatbot-auto").checked = c.enviar_ao_gerar !== false;
+      const chk2h = $("chatbot-2h");
+      if (chk2h) chk2h.checked = !!c.disparo_2h;
+      if (c.pacote) {
+        const box = $("chatbot-box");
+        if (box && !box.dataset.pacote) {
+          box.dataset.pacote = c.pacote;
+        }
+      }
+      if (Date.now() >= chatbotMsgAte) {
+        $("chatbot-msg").textContent = c.msg || "";
+      }
+      if (c.grupo_jid) chatbotGrupoSalvo = c.grupo_jid;
+      const img = $("chatbot-qr");
+      if (c.qr && !c.logado) {
+        img.src = c.qr;
+        img.classList.add("visivel");
+      } else {
+        img.removeAttribute("src");
+        img.classList.remove("visivel");
+      }
+      const sel = $("chatbot-grupo");
+      const atual = c.grupo_jid || sel.value || "";
+      sel.innerHTML = '<option value="">Escolher grupo...</option>';
+      (c.grupos || []).forEach((g) => {
+        const o = document.createElement("option");
+        o.value = g.jid;
+        o.textContent = g.nome;
+        if (g.jid === atual) o.selected = true;
+        sel.appendChild(o);
+      });
+      if (atual && ![...sel.options].some((o) => o.value === atual)) {
+        const o = document.createElement("option");
+        o.value = atual;
+        o.textContent = "Grupo salvo";
+        o.selected = true;
+        sel.appendChild(o);
+      }
+      if (c.configurado && !c.logado) $("chatbot-box").open = true;
+      const btn = $("btn-chatbot-sessao");
+      if (btn) {
+        const ligado = c.logado === true && c.sessao_ativa === true;
+        btn.dataset.logado = ligado ? "1" : "0";
+        if (ligado) {
+          btn.textContent = "Desconectar WhatsApp";
+          btn.classList.remove("principal");
+          btn.classList.add("desligar");
+        } else {
+          btn.textContent = "Conectar WhatsApp";
+          btn.classList.add("principal");
+          btn.classList.remove("desligar");
+        }
+      }
+    }
+
+    function iniciarPollChatbot() {
+      if (chatbotPoll) return;
+      chatbotPoll = setInterval(async () => {
+        const box = $("chatbot-box");
+        if (!box || !box.open) return;
+        try {
+          aplicarChatbot(await api("/api/chatbot-config"));
+        } catch (e) {
+          $("chatbot-msg").textContent = e.message;
+        }
+      }, 3000);
+    }
+
+    async function alternarSessaoChatbot() {
+      const btn = $("btn-chatbot-sessao");
+      if (btn && btn.dataset.logado === "1") return desconectarChatbot();
+      return conectarChatbot();
+    }
+
+    async function desconectarChatbot() {
+      $("chatbot-msg").textContent = "Desconectando o WhatsApp…";
+      try {
+        aplicarChatbot(await api("/api/chatbot-desconectar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }));
+      } catch (e) {
+        $("chatbot-msg").textContent = e.message;
+      }
+    }
+
+    async function conectarChatbot() {
+      $("chatbot-msg").textContent = "Gerando o QR do WhatsApp…";
+      try {
+        aplicarChatbot(await api("/api/chatbot-conectar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }));
+        iniciarPollChatbot();
+      } catch (e) {
+        $("chatbot-msg").textContent = e.message;
+      }
+    }
+
+    async function acompanharEnvioChatbot() {
+      const btn = $("btn-chatbot-enviar");
+      if (btn) btn.disabled = true;
+      try {
+        for (let i = 0; i < 420; i++) {
+          const st = await api("/api/status");
+          const job = (st && st.job) || {};
+          const envio = (st && st.chatbot_envio) || {};
+          const linha = envio.msg || job.message || "";
+          if (linha) msgChatbot(linha);
+          if (!job.rodando && job.erro) {
+            const final = envio.msg || job.erro;
+            msgChatbot(final);
+            alert(final);
+            return;
+          }
+          if (!job.rodando && !envio.pendente && i > 1) {
+            const final = envio.msg || job.erro || job.message || "Envio encerrado sem retorno. Veja o log do relatório.";
+            msgChatbot(final);
+            if (envio.erro || job.erro) alert(final);
+            return;
+          }
+          if (!job.rodando && envio.pendente && i > 8) {
+            const final = envio.msg || job.erro || "O relatório terminou, mas o PDF ainda não voltou. Veja o log.";
+            msgChatbot(final);
+            if (envio.erro || job.erro) alert(final);
+            return;
+          }
+          await new Promise((ok) => setTimeout(ok, 2000));
+        }
+        msgChatbot("O envio passou do tempo. Veja o log do relatório.");
+        alert("O envio passou do tempo. Veja o log do relatório.");
+      } catch (e) {
+        const t = (e && e.message) || "Perdi o contato com o painel durante o envio.";
+        msgChatbot(t);
+        alert(t);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function enviarChatbot() {
+      const btn = $("btn-chatbot-enviar");
+      try {
+        const box = $("chatbot-box");
+        if (box) box.open = true;
+        const p = periodoDe("uni") || {};
+        const grupo = ($("chatbot-grupo") && $("chatbot-grupo").value) || chatbotGrupoSalvo || "";
+        if (!grupo) {
+          const t = "Escolha o grupo do WhatsApp que vai receber o relatorio.";
+          msgChatbot(t);
+          alert(t);
+          return;
+        }
+        if (btn) btn.disabled = true;
+        msgChatbot("Pedido enviado ao painel. Esperando o retorno do WhatsApp...");
+        pintarAndamento(
+          "Gerando o relatorio do dia e enviando o PDF no grupo...",
+          2,
+          "O painel responde nesta caixa: aviso enviado, PDF enviado ou o erro.",
+          { seguir: true }
+        );
+        const r = await api("/api/chatbot-enviar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            data: p.data || ($("data-uni") && $("data-uni").value) || "",
+            hora_inicio: "06:00",
+            hora_fim: "05:59",
+            grupo_jid: grupo,
+          }),
+        });
+        msgChatbot(r.msg || "Pedido recebido. Acompanhe esta mensagem até o PDF ou o erro.");
+        atualizar();
+        await acompanharEnvioChatbot();
+      } catch (e) {
+        const t = (e && e.message) || "Nao consegui enviar o relatorio.";
+        msgChatbot(t);
+        pintarAndamento(t, 0, t);
+        alert(t);
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function carregarChatbot() {
+      try {
+        aplicarChatbot(await api("/api/chatbot-config"));
+        const box = $("chatbot-box");
+        if (box) {
+          box.addEventListener("toggle", () => {
+            if (box.open) iniciarPollChatbot();
+          });
+          if (box.open) iniciarPollChatbot();
+        }
+        const chk2h = $("chatbot-2h");
+        if (chk2h && !chk2h.dataset.ligado) {
+          chk2h.dataset.ligado = "1";
+          chk2h.addEventListener("change", () => { salvarChatbot().catch(() => {}); });
+        }
+        const chkAuto = $("chatbot-auto");
+        if (chkAuto && !chkAuto.dataset.ligado) {
+          chkAuto.dataset.ligado = "1";
+          chkAuto.addEventListener("change", () => { salvarChatbot().catch(() => {}); });
+        }
+      } catch (e) {
+        $("chatbot-msg").textContent = e.message;
+      }
+    }
+
+    async function salvarChatbot() {
+      const c = await api("/api/chatbot-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grupo_jid: $("chatbot-grupo").value,
+          enviar_ao_gerar: $("chatbot-auto").checked,
+          disparo_2h: $("chatbot-2h").checked,
+        }),
+      });
+      aplicarChatbot(c);
+      if (!c.grupo_jid) {
+        $("chatbot-msg").textContent = "Escolha o grupo que vai receber o relatório.";
+      } else if (c.disparo_2h) {
+        $("chatbot-msg").textContent = c.proximo_rotulo || "A cada 2 horas o painel gera o relatório do dia e envia no grupo.";
+      } else {
+        $("chatbot-msg").textContent = "Grupo salvo. O PDF vai para este grupo ao gerar o relatório.";
+      }
+      return c;
+    }
+
+    async function api(path, opts) {
+      let res;
+      try {
+        res = await fetch(path, opts);
+      } catch (e) {
+        if (e && e.name === "AbortError") throw new Error("Geração interrompida.");
+        throw new Error(erroPainel(e));
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.erro || "Falha na API");
+      return data;
+    }
+
+    function codigoDaBusca(texto) {
+      const t = String(texto || "").toUpperCase().trim();
+      const achado = t.match(/\b(\d{2}[A-Z]{2,4})\b/);
+      return achado ? achado[1] : t.replace(/[^A-Z0-9]/g, "");
+    }
+
+    async function carregarRotasDoDia() {
+      const sel = $("filtro-rota");
+      if (!sel) return;
+      const data = $("data-uni").value;
+      const escolhida = sel.value;
+      sel.innerHTML = `<option value="">${data ? "Selecione a rota do dia" : "Escolha o dia primeiro"}</option>`;
+      if (!data) return;
+      try {
+        const info = await api("/api/rotas-oficiais?data=" + encodeURIComponent(data));
+        const rotas = info.rotas || [];
+        sel.innerHTML = `<option value="">Selecione a rota (${rotas.length})</option>` + rotas.map((r) => {
+          const nome = r.rotulo || r.codigo;
+          return `<option value="${r.codigo}">${nome}</option>`;
+        }).join("");
+        if (escolhida && rotas.some((r) => r.codigo === escolhida)) sel.value = escolhida;
+      } catch (e) {
+        if ($("rota-info")) $("rota-info").textContent = e.message;
+      }
+    }
+
+    function rotuloPapel(cam) {
+      const papel = String((cam && cam.papel) || "passagem").toLowerCase();
+      const ex = String((cam && cam.execucao) || "").toUpperCase();
+      if (papel === "apoio" || ex === "APOIO") return "apoio";
+      if (ex === "PARCIAL") return "coleta parcial";
+      if (ex === "FEITA" || papel === "coleta") return "coleta";
+      return papel || "passagem";
+    }
+
+    function pintarCaminhoesRota(info) {
+      const cams = info.caminhoes || [];
+      $("rota-info").textContent = cams.length
+        ? `${info.codigo} · ${info.percentual || 0}% hoje · ${cams.length} caminhão(ões) no polígono.`
+        : `${info.codigo}: nenhum pulso neste ciclo dentro do polígono.`;
+      $("rota-caminhoes").innerHTML = cams.map((cam) =>
+        `<div class="cam-row"><i style="background:${cam.cor || "#9cb8c2"}"></i><span>${cam.placa || cam.veiculo || "—"} <small>${rotuloPapel(cam)}${cam.horario ? " · " + cam.horario : ""}</small></span><b>${Number(cam.percentual || 0).toFixed(0)}%</b></div>`
+      ).join("");
+    }
+
+    async function pedirInspecao(body) {
+      for (let i = 0; i < 180; i++) {
+        try {
+          await api("/api/inspecionar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          return;
+        } catch (e) {
+          if (!/andamento/i.test(String(e.message || ""))) throw e;
+          $("rota-info").textContent = "Aguardando a execução atual terminar para consultar a rota...";
+          await new Promise((ok) => setTimeout(ok, 1500));
+        }
+      }
+      throw new Error("Não foi possível iniciar a consulta da rota.");
+    }
+
+    async function esperarInspecao() {
+      for (;;) {
+        const st = await api("/api/status?data=" + encodeURIComponent($("data-uni").value || ""));
+        const job = st.job || {};
+        if (job.message) $("rota-info").textContent = job.message;
+        if (!job.rodando) {
+          if (job.erro) throw new Error(job.erro);
+          const r = job.resultado || {};
+          if (r.mapa_url || r.codigo) return r;
+          throw new Error("A consulta da rota terminou sem mapa.");
+        }
+        await new Promise((ok) => setTimeout(ok, 1000));
+      }
+    }
+
+    function aplicarInspecao(info, codigo, querPdf) {
+      inspecaoRota = info.codigo || codigo;
+      pintarCaminhoesRota(info);
+      if ($("legenda-uni")) {
+        $("legenda-uni").textContent = (info.codigo || codigo) + " — polígono oficial e trajetórias do ciclo 06:00 → 05:59.";
+      }
+      mostrarIframe("unificado-mapa", info.mapa_url, Date.now(), "Sem trajetória nesta rota.");
+      const linkU = $("unificado-mapa-link");
+      if (info.mapa_url) {
+        linkU.href = urlApi(info.mapa_url);
+        linkU.hidden = false;
+      }
+      const linkPdf = $("rota-pdf-link");
+      if (info.pdf_url) {
+        const pdfHref = urlApi(info.pdf_url) + (info.pdf_url.indexOf("?") >= 0 ? "&" : "?") + "v=" + Date.now();
+        if (linkPdf) {
+          linkPdf.href = pdfHref;
+          linkPdf.hidden = false;
+        }
+        if (querPdf) window.open(pdfHref, "_blank", "noopener");
+        $("rota-info").textContent =
+          (info.codigo || codigo) + " · " + (info.percentual || 0) + "% · PDF do ciclo 06:00 → 05:59.";
+      }
+    }
+
+    async function verRota(comPdf) {
+      const codigo = codigoDaBusca($("filtro-rota").value);
+      if (!codigo) {
+        $("rota-info").textContent = "Selecione uma rota da grade do dia.";
+        return;
+      }
+      inspecaoRota = codigo;
+      $("btn-mapa-dia").hidden = false;
+      const querPdf = comPdf === true;
+      $("rota-info").textContent = querPdf
+        ? "Consultando pulsos e gerando o PDF do ciclo 06:00 → 05:59..."
+        : "Consultando pulsos e montando a trajetória dentro da rota...";
+      $("rota-caminhoes").innerHTML = "";
+      const linkPdf = $("rota-pdf-link");
+      if (linkPdf) {
+        linkPdf.hidden = true;
+        linkPdf.removeAttribute("href");
+      }
+      const btn = $("btn-ver-rota");
+      const sel = $("filtro-rota");
+      if (btn) btn.disabled = true;
+      if (sel) sel.disabled = true;
+      if (aba !== "uni") mostrarAba("uni");
+      mostrarVista("uni", "mapa");
+      try {
+        await pedirInspecao({
+          codigo,
+          data: $("data-uni").value,
+          data_fim: $("data-fim-uni").value || "",
+          hora_inicio: horaDe("hora-ini-uni", "06:00"),
+          hora_fim: horaDe("hora-fim-uni", "05:59"),
+          extrair: true,
+          pdf: querPdf,
+        });
+        const info = await esperarInspecao();
+        aplicarInspecao(info, codigo, querPdf);
+      } catch (e) {
+        inspecaoRota = "";
+        $("btn-mapa-dia").hidden = true;
+        $("rota-info").textContent = e.message;
+      } finally {
+        if (btn) btn.disabled = false;
+        if (sel) sel.disabled = false;
+      }
+    }
+
+    function voltarMapaDia() {
+      inspecaoRota = "";
+      $("btn-mapa-dia").hidden = true;
+      $("rota-info").textContent = "";
+      $("rota-caminhoes").innerHTML = "";
+      atualizar();
+    }
+
+    function mostrarIframe(id, url, rev, vazio) {
+      const el = $(id);
+      if (!url) {
+        const chave = "vazio|" + (vazio || "");
+        if (el.dataset.chave === chave) return;
+        el.dataset.chave = chave;
+        el.srcdoc = `<!DOCTYPE html><html><body style="margin:0;padding:28px;font:15px/1.45 Segoe UI,Arial,sans-serif;color:#637986;background:#f0f4f6">${vazio || "Sem relatório deste dia."}</body></html>`;
+        return;
+      }
+      const chave = url + "|" + (rev || "");
+      if (el.dataset.chave === chave) return;
+      el.dataset.chave = chave;
+      el.removeAttribute("srcdoc");
+      el.src = urlApi(url) + "?v=" + encodeURIComponent(rev || "1");
+    }
+
+    function pintarDias(id, dias, atual) {
+      const html = (dias || []).map((dia) =>
+        `<button type="button" class="${dia === atual ? "ativo" : ""}" data-dia="${dia}">${fmtDia(dia)}</button>`
+      ).join("");
+      setHtml(id, html);
+    }
+
+    function pintarStatus(info) {
+      const y = window.scrollY || document.documentElement.scrollTop || 0;
+      const rodando = !!info.job?.rodando;
+      const dataSel = $("data").value || info.data_rota || "";
+      const dataArgos = $("data-argos").value || dataSel;
+      const dataSeg = $("data-segtrack").value || dataSel;
+      const dataUni = $("data-uni").value || dataSel;
+      const cicloUni = fmtPeriodo(dataUni, horaDe("hora-ini-uni", "00:00"), horaDe("hora-fim-uni", "23:59"), $("data-fim-uni").value);
+      const cicloInlog = fmtPeriodo(dataSel, horaDe("hora-ini-inlog", "00:00"), horaDe("hora-fim-inlog", "23:59"), $("data-fim-inlog").value);
+      const cicloArgos = fmtPeriodo(dataArgos, horaDe("hora-ini-argos", "00:00"), horaDe("hora-fim-argos", "23:59"), $("data-fim-argos").value);
+      const cicloSeg = fmtPeriodo(dataSeg, horaDe("hora-ini-segtrack", "00:00"), horaDe("hora-fim-segtrack", "23:59"), $("data-fim-segtrack").value);
+      $("titulo-uni").textContent = cicloUni;
+      $("titulo-uni-dia").textContent = cicloUni;
+      const linkU = $("unificado-mapa-link");
+      if (info.unificado_mapa_url) {
+        linkU.href = urlApi(info.unificado_mapa_url);
+        linkU.hidden = false;
+      } else {
+        linkU.removeAttribute("href");
+        linkU.hidden = true;
+      }
+      const fontes = info.unificado_fontes || {};
+      setHtml("status-uni", `
+        <span>Feitas: <b>${info.unificado_tem_coleta ? (info.unificado_feitas ?? "-") : "-"}</b></span>
+        <span>Parciais: <b>${info.unificado_tem_coleta ? (info.unificado_parciais ?? "-") : "-"}</b></span>
+        <span>Apoios: <b>${info.unificado_tem_coleta ? (info.unificado_apoios ?? "-") : "-"}</b></span>
+        <span>Sem coleta: <b>${info.unificado_tem_coleta ? (info.unificado_nao_feitas ?? "-") : "-"}</b></span>
+        <span>GPS: <b>Segtrack ${fontes.segtrack || (info.segtrack_tem_coleta ? "ok" : "—")}</b></span>
+      `);
+      $("titulo-dia").textContent = cicloInlog;
+      $("titulo-mapa").textContent = cicloInlog;
+      $("titulo-argos").textContent = cicloArgos;
+      $("titulo-argos-dia").textContent = cicloArgos;
+      $("titulo-segtrack").textContent = cicloSeg;
+      $("titulo-segtrack-dia").textContent = cicloSeg;
+      const link = $("mapa-link");
+      if (info.mapa_url) {
+        link.href = urlApi(info.mapa_url);
+        link.hidden = false;
+      } else {
+        link.removeAttribute("href");
+        link.hidden = true;
+      }
+      const linkA = $("argos-mapa-link");
+      if (info.argos_mapa_url) {
+        linkA.href = urlApi(info.argos_mapa_url);
+        linkA.hidden = false;
+      } else {
+        linkA.removeAttribute("href");
+        linkA.hidden = true;
+      }
+      const linkS = $("segtrack-mapa-link");
+      if (info.segtrack_mapa_url) {
+        linkS.href = urlApi(info.segtrack_mapa_url);
+        linkS.hidden = false;
+      } else {
+        linkS.removeAttribute("href");
+        linkS.hidden = true;
+      }
+      setHtml("status", `
+        <span>Usuário: <b>${info.usuario || "-"}</b></span>
+        <span>Filtro: <b>${info.filtro_veiculos || "CCL"}</b></span>
+        <span>Ciclo: <b>${cicloInlog}</b></span>
+        <span>Compactadores: <b>${info.tem_coleta ? (info.total_veiculos ?? "-") : "-"}</b></span>
+        <span>% médio: <b>${info.tem_coleta ? (info.percentual_medio ?? "-") : "-"}</b></span>
+      `);
+      setHtml("status-argos", `
+        <span>Usuário: <b>${info.argos_usuario || "-"}</b></span>
+        <span>Obra: <b>${info.argos_obra || "Aparecida — Argos"}</b></span>
+        <span>Ciclo: <b>${cicloArgos}</b></span>
+        <span>Caminhões: <b>${info.argos_tem_coleta ? (info.argos_veiculos ?? "-") : "ainda não extraído"}</b></span>
+        <span>Pontos GPS: <b>${info.argos_tem_coleta ? (info.argos_pontos ?? "-") : "-"}</b></span>
+      `);
+      setHtml("status-segtrack", `
+        <span>Usuário: <b>${info.segtrack_usuario || "preencha o .env"}</b></span>
+        <span>Obra: <b>${info.segtrack_obra || "Aparecida — Segtrack"}</b></span>
+        <span>Filtro: <b>${info.segtrack_placas || "compactadores em Aparecida"}</b></span>
+        <span>Ciclo: <b>${cicloSeg}</b></span>
+        <span>Caminhões: <b>${info.segtrack_tem_coleta ? (info.segtrack_veiculos ?? "-") : "ainda não extraído"}</b></span>
+        <span>Pontos GPS: <b>${info.segtrack_tem_coleta ? (info.segtrack_pontos ?? "-") : "-"}</b></span>
+      `);
+      $("badge").textContent = info.job?.rodando ? "executando" : "parado";
+      $("badge").className = "badge " + (info.job?.rodando ? "run" : (info.job?.erro ? "err" : "ok"));
+      document.querySelectorAll("button.acao-job").forEach((btn) => { btn.disabled = !!info.job?.rodando; });
+      document.querySelectorAll("button.parar").forEach((btn) => {
+        btn.disabled = !info.job?.rodando && !gerandoArquivo;
+      });
+      if (rodando) {
+        document.querySelectorAll(".log-caixa").forEach((el) => { el.open = true; });
+      }
+      if (info.job?.log || info.job?.message) {
+        const nome = info.job.nome || "";
+        const alvo = nome === "unificado" ? "log-uni" : nome.startsWith("argos") ? "log-argos" : (nome.startsWith("segtrack") ? "log-segtrack" : "log");
+        const texto = (info.job.logs && info.job.logs.length) ? info.job.logs.join("\n") : info.job.log;
+        if (alvo === "log-uni") {
+          pintarAndamento(info.job.message || "Pronto para começar.", info.job.progress || 0, texto, { seguir: rodando });
+        } else if ($(alvo)) {
+          escreverLog($(alvo), texto, rodando);
+        }
+      }
+      pintarDias("dias", info.dias_disponiveis, dataSel);
+      pintarDias("dias-argos", info.argos_dias_disponiveis, dataArgos);
+      pintarDias("dias-segtrack", info.segtrack_dias_disponiveis, dataSeg);
+      pintarDias("dias-uni", info.unificado_dias_disponiveis, dataUni);
+      mostrarIframe(
+        "unificado-diario",
+        info.unificado_diario_url,
+        info.unificado_diario_rev,
+        info.job?.nome === "unificado" && info.job?.rodando
+          ? `Agente da coleta: login, trajetória e relatório de ${fmtDia(dataUni)}...`
+          : `Ainda não há relatório de ${fmtDia(dataUni)}. Clique em Relatório diurno ou Relatório noturno.`
+      );
+      if (!inspecaoRota) {
+        mostrarIframe(
+          "unificado-mapa",
+          info.unificado_mapa_url,
+          info.unificado_mapa_rev,
+          "Sem mapa unificado deste dia ainda."
+        );
+        if ($("legenda-uni")) {
+          $("legenda-uni").textContent = "Faixa preta + laranja = limite oficial da rota. Cada cor de linha = um caminhão.";
+        }
+      }
+      mostrarIframe(
+        "diario",
+        info.diario_url,
+        info.diario_rev,
+        info.job?.rodando && info.job?.nome === "rotas"
+          ? `Buscando o relatório de ${fmtDia(dataSel)}...`
+          : `Ainda não há relatório Inlog de ${fmtDia(dataSel)}.`
+      );
+      mostrarIframe(
+        "mapa",
+        info.mapa_url,
+        info.mapa_rev,
+        info.job?.nome === "rotas" && info.job?.rodando ? "Atualizando o mapa Inlog..." : "Sem mapa Inlog deste dia ainda."
+      );
+      mostrarIframe(
+        "argos-diario",
+        info.argos_diario_url,
+        info.argos_diario_rev,
+        info.job?.nome === "argos-rotas" && info.job?.rodando
+          ? "Extraindo o percurso do Argos..."
+          : "Ainda não há extração do Argos neste dia."
+      );
+      mostrarIframe(
+        "argos-mapa",
+        info.argos_mapa_url,
+        info.argos_mapa_rev,
+        "Sem mapa Argos deste dia ainda."
+      );
+      mostrarIframe(
+        "segtrack-diario",
+        info.segtrack_diario_url,
+        info.segtrack_diario_rev,
+        info.job?.nome === "segtrack-rotas" && info.job?.rodando
+          ? "Extraindo o percurso da Segtrack..."
+          : "Ainda não há extração da Segtrack neste dia."
+      );
+      mostrarIframe(
+        "segtrack-mapa",
+        info.segtrack_mapa_url,
+        info.segtrack_mapa_rev,
+        "Sem mapa Segtrack deste dia ainda."
+      );
+      setHtml("arquivos", info.arquivos?.length
+        ? info.arquivos.map((a) => `<div><a href="${urlApi(a.url)}" target="_blank">${a.nome}</a></div>`).join("")
+        : "Nenhuma extração Inlog deste dia.");
+      setHtml("arquivos-argos", info.argos_arquivos?.length
+        ? info.argos_arquivos.map((a) => `<div><a href="${urlApi(a.url)}" target="_blank">${a.nome}</a></div>`).join("")
+        : "Nenhuma extração Argos deste dia.");
+      setHtml("arquivos-segtrack", info.segtrack_arquivos?.length
+        ? info.segtrack_arquivos.map((a) => `<div><a href="${urlApi(a.url)}" target="_blank">${a.nome}</a></div>`).join("")
+        : "Nenhuma extração Segtrack deste dia.");
+      setHtml("arquivos-uni", info.unificado_arquivos?.length
+        ? info.unificado_arquivos.map((a) => `<div><a href="${urlApi(a.url)}" target="_blank">${a.nome}</a></div>`).join("")
+        : "Nenhum relatório único deste dia ainda.");
+      if (!rodando && !gerandoArquivo) {
+        requestAnimationFrame(() => window.scrollTo(0, y));
+      }
+      return info;
+    }
+
+    async function atualizar() {
+      try {
+        const data = $("data-uni").value || $("data").value;
+        const argos = $("data-argos").value;
+        const segtrack = $("data-segtrack").value;
+        const q = new URLSearchParams();
+        if (data) q.set("data", data);
+        if (argos) q.set("argos", argos);
+        if (segtrack) q.set("segtrack", segtrack);
+        const sufixo = q.toString() ? "?" + q.toString() : "";
+        const info = pintarStatus(await api("/api/status" + sufixo));
+        agendarStatus(info?.job?.rodando || gerandoArquivo ? 2500 : 12000);
+        return info;
+      } catch (e) {
+        const alvo = aba === "argos" ? "log-argos" : (aba === "segtrack" ? "log-segtrack" : (aba === "uni" ? "log-uni" : "log"));
+        escreverLog($(alvo), e.message, false);
+        agendarStatus(4000);
+        return null;
+      }
+    }
+
+    async function baixarGpkgArgos() {
+      const data = $("data-argos").value;
+      if (!data) {
+        $("log-argos").textContent = "Escolha o dia para exportar o GPKG.";
+        return;
+      }
+      const btn = $("btn-gpkg-argos");
+      btn.disabled = true;
+      $("log-argos").textContent = "Gerando GeoPackage Argos de " + fmtDia(data) + "...";
+      try {
+        const res = await fetchGeracao("/api/gpkg-argos?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao exportar GPKG" }));
+          throw new Error(erro.erro || "Falha ao exportar GPKG");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "argos-rotas-" + data + ".gpkg";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log-argos").textContent = "GPKG pronto: argos-rotas-" + data + ".gpkg";
+      } catch (e) {
+        $("log-argos").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function baixarPdfArgos() {
+      const data = $("data-argos").value;
+      if (!data) {
+        $("log-argos").textContent = "Escolha o dia do relatório Argos.";
+        return;
+      }
+      const btn = $("btn-pdf-argos");
+      btn.disabled = true;
+      $("log-argos").textContent = "Gerando PDF Argos de " + fmtDia(data) + " com o mapa e a rota de cada caminhão. Aguarde...";
+      try {
+        const res = await fetchGeracao("/api/pdf-argos?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao gerar PDF Argos" }));
+          throw new Error(erro.erro || "Falha ao gerar PDF Argos");
+        }
+        const blob = await res.blob();
+        if (!blob || blob.size < 1000 || (blob.type || "").includes("json")) {
+          throw new Error("O servidor não devolveu o PDF Argos. Extraia os percursos e tente de novo.");
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "argos-rotas-" + data + ".pdf";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log-argos").textContent = "PDF pronto: argos-rotas-" + data + ".pdf";
+        atualizar();
+      } catch (e) {
+        $("log-argos").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function baixarGpkg() {
+      const data = $("data").value;
+      if (!data) {
+        $("log").textContent = "Escolha o dia para exportar o GPKG.";
+        return;
+      }
+      const btn = $("btn-gpkg");
+      btn.disabled = true;
+      $("log").textContent = "Gerando GeoPackage Inlog de " + fmtDia(data) + "...";
+      try {
+        const res = await fetchGeracao("/api/gpkg?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao exportar GPKG" }));
+          throw new Error(erro.erro || "Falha ao exportar GPKG");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "inlog-rotas-" + data + ".gpkg";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log").textContent = "GPKG pronto: inlog-rotas-" + data + ".gpkg";
+      } catch (e) {
+        $("log").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function baixarPdf() {
+      const data = $("data").value;
+      if (!data) {
+        $("log").textContent = "Escolha o dia do relatório.";
+        return;
+      }
+      const btn = $("btn-pdf");
+      btn.disabled = true;
+      $("log").textContent = "Gerando PDF de " + fmtDia(data) + " com rotas feitas e mapa...";
+      try {
+        const res = await fetchGeracao("/api/pdf?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao gerar PDF" }));
+          throw new Error(erro.erro || "Falha ao gerar PDF");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "inlog-rotas-" + data + ".pdf";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log").textContent = "PDF pronto: inlog-rotas-" + data + ".pdf";
+      } catch (e) {
+        $("log").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    function janelaTurno(turno, data) {
+      if (turno === "noturno") {
+        return { data, data_fim: somarDia(data, 1), hora_inicio: "19:00", hora_fim: "05:59", turno: "noturno" };
+      }
+      if (turno === "diurno") {
+        return { data, data_fim: data, hora_inicio: "06:00", hora_fim: "18:59", turno: "diurno" };
+      }
+      return null;
+    }
+
+    async function rodarUnificado(extrair, turno) {
+      const data = $("data-uni").value;
+      const p = janelaTurno(turno, data) || periodoDe("uni");
+      if (!p.data) {
+        pintarAndamento("Escolha o dia.", 0, "Escolha o dia.");
+        return;
+      }
+      aplicarPeriodo(p);
+      const nome = p.turno === "noturno" ? "noturno" : (p.turno === "diurno" ? "diurno" : "do ciclo");
+      const rotulo = fmtPeriodo(p.data, p.hora_inicio, p.hora_fim, p.data_fim);
+      pintarAndamento(
+        extrair ? "1/7 — Iniciando o relatório " + nome + " " + rotulo : "Montando o relatório " + nome + " com o GPS já extraído de " + rotulo,
+        2,
+        extrair
+          ? "Polígonos do dia neste turno. A trajetória do GPS fica dentro de cada polígono."
+          : "Montando com o GPS já extraído. A trajetória fica dentro dos polígonos do dia.",
+        { seguir: true }
+      );
+      try {
+        await api("/api/unificado", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            data: p.data,
+            data_fim: p.data_fim,
+            hora_inicio: p.hora_inicio,
+            hora_fim: p.hora_fim,
+            extrair: !!extrair,
+            turno: p.turno || "",
+          }),
+        });
+      } catch (e) {
+        pintarAndamento(e.message, 0, e.message);
+      }
+      return atualizar();
+    }
+
+    async function baixarWordUnificado() {
+      const p = periodoDe("uni");
+      if (!p.data) {
+        pintarAndamento("Escolha o dia do Word.", 0, "Escolha o dia do Word.");
+        return;
+      }
+      const btn = $("btn-word-uni");
+      btn.disabled = true;
+      pintarAndamento("Preparando o Word de " + fmtPeriodo(p.data, p.hora_inicio, p.hora_fim, p.data_fim) + "...", 8, null, { seguir: true });
+      if (geracaoAbort) geracaoAbort.abort();
+      geracaoAbort = new AbortController();
+      gerandoArquivo = true;
+      document.querySelectorAll("button.parar").forEach((b) => { b.disabled = false; });
+      try {
+        const limite = Date.now() + 12 * 60 * 1000;
+        while (Date.now() < limite) {
+          if (geracaoAbort && geracaoAbort.signal.aborted) throw new Error("Geração interrompida.");
+          const info = await api("/api/word-unificado?data=" + encodeURIComponent(p.data), { signal: geracaoAbort.signal });
+          if (info.pronto && info.url) {
+            const a = document.createElement("a");
+            a.href = urlApi(info.url);
+            a.download = info.nome || ("frota-rotas-" + p.data + ".docx");
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            pintarAndamento("Word pronto. Abra no Office e preencha as justificativas amarelas.", 100, null, { seguir: true });
+            atualizar();
+            return;
+          }
+          if (info.erro) throw new Error(info.erro);
+          pintarAndamento(info.msg || "Montando o Word com os mapas. Aguarde...", 55, null, { seguir: true });
+          await new Promise((ok) => setTimeout(ok, 2000));
+        }
+        throw new Error("O Word está demorando demais. Clique de novo em um minuto.");
+      } catch (e) {
+        pintarAndamento(e.message, 0, e.message);
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function baixarPdfUnificado() {
+      const p = periodoDe("uni");
+      if (!p.data) {
+        pintarAndamento("Escolha o dia do PDF.", 0, "Escolha o dia do PDF.");
+        return;
+      }
+      const btn = $("btn-pdf-uni");
+      btn.disabled = true;
+      pintarAndamento("Preparando o PDF de " + fmtPeriodo(p.data, p.hora_inicio, p.hora_fim, p.data_fim) + "...", 8, null, { seguir: true });
+      if (geracaoAbort) geracaoAbort.abort();
+      geracaoAbort = new AbortController();
+      gerandoArquivo = true;
+      document.querySelectorAll("button.parar").forEach((b) => { b.disabled = false; });
+      try {
+        const limite = Date.now() + 12 * 60 * 1000;
+        while (Date.now() < limite) {
+          if (geracaoAbort && geracaoAbort.signal.aborted) throw new Error("Geração interrompida.");
+          const info = await api("/api/pdf-unificado?data=" + encodeURIComponent(p.data), { signal: geracaoAbort.signal });
+          if (info.pronto && info.url) {
+            const a = document.createElement("a");
+            a.href = urlApi(info.url);
+            a.download = info.nome || ("frota-rotas-" + p.data + ".pdf");
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            pintarAndamento("PDF da frota e rotas pronto.", 100, null, { seguir: true });
+            atualizar();
+            return;
+          }
+          if (info.erro) throw new Error(info.erro);
+          pintarAndamento(info.msg || "Montando o PDF com os mapas. Aguarde...", 55, null, { seguir: true });
+          await new Promise((ok) => setTimeout(ok, 2000));
+        }
+        throw new Error("O PDF está demorando demais. Clique de novo em um minuto.");
+      } catch (e) {
+        pintarAndamento(e.message, 0, e.message);
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function rodar(acao) {
+      const p = periodoDe("inlog");
+      const body = {
+        data: p.data,
+        data_fim: p.data_fim,
+        hora_inicio: p.hora_inicio,
+        hora_fim: p.hora_fim,
+        veiculos: $("veiculos").value || null,
+      };
+      $("log").textContent = "Iniciando " + acao + (body.data ? " de " + fmtPeriodo(body.data, body.hora_inicio, body.hora_fim, body.data_fim) : "") + "...";
+      try {
+        await api("/api/" + acao, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (e) {
+        $("log").textContent = e.message;
+        pedindoDia = "";
+      }
+      return atualizar();
+    }
+
+    async function rodarArgos(acao) {
+      const p = periodoDe("argos");
+      const body = { data: p.data, data_fim: p.data_fim, hora_inicio: p.hora_inicio, hora_fim: p.hora_fim };
+      $("log-argos").textContent = "Iniciando " + acao + (body.data ? " de " + fmtPeriodo(body.data, body.hora_inicio, body.hora_fim, body.data_fim) : "") + "...";
+      try {
+        await api("/api/" + acao, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (e) {
+        $("log-argos").textContent = e.message;
+        pedindoArgos = "";
+      }
+      return atualizar();
+    }
+
+    async function rodarSegtrack(acao) {
+      const p = periodoDe("segtrack");
+      const body = { data: p.data, data_fim: p.data_fim, hora_inicio: p.hora_inicio, hora_fim: p.hora_fim };
+      $("log-segtrack").textContent = "Iniciando " + acao + (body.data ? " de " + fmtPeriodo(body.data, body.hora_inicio, body.hora_fim, body.data_fim) : "") + "...";
+      try {
+        await api("/api/" + acao, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (e) {
+        $("log-segtrack").textContent = e.message;
+        pedindoSegtrack = "";
+      }
+      return atualizar();
+    }
+
+    async function baixarGpkgSegtrack() {
+      const data = $("data-segtrack").value;
+      if (!data) {
+        $("log-segtrack").textContent = "Escolha o dia para exportar o GPKG.";
+        return;
+      }
+      const btn = $("btn-gpkg-segtrack");
+      btn.disabled = true;
+      $("log-segtrack").textContent = "Gerando GeoPackage Segtrack de " + fmtDia(data) + "...";
+      try {
+        const res = await fetchGeracao("/api/gpkg-segtrack?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao exportar GPKG" }));
+          throw new Error(erro.erro || "Falha ao exportar GPKG");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "segtrack-rotas-" + data + ".gpkg";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log-segtrack").textContent = "GPKG pronto: segtrack-rotas-" + data + ".gpkg";
+      } catch (e) {
+        $("log-segtrack").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function baixarPdfSegtrack() {
+      const data = $("data-segtrack").value;
+      if (!data) {
+        $("log-segtrack").textContent = "Escolha o dia do relatório Segtrack.";
+        return;
+      }
+      const btn = $("btn-pdf-segtrack");
+      btn.disabled = true;
+      $("log-segtrack").textContent = "Gerando PDF Segtrack de " + fmtDia(data) + " com mapa e grade...";
+      try {
+        const res = await fetchGeracao("/api/pdf-segtrack?data=" + encodeURIComponent(data));
+        if (!res.ok) {
+          const erro = await res.json().catch(() => ({ erro: "Falha ao gerar PDF Segtrack" }));
+          throw new Error(erro.erro || "Falha ao gerar PDF Segtrack");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "segtrack-rotas-" + data + ".pdf";
+        a.click();
+        URL.revokeObjectURL(url);
+        $("log-segtrack").textContent = "PDF pronto: segtrack-rotas-" + data + ".pdf";
+      } catch (e) {
+        $("log-segtrack").textContent = e.message;
+      } finally {
+        gerandoArquivo = false;
+        btn.disabled = false;
+      }
+    }
+
+    async function carregarDia(extrairSeFaltar) {
+      const data = $("data").value;
+      $("titulo-dia").textContent = fmtDia(data);
+      const info = await atualizar();
+      if (!extrairSeFaltar || !data || !info) return info;
+      if (info.tem_coleta || info.job?.rodando) return info;
+      if (pedindoDia === data) return info;
+      pedindoDia = data;
+      return rodar("rotas");
+    }
+
+    async function carregarDiaArgos(extrairSeFaltar) {
+      const data = $("data-argos").value;
+      const info = await atualizar();
+      if (!extrairSeFaltar || !data || !info) return info;
+      if (info.argos_tem_coleta || info.job?.rodando) return info;
+      if (pedindoArgos === data) return info;
+      pedindoArgos = data;
+      return rodarArgos("argos-rotas");
+    }
+
+    async function carregarDiaSegtrack(extrairSeFaltar) {
+      const data = $("data-segtrack").value;
+      const info = await atualizar();
+      if (!extrairSeFaltar || !data || !info) return info;
+      if (info.segtrack_tem_coleta || info.job?.rodando) return info;
+      if (pedindoSegtrack === data) return info;
+      pedindoSegtrack = data;
+      return rodarSegtrack("segtrack-rotas");
+    }
+
+    document.addEventListener("click", (ev) => {
+      if (!ev.target.closest(".menu")) {
+        document.querySelectorAll(".menu.aberto").forEach((el) => el.classList.remove("aberto"));
+      }
+    });
+    document.querySelectorAll(".vistas").forEach((bar) => {
+      bar.addEventListener("click", (ev) => {
+        const btn = ev.target.closest("button[data-vista]");
+        if (!btn) return;
+        mostrarVista(bar.dataset.alvo, btn.dataset.vista);
+      });
+    });
+    iniciarDatasBr();
+    aplicarPeriodo(cicloDiario());
+    function amarrarCiclo(idIni, idFim) {
+      $(idIni).addEventListener("change", () => {
+        if ($(idIni).value) $(idFim).value = somarDia($(idIni).value, 1);
+        if (idIni === "data-uni") atualizarHintCiclo(periodoDe("uni"));
+      });
+    }
+    amarrarCiclo("data-uni", "data-fim-uni");
+    amarrarCiclo("data", "data-fim-inlog");
+    amarrarCiclo("data-argos", "data-fim-argos");
+    amarrarCiclo("data-segtrack", "data-fim-segtrack");
+    $("data").addEventListener("input", () => carregarDia(true));
+    $("data").addEventListener("change", () => carregarDia(true));
+    $("data-argos").addEventListener("change", () => carregarDiaArgos(true));
+    $("data-segtrack").addEventListener("change", () => carregarDiaSegtrack(true));
+    $("data-uni").addEventListener("change", () => {
+      inspecaoRota = "";
+      $("btn-mapa-dia").hidden = true;
+      $("rota-info").textContent = "";
+      $("rota-caminhoes").innerHTML = "";
+      aplicarPeriodo({
+        data: $("data-uni").value,
+        data_fim: somarDia($("data-uni").value, 1),
+        hora_inicio: horaDe("hora-ini-uni", "06:00"),
+        hora_fim: horaDe("hora-fim-uni", "05:59"),
+      });
+      carregarRotasDoDia();
+      atualizar();
+    });
+    ["hora-ini-uni", "hora-fim-uni", "data-fim-uni"].forEach((id) => {
+      $(id).addEventListener("change", () => aplicarPeriodo(periodoDe("uni")));
+    });
+    $("dias").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-dia]");
+      if (!btn) return;
+      aplicarPeriodo({
+        data: btn.dataset.dia,
+        data_fim: somarDia(btn.dataset.dia, 1),
+        hora_inicio: horaDe("hora-ini-uni", "06:00"),
+        hora_fim: horaDe("hora-fim-uni", "05:59"),
+      });
+      carregarDia(true);
+    });
+    $("dias-argos").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-dia]");
+      if (!btn) return;
+      aplicarPeriodo({
+        data: btn.dataset.dia,
+        data_fim: somarDia(btn.dataset.dia, 1),
+        hora_inicio: horaDe("hora-ini-uni", "06:00"),
+        hora_fim: horaDe("hora-fim-uni", "05:59"),
+      });
+      carregarDiaArgos(true);
+    });
+    $("dias-segtrack").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-dia]");
+      if (!btn) return;
+      aplicarPeriodo({
+        data: btn.dataset.dia,
+        data_fim: somarDia(btn.dataset.dia, 1),
+        hora_inicio: horaDe("hora-ini-uni", "06:00"),
+        hora_fim: horaDe("hora-fim-uni", "05:59"),
+      });
+      carregarDiaSegtrack(true);
+    });
+    $("dias-uni").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-dia]");
+      if (!btn) return;
+      inspecaoRota = "";
+      $("btn-mapa-dia").hidden = true;
+      $("rota-info").textContent = "";
+      $("rota-caminhoes").innerHTML = "";
+      aplicarPeriodo({
+        data: btn.dataset.dia,
+        data_fim: somarDia(btn.dataset.dia, 1),
+        hora_inicio: "06:00",
+        hora_fim: "05:59",
+      });
+      atualizar();
+      carregarRotasDoDia();
+    });
+    $("filtro-rota").addEventListener("change", () => {
+      if ($("filtro-rota").value) verRota(false);
+    });
+    carregarRotasDoDia();
+    carregarDia(false);
+    function agendarStatus(ms) {
+      clearTimeout(agendarStatus.t);
+      agendarStatus.t = setTimeout(() => {
+        atualizar().then((info) => {
+          if (!info) return;
+          if (info.tem_coleta && pedindoDia === $("data").value) pedindoDia = "";
+          if (info.argos_tem_coleta && pedindoArgos === $("data-argos").value) pedindoArgos = "";
+          if (info.segtrack_tem_coleta && pedindoSegtrack === $("data-segtrack").value) pedindoSegtrack = "";
+        });
+      }, ms);
+    }
+    agendarStatus(2500);
+    carregarChatbot();
+  </script>
+</body>
+</html>

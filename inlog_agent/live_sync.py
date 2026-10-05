@@ -363,6 +363,42 @@ def comando_turno(
     return 200, estado
 
 
+def reconciliar_rotas_previstas(con, dia: date, turno: str) -> dict[str, Any]:
+    """Completa a programação do turno aberto. Não apaga rota observada."""
+    from .live_db import garantir_rotas_previstas
+    from .unificado import obter_rotas_previstas
+
+    inicio = time.perf_counter()
+    programadas = obter_rotas_previstas(dia, turno)
+    consulta_s = time.perf_counter() - inicio
+    codigos = {str(rota.get("codigo") or "").upper() for rota in programadas}
+    existentes = [
+        str(row[0] or "").upper()
+        for row in con.execute(
+            "SELECT codigo FROM rota WHERE data = ? AND turno = ?",
+            (dia.isoformat(), turno),
+        )
+    ]
+    extras = [codigo for codigo in existentes if codigo not in codigos]
+    t0 = time.perf_counter()
+    inseridas = garantir_rotas_previstas(con, dia.isoformat(), turno, programadas)
+    gravacao_s = time.perf_counter() - t0
+    extra = (" extras=" + ",".join(extras)) if extras else ""
+    print(
+        f"[LIVE] previstas {dia.strftime('%d/%m/%Y')} {turno}: "
+        f"programadas={len(programadas)} existentes={len(existentes)} inseridas={len(inseridas)}"
+        f"{extra} consulta={consulta_s:.3f}s gravacao={gravacao_s:.3f}s",
+        flush=True,
+    )
+    return {
+        "programadas": [str(rota.get("codigo") or "").upper() for rota in programadas],
+        "inseridas": inseridas,
+        "extras": extras,
+        "consulta_s": round(consulta_s, 3),
+        "gravacao_s": round(gravacao_s, 3),
+    }
+
+
 def ciclo_gps(
     output_dir: Path,
     data: str | None,
@@ -405,6 +441,13 @@ def ciclo_gps(
         con.commit()
         if not turno_aceita_sync(con, dia, pedido, momento):
             return {"novos": 0, "rotas": [], "fechado": True}
+        situacao = con.execute(
+            "SELECT situacao FROM turno WHERE data = ? AND turno = ?",
+            (dia.isoformat(), pedido),
+        ).fetchone()
+        if situacao is not None and str(situacao["situacao"] or "") == "ABERTO":
+            reconciliar_rotas_previstas(con, dia, pedido)
+            con.commit()
         inicio_turno, _fim = janela_datetime(
             dia,
             "19:00" if pedido == "noturno" else "06:00",

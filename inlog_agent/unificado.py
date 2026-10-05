@@ -25,7 +25,7 @@ from .cobertura import (
 from .config import dias_do_ciclo, rotulo_dia_periodo, rotulo_periodo
 from .export import write_json, write_mapa_html
 from .gps import extremos_por_hora, filtrar_pontos_periodo, periodo_gps
-from .mapa_oficial import _freq_do_dia, carregar_setores
+from .mapa_oficial import _freq_do_dia, carregar_setores, listar_rotas_oficiais
 from .pdf_mapa import cor_da_placa
 from .relatorio_diario import _esc, css_relatorio_web, mapa_frota_inlog
 from .traco_agente import montar_traco_continuo, recortar_trechos_ao_setor
@@ -318,6 +318,29 @@ def _trabalhadores_analise() -> int:
     return 8
 
 
+def _na_programacao(freq: str, dia: date, turno: str | None) -> bool:
+    """Mesma grade do Relatório do Dia: dia da semana e, se houver, o turno."""
+    texto = str(freq or "")
+    if not _freq_do_dia(texto, dia):
+        return False
+    pedido = (turno or "").strip().lower()
+    if pedido in {"diurno", "noturno"}:
+        return _casa_turno(texto, pedido)
+    return True
+
+
+def obter_rotas_previstas(dia: date, turno: str) -> list[dict[str, str]]:
+    """Programação do turno. Não consulta GPS, Fulltrack nem cobertura."""
+    pedido = (turno or "").strip().lower()
+    if pedido not in {"diurno", "noturno"}:
+        return []
+    return [
+        rota
+        for rota in listar_rotas_oficiais(dia)
+        if _casa_turno(str(rota.get("frequencia") or ""), pedido)
+    ]
+
+
 def analisar_setores(
     dia: date,
     caminhoes: list[dict[str, Any]],
@@ -327,12 +350,7 @@ def analisar_setores(
     todos = carregar_setores(None)
     if (turno or "").strip().lower() in {"diurno", "noturno"}:
         pedido = turno.strip().lower()
-        todos = [
-            setor
-            for setor in todos
-            if _freq_do_dia(str(setor.get("frequencia") or ""), dia)
-            and _casa_turno(str(setor.get("frequencia") or ""), pedido)
-        ]
+        todos = [setor for setor in todos if _na_programacao(str(setor.get("frequencia") or ""), dia, pedido)]
     for cam in caminhoes:
         cam["_pares"] = preparar_pontos(cam.get("pontos") or [])
         cam["_bbox"] = _bbox_pontos(cam.get("pontos") or [])
@@ -374,9 +392,7 @@ def analisar_codigos(
         if codigo not in pedidos:
             continue
         freq = str(setor.get("frequencia") or "")
-        if not _freq_do_dia(freq, dia):
-            continue
-        if pedido in {"diurno", "noturno"} and not _casa_turno(freq, pedido):
+        if not _na_programacao(freq, dia, pedido if pedido in {"diurno", "noturno"} else None):
             continue
         todos.append(setor)
     for cam in caminhoes:

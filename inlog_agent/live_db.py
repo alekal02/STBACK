@@ -442,6 +442,42 @@ def gravar_turno(con: sqlite3.Connection, campos: dict[str, Any]) -> None:
     )
 
 
+def garantir_rotas_previstas(
+    con: sqlite3.Connection,
+    data: str,
+    turno: str,
+    rotas: list[dict[str, Any]],
+) -> list[str]:
+    """Inclui a programação que ainda não existe. Não altera rota já gravada."""
+    quando = agora_iso()
+    inseridas: list[str] = []
+    for rota in rotas:
+        codigo = str(rota.get("codigo") or "").upper()
+        if not codigo:
+            continue
+        cursor = con.execute(
+            """
+            INSERT INTO rota (
+                data, turno, codigo, rota, frequencia, veiculo, placa, status, grupo,
+                percentual, inicio, ultimo_gps, tempo_em_rota, km_coleta, km_oficial,
+                na_grade, atualizado_em
+            ) VALUES (?, ?, ?, ?, ?, '', '', 'Não iniciada', 'nao', 0, '', '', '', '', '', 1, ?)
+            ON CONFLICT(data, turno, codigo) DO NOTHING
+            """,
+            (
+                data,
+                turno,
+                codigo,
+                str(rota.get("rotulo") or rota.get("rota") or codigo),
+                str(rota.get("frequencia") or ""),
+                quando,
+            ),
+        )
+        if cursor.rowcount:
+            inseridas.append(codigo)
+    return inseridas
+
+
 def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dict[str, Any]]) -> None:
     quando = agora_iso()
     for rota in rotas:

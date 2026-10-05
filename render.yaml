@@ -20,7 +20,11 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: PDF_MAP_CONCURRENCY
-        value: "3"
+        value: "1"
+      - key: ANALISE_WORKERS
+        value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /var/sagtrack/ms-playwright
       - key: OUTPUT_DIR

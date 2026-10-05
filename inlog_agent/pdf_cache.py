@@ -21,10 +21,11 @@ VISUAL = 1
 
 
 def concorrencia() -> int:
+    padrao = "1" if (os.getenv("RENDER") or "").strip().lower() in {"1", "true", "yes", "sim"} else "3"
     try:
-        n = int(os.getenv("PDF_MAP_CONCURRENCY") or "3")
+        n = int(os.getenv("PDF_MAP_CONCURRENCY") or padrao)
     except ValueError:
-        n = 3
+        n = int(padrao)
     return max(1, min(n, 4))
 
 

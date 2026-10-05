@@ -1637,6 +1637,8 @@ def _porta_do_ambiente(explicita: int | None) -> int:
 
 
 def servir(porta: int | None = None, host: str | None = None) -> None:
+    # O glibc do Linux abre várias arenas e estoura os 512 MB do Render.
+    os.environ.setdefault("MALLOC_ARENA_MAX", "2")
     try:
         settings = load_settings()
         usada = porta or settings.porta or _porta_do_ambiente(None)

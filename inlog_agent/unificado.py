@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -304,6 +305,16 @@ def _bbox_cruza(geom, bbox: tuple[float, float, float, float] | None) -> bool:
     return not (maxx < bbox[0] or minx > bbox[2] or maxy < bbox[1] or miny > bbox[3])
 
 
+def _trabalhadores_analise() -> int:
+    """No Render (512 MB) um polígono por vez. No executável local, os oito de sempre."""
+    bruto = (os.getenv("ANALISE_WORKERS") or "").strip()
+    if bruto.isdigit():
+        return max(1, min(8, int(bruto)))
+    if (os.getenv("RENDER") or "").strip().lower() in {"1", "true", "yes", "sim"}:
+        return 1
+    return 8
+
+
 def analisar_setores(
     dia: date,
     caminhoes: list[dict[str, Any]],
@@ -322,16 +333,9 @@ def analisar_setores(
     for cam in caminhoes:
         cam["_pares"] = preparar_pontos(cam.get("pontos") or [])
         cam["_bbox"] = _bbox_pontos(cam.get("pontos") or [])
-    for setor in todos:
-        geom = setor.get("geom")
-        if geom is None:
-            setor["_zona"] = None
-            setor["_nucleo"] = None
-            continue
-        setor["_zona"] = geom.buffer(BORDA_M)
-        setor["_nucleo"] = geom.buffer(DENTRO_M)
     saida: list[dict[str, Any]] = []
     total = len(todos)
+    trabalhadores = _trabalhadores_analise()
 
     def _uma(item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
         i, setor = item
@@ -339,7 +343,7 @@ def analisar_setores(
         row["grade_do_dia"] = _freq_do_dia(str(setor.get("frequencia") or ""), dia)
         return i, row
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=trabalhadores) as pool:
         futuros = [pool.submit(_uma, (i, setor)) for i, setor in enumerate(todos, start=1)]
         for feito, fut in enumerate(as_completed(futuros), start=1):
             i, row = fut.result()
@@ -431,16 +435,26 @@ def _txt_caminhoes(setor: dict[str, Any]) -> str:
 
 def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia: date) -> dict[str, Any]:
     codigo = str(setor.get("codigo") or "")
+    geom = setor.get("geom")
+    if "_zona" in setor:
+        zona_geom = setor.get("_zona")
+        nucleo_geom = setor.get("_nucleo")
+    elif geom is not None:
+        zona_geom = geom.buffer(BORDA_M)
+        nucleo_geom = geom.buffer(DENTRO_M)
+    else:
+        zona_geom = None
+        nucleo_geom = None
     clips: list[tuple[dict[str, Any], list, list, float]] = []
     for cam in caminhoes:
-        if not _bbox_cruza(setor.get("geom"), cam.get("_bbox")):
+        if not _bbox_cruza(geom, cam.get("_bbox")):
             continue
         dentro, _borda, zona = separar_dentro_borda(
             cam["pontos"],
-            setor["geom"],
+            geom,
             pares=cam.get("_pares"),
-            zona_geom=setor.get("_zona"),
-            nucleo_geom=setor.get("_nucleo"),
+            zona_geom=zona_geom,
+            nucleo_geom=nucleo_geom,
         )
         km_dentro = km_gps(dentro, salto_m=180)
         km_zona = km_gps(zona, salto_m=180)

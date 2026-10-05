@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,31 @@ def _exes_windows() -> list[tuple[str, str]]:
     return saida
 
 
+def preparar_navegador() -> None:
+    """No Render o Chromium não vem na imagem. Baixa uma vez para o disco persistente."""
+    if os.name == "nt" and _exes_windows():
+        return
+    destino = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if not destino or destino == "0":
+        disco = Path("/var/sagtrack")
+        destino = str(disco / "ms-playwright") if disco.is_dir() else str(Path.home() / ".cache" / "ms-playwright")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = destino
+    raiz = Path(destino)
+    if any(raiz.glob("chromium_headless_shell-*/**/chrome-headless-shell")) or any(raiz.glob("chromium-*/**/chrome")):
+        return
+    raiz.mkdir(parents=True, exist_ok=True)
+    print("[PDF] Baixando o Chromium. A primeira geração deste servidor demora mais.", flush=True)
+    proc = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("Não consegui instalar o Chromium neste servidor.")
+
+
 def _tentativas() -> list[dict[str, str]]:
+    if os.name != "nt":
+        return []
     opcoes: list[dict[str, str]] = [{"channel": canal} for canal in _CANAIS]
     for canal, caminho in _exes_windows():
         opcoes.append({"channel": canal, "executable_path": caminho})

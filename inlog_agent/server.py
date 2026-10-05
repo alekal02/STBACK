@@ -227,7 +227,18 @@ def _rodar_rastreado(cmd: list[str]) -> str:
     if JOB.cancelado:
         raise RuntimeError("Geração interrompida.")
     if proc.returncode != 0:
-        raise RuntimeError((saida or "").strip() or "Falha ao gerar o arquivo.")
+        texto = (saida or "").strip()
+        if texto:
+            print(texto[-4000:], flush=True)
+        linhas = [ln.strip() for ln in texto.splitlines() if ln.strip()]
+        resumo = ""
+        for ln in reversed(linhas):
+            if ln.startswith("RuntimeError") or ln.startswith("Error") or "Executable doesn't exist" in ln:
+                resumo = ln.split("RuntimeError:", 1)[-1].strip()
+                break
+        if not resumo and linhas:
+            resumo = linhas[-1][:500]
+        raise RuntimeError(resumo or "Falha ao gerar o arquivo.")
     return saida or ""
 
 

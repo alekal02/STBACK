@@ -13,7 +13,7 @@ from typing import Any
 
 from playwright.sync_api import sync_playwright
 
-from .navegador import abrir_chromium
+from .navegador import abrir_chromium, preparar_navegador
 from .export import _xml
 from .config import rotulo_periodo
 from .gps import tracos_realistas
@@ -170,6 +170,7 @@ def _capturar_mapas_dia_sync(pasta: Path) -> dict[str, Any]:
         else:
             fonte = "inlog"
 
+    preparar_navegador()
     with sync_playwright() as pw:
         browser = abrir_chromium(pw, headless=True)
         try:
@@ -378,6 +379,7 @@ def _gerar_pdf_dia_sync(pasta: Path) -> Path:
     fonte = str(dados.get("fonte") or "")
     if not fonte:
         fonte = pasta.parent.name if pasta.parent.name in {"argos", "segtrack", "diurno", "noturno"} else "inlog"
+    preparar_navegador()
     with sync_playwright() as pw:
         browser = abrir_chromium(pw, headless=True)
         try:
@@ -444,6 +446,7 @@ def _gerar_pdf_inspecao_sync(
     pasta.mkdir(parents=True, exist_ok=True)
     dest = pasta / f"inspecao-{slug}.pdf"
     detalhes = [dict(rota) for rota in (rotas or [])]
+    preparar_navegador()
     with sync_playwright() as pw:
         browser = abrir_chromium(pw, headless=True)
         try:

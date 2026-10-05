@@ -1243,6 +1243,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._json(200, {"ok": True})
             return
+        if path == "/api/diagnostico":
+            from .live_db import diagnostico
+
+            try:
+                self._json(200, diagnostico())
+            except Exception as exc:
+                self._json(200, {"sqlite": "erro", "erro": str(exc), "persistent_disk": "erro"})
+            return
         if path == "/config.js":
             self._bytes(200, b'window.SAGTRACK_API = "";\n', "application/javascript; charset=utf-8")
             return
@@ -1259,6 +1267,37 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, status_payload(data or None, data_argos or None, data_segtrack or None))
             except Exception as exc:
                 self._json(500, {"erro": str(exc)})
+            return
+        if path == "/api/live-report":
+            from .live_report import ler_estado
+
+            qs = parse_qs(parsed.query)
+            try:
+                settings = load_settings()
+                job = JOB.snapshot()
+                self._json(
+                    200,
+                    ler_estado(
+                        settings.output_dir,
+                        (qs.get("data") or [None])[0],
+                        (qs.get("turno") or ["diurno"])[0],
+                        job_rodando=bool(job.get("rodando") and job.get("nome") == "unificado"),
+                    ),
+                )
+            except ValueError as exc:
+                self._json(400, {"ok": False, "erro": str(exc), "falha": str(exc)})
+            except Exception as exc:
+                self._json(
+                    200,
+                    {
+                        "ok": False,
+                        "vazio": True,
+                        "falha": str(exc),
+                        "aviso": "Falha na atualização.",
+                        "rotas": [],
+                        "resumo": {},
+                    },
+                )
             return
         if path == "/api/chatbot-config":
             from .chatbot import publico_config, _esconder_servidor
@@ -1487,6 +1526,37 @@ class Handler(BaseHTTPRequestHandler):
         if acao == "parar":
             self._json(200, cancelar_execucao())
             return
+        if path == "/api/live-report/sync":
+            from .live_report import pedir_atualizacao
+
+            corpo = payload if isinstance(payload, dict) else {}
+            try:
+                settings = load_settings()
+                job = JOB.snapshot()
+                self._json(
+                    200,
+                    pedir_atualizacao(
+                        settings.output_dir,
+                        str(corpo.get("data") or ""),
+                        str(corpo.get("turno") or "diurno"),
+                        job_rodando=bool(job.get("rodando") and job.get("nome") == "unificado"),
+                    ),
+                )
+            except ValueError as exc:
+                self._json(400, {"ok": False, "erro": str(exc), "falha": str(exc)})
+            except Exception as exc:
+                self._json(
+                    200,
+                    {
+                        "ok": False,
+                        "vazio": True,
+                        "falha": str(exc),
+                        "aviso": "Falha na atualização.",
+                        "rotas": [],
+                        "resumo": {},
+                    },
+                )
+            return
         if path == "/api/chatbot-config":
             from .chatbot import salvar_config, publico_config, _esconder_servidor
 
@@ -1682,7 +1752,23 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         print(exc, flush=True)
         return
     print(f"Sala tecnica em http://{usado_host}:{usada}", flush=True)
+    from .live_db import DISCO, no_render
+
+    if no_render() and DISCO.is_dir():
+        from .live_db import provar_disco
+
+        prova = provar_disco()
+        print(f"Disco /var/sagtrack: escrita {prova}. Banco /var/sagtrack/sagtrack_live.db", flush=True)
+        saida = (os.getenv("OUTPUT_DIR") or "")
+        if "/opt/render/project" in saida or not saida:
+            print(
+                "PDF, Word e GPKG continuam no disco temporário do código e podem sumir no deploy.",
+                flush=True,
+            )
     iniciar_disparo_automatico()
+    from .live_sync import iniciar_loop
+
+    iniciar_loop()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

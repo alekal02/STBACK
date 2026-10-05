@@ -336,12 +336,10 @@ def html_mapa_print(
             hora_inicio: cam.hora_inicio,
             hora_fim: cam.hora_fim
           }}];
-          visitas.forEach((vis) => {{
-            const ini = limpar([vis.ponto_inicio || []])[0];
-            const fim = limpar([vis.ponto_fim || []])[0];
-            pino(ini, horaCurta(vis.hora_inicio), apoio ? "#6b4c9a" : "#1b8a5a", "ini");
-            pino(fim, horaCurta(vis.hora_fim), apoio ? "#6b4c9a" : "#c0392b", "fim");
-          }});
+          const primeira = visitas[0] || {{}};
+          const ultima = visitas[visitas.length - 1] || primeira;
+          pino(limpar([primeira.ponto_inicio || []])[0], horaCurta(primeira.hora_inicio), apoio ? "#6b4c9a" : "#1b8a5a", "ini");
+          pino(limpar([ultima.ponto_fim || []])[0], horaCurta(ultima.hora_fim), apoio ? "#6b4c9a" : "#c0392b", "fim");
         }});
         const box = document.getElementById("legenda-placas");
         if (box) {{
@@ -352,8 +350,10 @@ def html_mapa_print(
               : (ex === "PARCIAL" ? "coleta parcial"
               : ((ex === "FEITA" || papel === "coleta") ? "coleta" : "passagem"));
             const pct = Number(cam.percentual || 0);
-            const janelas = (cam.passagens || []).map((v) => [horaCurta(v.hora_inicio), horaCurta(v.hora_fim)].filter(Boolean).join("–")).filter(Boolean);
-            const janela = janelas.length ? janelas.join(" · ") : [horaCurta(cam.hora_inicio), horaCurta(cam.hora_fim)].filter(Boolean).join("–");
+            const visitasCam = cam.passagens || [];
+            const iniH = horaCurta((visitasCam[0] || cam).hora_inicio || cam.hora_inicio);
+            const fimH = horaCurta((visitasCam[visitasCam.length - 1] || cam).hora_fim || cam.hora_fim);
+            const janela = [iniH, fimH].filter(Boolean).join("–");
             return "<span><i style='background:" + (cam.cor || "#c0392b") + "'></i>" +
               (cam.placa || cam.veiculo || "—") + " " + rotulo +
               (pct > 0 ? " " + pct.toFixed(0) + "%" : "") +

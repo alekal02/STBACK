@@ -409,19 +409,25 @@ def write_mapa_html(
           hora_inicio: cam.hora_inicio,
           hora_fim: cam.hora_fim
         }}];
-        visitas.forEach((vis) => {{
-          const iniPt = (vis.ponto_inicio && vis.ponto_inicio.length >= 2) ? vis.ponto_inicio : null;
-          const fimPt = (vis.ponto_fim && vis.ponto_fim.length >= 2) ? vis.ponto_fim : null;
-          if (iniPt) {{
-            layer.marks.push(L.circleMarker(iniPt, {{ radius: 6, color: "#fff", fillColor: apoio ? "#6b4c9a" : "#20c05c", fillOpacity: 1, weight: 2 }}).addTo(mapa).bindTooltip(horaPino(vis.hora_inicio), {{permanent:true, direction:"right", className:"pino-hora"}}));
-          }}
-          if (fimPt) {{
-            layer.marks.push(L.circleMarker(fimPt, {{ radius: 6, color: "#fff", fillColor: apoio ? "#6b4c9a" : "#e74c3c", fillOpacity: 1, weight: 2 }}).addTo(mapa).bindTooltip(horaPino(vis.hora_fim), {{permanent:true, direction:"left", className:"pino-hora"}}));
-          }}
-        }});
+        const primeira = visitas[0] || {{}};
+        const ultima = visitas[visitas.length - 1] || primeira;
+        const iniPt = (primeira.ponto_inicio && primeira.ponto_inicio.length >= 2) ? primeira.ponto_inicio : null;
+        const fimPt = (ultima.ponto_fim && ultima.ponto_fim.length >= 2) ? ultima.ponto_fim : null;
+        if (iniPt) {{
+          layer.marks.push(L.circleMarker(iniPt, {{ radius: 6, color: "#fff", fillColor: apoio ? "#6b4c9a" : "#20c05c", fillOpacity: 1, weight: 2 }}).addTo(mapa).bindTooltip(horaPino(primeira.hora_inicio), {{permanent:true, direction:"right", className:"pino-hora"}}));
+        }}
+        if (fimPt) {{
+          layer.marks.push(L.circleMarker(fimPt, {{ radius: 6, color: "#fff", fillColor: apoio ? "#6b4c9a" : "#e74c3c", fillOpacity: 1, weight: 2 }}).addTo(mapa).bindTooltip(horaPino(ultima.hora_fim), {{permanent:true, direction:"left", className:"pino-hora"}}));
+        }}
       }});
       camadas.push(layer);
-      const chips = frota.map((cam) => `<span style="display:inline-block;width:10px;height:10px;background:${{cam.cor || '#c0392b'}};border-radius:2px;margin-right:4px"></span>${{cam.placa || cam.veiculo || "—"}} <small>${{cam.papel || "passagem"}} ${{Number(cam.percentual || 0).toFixed(0)}}%${{cam.horario ? " · " + cam.horario : ""}}</small>`).join("<br>");
+      const chips = frota.map((cam) => {{
+        const visitasCam = cam.passagens || [];
+        const iniH = horaPino((visitasCam[0] || cam).hora_inicio || cam.hora_inicio);
+        const fimH = horaPino((visitasCam[visitasCam.length - 1] || cam).hora_fim || cam.hora_fim);
+        const janela = [iniH, fimH].filter(Boolean).join("–");
+        return `<span style="display:inline-block;width:10px;height:10px;background:${{cam.cor || '#c0392b'}};border-radius:2px;margin-right:4px"></span>${{cam.placa || cam.veiculo || "—"}} <small>${{cam.papel || "passagem"}} ${{Number(cam.percentual || 0).toFixed(0)}}%${{janela ? " · " + janela : ""}}</small>`;
+      }}).join("<br>");
       const box = document.createElement("div");
       box.className = "item";
       box.innerHTML = `<div class="linha-rota"><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>

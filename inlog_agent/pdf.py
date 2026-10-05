@@ -1037,11 +1037,7 @@ def _codigo_setor(setor: str) -> tuple[str, str]:
 
 
 def _fonte_nome(fonte: str) -> str:
-    return {
-        "argos": "ARGOS",
-        "segtrack": "SEGTRACK",
-        "unificado": "INLOG · ARGOS · SEGTRACK",
-    }.get((fonte or "").lower(), "INLOG")
+    return "SEGTRACK"
 
 
 def _legenda_html(frota: list[dict[str, Any]]) -> str:

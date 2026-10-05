@@ -208,7 +208,7 @@ def _frota(doc: Document, frota: list[dict[str, Any]]) -> None:
     if not frota:
         doc.add_paragraph("Nenhum GPS neste ciclo.")
         return
-    cols = ["Empresa", "Caminhão", "Placa", "Inlog", "Pontos GPS"]
+    cols = ["Empresa", "Caminhão", "Placa", "Pontos GPS"]
     tabela = doc.add_table(rows=1, cols=len(cols))
     tabela.style = "Table Grid"
     for i, nome in enumerate(cols):
@@ -223,10 +223,9 @@ def _frota(doc: Document, frota: list[dict[str, Any]]) -> None:
     for item in frota:
         celulas = tabela.add_row().cells
         valores = [
-            str(item.get("Empresa") or "—"),
+            "Segtrack",
             str(item.get("Veículo") or item.get("Veiculo") or "—"),
             str(item.get("Placa") or "—"),
-            str(item.get("Inlog") or "—"),
             str(item.get("Pontos GPS") or item.get("pontos") or "—"),
         ]
         for i, valor in enumerate(valores):

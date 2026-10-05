@@ -135,9 +135,6 @@ def montar_linhas_setores(
         status = veredicto
         if confianca:
             status = f"{status} · confiança {confianca}"
-        inlog = str(item.get("inlog") or cob.get("veiculo_inlog") or "").strip()
-        if inlog and inlog not in ident:
-            status = f"{status} · Inlog {inlog}"
         if cob.get("detectado_fora_da_grade"):
             status = f"{status} · setor detectado pelo GPS (fora da grade do dia)"
         if cob.get("motivo_agente") and "detectado" not in status:
@@ -535,7 +532,7 @@ def _html_inlog(
     <p>Setor oficial do mapa de coleta (GPKG). % = km do GPS dentro do setor / km oficial do setor. Linha no mapa = trajeto do compactador no histórico do sinótico.</p>
   </header>
   <div class="wrap">
-    <p class="resumo"><b>{len(linhas)}</b> setores oficiais com GPS Inlog · média concluída <b>{str(media).replace('.', ',')}%</b></p>
+    <p class="resumo"><b>{len(linhas)}</b> setores oficiais com GPS Segtrack · média concluída <b>{str(media).replace('.', ',')}%</b></p>
     <table>
       <thead>
         <tr>

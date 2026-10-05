@@ -514,11 +514,9 @@
           <div id="rota-info" class="rota-info"></div>
           <div id="rota-caminhoes"></div>
         </div>
-        <p class="nav-grupo">Por empresa</p>
-        <select id="sel-empresa" class="campo-side" title="GPS de uma empresa só" onchange="abrirEmpresa(this.value)">
+        <p class="nav-grupo">GPS</p>
+        <select id="sel-empresa" class="campo-side" title="GPS da Segtrack" onchange="abrirEmpresa(this.value)">
           <option value="">Escolher...</option>
-          <option value="inlog">Inlog</option>
-          <option value="argos">Argos</option>
           <option value="segtrack">Segtrack</option>
         </select>
       </nav>
@@ -579,7 +577,7 @@
             </div>
             <button type="button" class="parar" onclick="pararGeracao('log-uni')">Parar</button>
           </div>
-          <div class="topbar-acoes barra-inlog">
+          <div class="topbar-acoes barra-inlog" hidden>
             <input class="campo" id="veiculos" placeholder="Frota (CCL)" value="CCL" title="Filtro da frota Inlog" />
             <button type="button" class="acao-job" onclick="rodar('rotas')">Buscar GPS Inlog</button>
             <div class="menu">
@@ -591,7 +589,7 @@
             </div>
             <button type="button" class="parar" onclick="pararGeracao('log')">Parar</button>
           </div>
-          <div class="topbar-acoes barra-argos">
+          <div class="topbar-acoes barra-argos" hidden>
             <button type="button" class="argos acao-job" onclick="rodarArgos('argos-rotas')">Buscar GPS Argos</button>
             <div class="menu">
               <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
@@ -1041,13 +1039,11 @@
 
     const paginas = {
       uni: ["Relatório", "Relatório do dia", "Diurno: 06:00–18:59. Noturno: a partir das 19:00 até 05:59. Cada um traz os polígonos do dia e desenha a trajetória dentro deles."],
-      inlog: ["Por empresa", "Inlog", "Busca só o GPS da Inlog, no dia escolhido no topo."],
-      argos: ["Por empresa", "Argos", "Busca só o GPS da Argos, no dia escolhido no topo."],
-      segtrack: ["Por empresa", "Segtrack", "Busca só o GPS da Segtrack, no dia escolhido no topo."],
+      segtrack: ["GPS", "Segtrack", "Busca o GPS da Segtrack, no dia escolhido no topo."],
     };
 
     function abrirEmpresa(nome) {
-      if (nome === "inlog" || nome === "argos" || nome === "segtrack") {
+      if (nome === "segtrack") {
         mostrarAba(nome);
         return;
       }
@@ -1055,6 +1051,7 @@
     }
 
     function mostrarAba(nome) {
+      if (nome !== "uni" && nome !== "segtrack") nome = "uni";
       aba = nome;
       document.body.dataset.pagina = nome;
       ["uni", "inlog", "argos", "segtrack"].forEach((id) => {
@@ -1066,14 +1063,13 @@
       $("tab-uni").className = nome === "uni" ? "nav-item ativo" : "nav-item";
       const sel = $("sel-empresa");
       if (sel) {
-        sel.value = (nome === "inlog" || nome === "argos" || nome === "segtrack") ? nome : "";
+        sel.value = nome === "segtrack" ? nome : "";
         sel.className = "campo-side" + (sel.value ? " emp-" + sel.value : "");
       }
       const pagina = paginas[nome] || paginas.uni;
       if ($("kicker-pagina")) $("kicker-pagina").textContent = pagina[0];
       if ($("titulo-pagina")) $("titulo-pagina").textContent = pagina[1];
       if ($("desc-pagina")) $("desc-pagina").textContent = pagina[2];
-      if (nome === "argos") carregarDiaArgos(false);
       if (nome === "segtrack") carregarDiaSegtrack(false);
       if (nome === "uni") atualizar();
     }

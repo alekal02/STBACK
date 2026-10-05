@@ -252,7 +252,7 @@ def _fundir_mesmo_caminhao(caminhoes: list[dict[str, Any]]) -> list[dict[str, An
         vistos_fonte = set()
         for item in grupo:
             pontos.extend(item.get("pontos") or [])
-            nome = str(item.get("fonte_nome") or item.get("fonte") or "")
+            nome = "Segtrack"
             if nome and nome not in vistos_fonte:
                 vistos_fonte.add(nome)
                 fontes_nome.append(nome)
@@ -1102,7 +1102,7 @@ def inspecionar_rota(
 
 
 def incorporar_confirmados(setores: list[dict[str, Any]], output_dir: Path, dia: date) -> None:
-    """Não perde rota que a Inlog/Argos/Segtrack já confirmou como coleta."""
+    """Não perde rota que a Segtrack já confirmou como coleta."""
     por_codigo = {str(s.get("codigo") or ""): s for s in setores}
     iso = dia.isoformat()
     for chave, pasta_rel, rotulo in FONTES:
@@ -1285,10 +1285,9 @@ def gerar_relatorio_setores(
         "recuperadas": [_linha(s) for s in recuperadas],
         "frota": [
             {
-                "Empresa": cam.get("fonte_nome") or "—",
+                "Empresa": "Segtrack",
                 "Veículo": cam.get("veiculo") or "—",
                 "Placa": cam.get("placa") or "—",
-                "Inlog": cam.get("inlog") or "—",
                 "Pontos GPS": len(cam.get("pontos") or []),
             }
             for cam in sorted(caminhoes, key=lambda c: (c.get("fonte_nome") or "", c.get("veiculo") or ""))
@@ -1590,7 +1589,7 @@ def _cards_conclusao(rotas: list[dict[str, Any]], vazia: str = "") -> str:
             f"<div><dt>Conclusão</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
             f"<div><dt>Caminhão</dt><dd>{_esc(cam.get('veiculo') or '—')}</dd></div>"
             f"<div><dt>Placa</dt><dd>{_esc(cam.get('placa') or '—')}</dd></div>"
-            f"<div><dt>Empresa GPS</dt><dd>{_esc(cam.get('fonte_nome') or '—')}</dd></div>"
+            f"<div><dt>Empresa GPS</dt><dd>Segtrack</dd></div>"
             f"<div><dt>Km no polígono</dt><dd>{_esc(_fmt_num(cam.get('km_coleta'), ' km'))}</dd></div>"
             f"<div><dt>Km oficial</dt><dd>{_esc(_fmt_num(setor.get('km_oficial'), ' km'))}</dd></div>"
             f"<div><dt>Pontos GPS</dt><dd>{pts if pts not in (None, '') else '—'}</dd></div>"
@@ -1642,7 +1641,7 @@ def _linha(setor: dict[str, Any]) -> dict[str, str]:
         "Veículo": cam.get("veiculo") or "—",
         "Placa": cam.get("placa") or "—",
         "Caminhões na rota": _txt_caminhoes(setor) or (cam.get("placa") or "—"),
-        "Empresa": cam.get("fonte_nome") or "—",
+        "Empresa": "Segtrack",
         "Km Coleta": _fmt_num(cam.get("km_coleta"), " km"),
         "Km Total": _fmt_num(setor.get("km_oficial"), " km"),
         "Pontos GPS": str(int(cam["pontos_no_setor"])) if cam.get("pontos_no_setor") not in (None, "", "—") else "—",
@@ -1881,10 +1880,7 @@ def _html(
       .barra .nome { font-size: 11px; }
       .barra b { font-size: 14px; }
     """
-    nome_fonte = {
-        "argos": "ARGOS",
-        "segtrack": "SEGTRACK",
-    }.get((fonte or "").lower(), "INLOG · ARGOS · SEGTRACK")
+    nome_fonte = "SEGTRACK"
     dia_br = rotulo_periodo(dia, hora_inicio, hora_fim, data_fim)
     header = (tpl / "header.html").read_text(encoding="utf-8")
     header = header.replace("{{FONTE}}", _esc(nome_fonte)).replace("{{DIA}}", _esc(dia_br))

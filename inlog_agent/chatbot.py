@@ -603,7 +603,7 @@ def _legenda(dia: str) -> str:
     return (
         f"📍 Relatório GPS · {rotulo}\n"
         f"Concluídas: {feitas} · Parciais: {parciais} · Apoios: {apoios} · Não feitas: {nao}\n"
-        "Cobertura dos rastreadores (Inlog + Argos + Segtrack). Não é prova de coleta."
+        "Cobertura do GPS da Segtrack. Não é prova de coleta."
     )
 
 

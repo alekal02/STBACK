@@ -241,12 +241,6 @@ def load_settings() -> Settings:
 
     username = os.getenv("INLOG_USER", "").strip()
     password = os.getenv("INLOG_PASSWORD", "").strip()
-    if not username or not password:
-        print(
-            "Aviso: preencha INLOG_USER e INLOG_PASSWORD no .env "
-            "para o robô conseguir entrar no portal.",
-            flush=True,
-        )
 
     data_raw = os.getenv("DATA_ROTA", "").strip()
     data_rota = date.fromisoformat(data_raw) if data_raw else date.today()

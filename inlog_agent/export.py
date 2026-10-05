@@ -392,7 +392,7 @@ def write_mapa_html(
       const box = document.createElement("div");
       box.className = "item";
       box.innerHTML = `<div><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>
-        <small>${{sit}} · ${{rota.fonte_nome || rota.fonte || ""}}<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
+        <small>${{sit}} · Segtrack<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
         <div style="margin-top:6px;font-size:12px;line-height:1.45">${{chips}}</div>
         <div class="barra"><span style="width:${{Math.min(pct,100)}}%;background:${{c}}"></span></div>`;
       box.onclick = () => focar(idx);

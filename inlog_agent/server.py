@@ -1196,19 +1196,67 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", origem.rstrip("/"))
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token, If-None-Match",
+        )
+        self.send_header("Access-Control-Expose-Headers", "ETag")
 
-    def _json(self, status: int, payload: Any) -> None:
+    def _json(self, status: int, payload: Any, extra: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._corpo(status, body, "application/json; charset=utf-8", extra)
+
+    def _corpo(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        extra: dict[str, str] | None = None,
+    ) -> None:
         try:
             self.send_response(status)
             self._cors()
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            for chave, valor in (extra or {}).items():
+                self.send_header(chave, valor)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if body:
+                self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             return
+
+    def _mapa_vivo(self, path: str, qs: dict[str, list[str]]) -> None:
+        from .live_mapa import atualizacoes, detalhe_rota, geometria_bytes, trilhas
+
+        data = (qs.get("data") or [None])[0]
+        turno = (qs.get("turno") or ["diurno"])[0]
+        sem_cache = {"Cache-Control": "no-store"}
+        try:
+            if path.endswith("/geometry"):
+                body, etag = geometria_bytes(data, turno)
+                pedido = (self.headers.get("If-None-Match") or "").strip()
+                if pedido == etag:
+                    self._corpo(304, b"", "application/json; charset=utf-8", {"ETag": etag, "Cache-Control": "private, max-age=86400"})
+                    return
+                self._corpo(
+                    200,
+                    body,
+                    "application/geo+json; charset=utf-8",
+                    {"ETag": etag, "Cache-Control": "private, max-age=86400"},
+                )
+                return
+            if path.endswith("/tracks"):
+                self._json(200, trilhas(data, turno), sem_cache)
+                return
+            if path.endswith("/track-updates"):
+                self._json(200, atualizacoes(data, turno, (qs.get("since") or [None])[0]), sem_cache)
+                return
+            self._json(200, detalhe_rota(data, turno, (qs.get("rota") or [None])[0]), sem_cache)
+        except ValueError as exc:
+            self._json(400, {"ok": False, "erro": str(exc)}, sem_cache)
+        except Exception as exc:
+            self._json(500, {"ok": False, "erro": str(exc)}, sem_cache)
 
     def _bytes(
         self,
@@ -1298,6 +1346,14 @@ class Handler(BaseHTTPRequestHandler):
                         "resumo": {},
                     },
                 )
+            return
+        if path in {
+            "/api/live-report/geometry",
+            "/api/live-report/tracks",
+            "/api/live-report/track-updates",
+            "/api/live-report/route-detail",
+        }:
+            self._mapa_vivo(path, parse_qs(parsed.query))
             return
         if path == "/api/chatbot-config":
             from .chatbot import publico_config, _esconder_servidor
@@ -1767,6 +1823,7 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
             )
     iniciar_disparo_automatico()
     from .live_sync import iniciar_loop
+    import inlog_agent.live_mapa  # shapely não é seguro se duas abas importarem ao mesmo tempo
 
     iniciar_loop()
     try:

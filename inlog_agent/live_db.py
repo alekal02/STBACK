@@ -70,6 +70,15 @@ def provar_disco() -> str:
     return "ok" if texto.strip() else "sem_leitura"
 
 
+def _hora_diag(iso: str) -> str:
+    texto = str(iso or "").strip()
+    if "T" in texto:
+        return texto.split("T", 1)[1][:8]
+    if " " in texto and ":" in texto:
+        return texto.split(" ", 1)[1][:8]
+    return texto[:8]
+
+
 def diagnostico() -> dict[str, Any]:
     """Estado operacional, sem credenciais."""
     from .live_sync import ocupada
@@ -100,6 +109,7 @@ def diagnostico() -> dict[str, Any]:
         from .live_sync import ciclos_executados
 
         info["ciclos_gps"] = ciclos_executados()
+        info["ciclos"] = info["ciclos_gps"]
     except Exception:
         info["live_sync"] = "inativo"
     if no_render() and not DISCO.is_dir():
@@ -116,16 +126,29 @@ def diagnostico() -> dict[str, Any]:
             modo = str(con.execute("PRAGMA journal_mode").fetchone()[0] or "")
             info["sqlite"] = "ok"
             info["wal"] = "ok" if modo.lower() == "wal" else modo or "nao"
+            from .live_sync import agora_brt, turno_operacional
+
+            dia_op, turno_op = turno_operacional(agora_brt())
+            info["data_operacional"] = dia_op.strftime("%d/%m/%Y")
+            info["turno_ativo"] = turno_op.upper()
             row = con.execute(
                 """
                 SELECT data, turno, ultima_sincronizacao, falha, telemetria,
                        reconstrucao_em, reconstrucao_tentativas, reconstrucao_duracao_s,
                        reconstrucao_memoria_mb, reconstrucao_pontos
                 FROM turno
-                ORDER BY atualizado_em DESC
-                LIMIT 1
-                """
+                WHERE data = ? AND turno = ?
+                """,
+                (dia_op.isoformat(), turno_op),
             ).fetchone()
+            if row is None:
+                info["data"] = dia_op.isoformat()
+                info["turno"] = turno_op
+                info["pontos"] = 0
+                info["rotas"] = 0
+                info["modo"] = "reconstrucao"
+                info["ultimo_sync_hora"] = ""
+                info["ultimo_gps_hora"] = ""
             if row and row["ultima_sincronizacao"]:
                 info["ultimo_sync"] = str(row["ultima_sincronizacao"])
             if row:
@@ -187,6 +210,8 @@ def diagnostico() -> dict[str, Any]:
                     if info["veiculos"] and info["veiculos"] == info["veiculos_com_cursor"]
                     else "reconstrucao"
                 )
+                info["ultimo_sync_hora"] = _hora_diag(info.get("ultimo_sync") or "")
+                info["ultimo_gps_hora"] = _hora_diag(info.get("ultimo_gps") or "")
             caminho = Path(info["banco"])
             tamanho = 0
             for extra in (caminho, Path(str(caminho) + "-wal"), Path(str(caminho) + "-shm")):
@@ -299,6 +324,20 @@ def _schema(con: sqlite3.Connection) -> None:
     for nome, tipo in extras.items():
         if nome not in colunas:
             con.execute(f"ALTER TABLE turno ADD COLUMN {nome} {tipo}")
+    colunas_rota = {str(row[1]) for row in con.execute("PRAGMA table_info(rota)")}
+    extras_rota = {
+        "entrada_lat": "REAL",
+        "entrada_lon": "REAL",
+        "entrada_hora": "TEXT",
+        "saida_lat": "REAL",
+        "saida_lon": "REAL",
+        "saida_hora": "TEXT",
+        "trechos_feitos": "TEXT",
+        "trechos_faltando": "TEXT",
+    }
+    for nome, tipo in extras_rota.items():
+        if nome not in colunas_rota:
+            con.execute(f"ALTER TABLE rota ADD COLUMN {nome} {tipo}")
     con.commit()
 
 
@@ -358,13 +397,16 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
         codigo = str(rota.get("codigo") or "").upper()
         if not codigo:
             continue
+        tem_geo = 1 if rota.get("_geo") else 0
         con.execute(
             """
             INSERT INTO rota (
                 data, turno, codigo, rota, frequencia, veiculo, placa, status, grupo,
                 percentual, inicio, ultimo_gps, tempo_em_rota, km_coleta, km_oficial,
-                na_grade, atualizado_em
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                na_grade, atualizado_em,
+                entrada_lat, entrada_lon, entrada_hora, saida_lat, saida_lon, saida_hora,
+                trechos_feitos, trechos_faltando
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(data, turno, codigo) DO UPDATE SET
                 rota = excluded.rota,
                 frequencia = excluded.frequencia,
@@ -379,7 +421,15 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 km_coleta = excluded.km_coleta,
                 km_oficial = excluded.km_oficial,
                 na_grade = excluded.na_grade,
-                atualizado_em = excluded.atualizado_em
+                atualizado_em = excluded.atualizado_em,
+                entrada_lat = CASE WHEN ? = 1 THEN excluded.entrada_lat ELSE rota.entrada_lat END,
+                entrada_lon = CASE WHEN ? = 1 THEN excluded.entrada_lon ELSE rota.entrada_lon END,
+                entrada_hora = CASE WHEN ? = 1 THEN excluded.entrada_hora ELSE rota.entrada_hora END,
+                saida_lat = CASE WHEN ? = 1 THEN excluded.saida_lat ELSE rota.saida_lat END,
+                saida_lon = CASE WHEN ? = 1 THEN excluded.saida_lon ELSE rota.saida_lon END,
+                saida_hora = CASE WHEN ? = 1 THEN excluded.saida_hora ELSE rota.saida_hora END,
+                trechos_feitos = CASE WHEN ? = 1 THEN excluded.trechos_feitos ELSE rota.trechos_feitos END,
+                trechos_faltando = CASE WHEN ? = 1 THEN excluded.trechos_faltando ELSE rota.trechos_faltando END
             """,
             (
                 data,
@@ -399,6 +449,22 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 rota.get("km_oficial") or "",
                 1 if rota.get("na_grade") else 0,
                 quando,
+                rota.get("entrada_lat"),
+                rota.get("entrada_lon"),
+                rota.get("entrada_hora") or "",
+                rota.get("saida_lat"),
+                rota.get("saida_lon"),
+                rota.get("saida_hora") or "",
+                rota.get("trechos_feitos") or "[]",
+                rota.get("trechos_faltando") or "[]",
+                tem_geo,
+                tem_geo,
+                tem_geo,
+                tem_geo,
+                tem_geo,
+                tem_geo,
+                tem_geo,
+                tem_geo,
             ),
         )
 
@@ -523,6 +589,12 @@ def ler_view(
             "km_coleta": row["km_coleta"],
             "km_oficial": row["km_oficial"],
             "na_grade": bool(row["na_grade"]),
+            "entrada_lat": row["entrada_lat"],
+            "entrada_lon": row["entrada_lon"],
+            "entrada_hora": row["entrada_hora"] or "",
+            "saida_lat": row["saida_lat"],
+            "saida_lon": row["saida_lon"],
+            "saida_hora": row["saida_hora"] or "",
         }
         for row in con.execute(
             "SELECT * FROM rota WHERE data = ? AND turno = ? ORDER BY codigo",

@@ -523,6 +523,7 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
         "motivo": "nenhum caminhão com volume de coleta neste polígono",
         "caminhao": None,
         "_geom": setor.get("geom"),
+        "_ruas": setor.get("ruas") or [],
     }
     if not clips:
         return base

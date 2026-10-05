@@ -743,7 +743,67 @@ def _recalcular_oficial(con, output_dir: Path, dia: date, turno: str, codigos: l
     if not caminhoes:
         return []
     setores = analisar_codigos(dia, caminhoes, set(codigos), turno)
-    return [_rota(_linha(setor)) for setor in setores]
+    rotas = [_rota(_linha(setor)) for setor in setores]
+    _anexar_geometria_visual(setores, caminhoes, rotas)
+    return rotas
+
+
+def _par_latlon(ponto: Any) -> tuple[float | None, float | None]:
+    if not isinstance(ponto, (list, tuple)) or len(ponto) < 2:
+        return None, None
+    try:
+        return float(ponto[0]), float(ponto[1])
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _anexar_geometria_visual(
+    setores: list[dict[str, Any]],
+    caminhoes: list[dict[str, Any]],
+    rotas: list[dict[str, Any]],
+) -> None:
+    """Guarda entrada, saída e trechos que a cobertura deste passo já sabe desenhar.
+
+    O percentual gravado continua o de _linha. avaliar_cobertura só empresta
+    trechos_feitos e trechos_faltando; o percentual dela é ignorado.
+    """
+    from .cobertura import avaliar_cobertura
+    from .live_mapa import compactar_trechos
+
+    por_codigo = {str(item.get("codigo") or "").upper(): item for item in setores}
+    pontos_placa = {str(item.get("placa") or ""): item.get("pontos") or [] for item in caminhoes}
+    for rota in rotas:
+        codigo = str(rota.get("codigo") or "").upper()
+        setor = por_codigo.get(codigo) or {}
+        cam = setor.get("caminhao") or {}
+        entrada_lat, entrada_lon = _par_latlon(cam.get("ponto_inicio"))
+        saida_lat, saida_lon = _par_latlon(cam.get("ponto_fim"))
+        rota["_geo"] = True
+        rota["entrada_lat"] = entrada_lat
+        rota["entrada_lon"] = entrada_lon
+        rota["entrada_hora"] = str(cam.get("hora_inicio") or "")
+        rota["saida_lat"] = saida_lat
+        rota["saida_lon"] = saida_lon
+        rota["saida_hora"] = str(cam.get("hora_fim") or "")
+        feitos: list[Any] = []
+        faltando: list[Any] = []
+        pontos = pontos_placa.get(str(cam.get("placa") or "")) or []
+        ruas = setor.get("_ruas") or []
+        if pontos and ruas:
+            try:
+                cob = avaliar_cobertura(
+                    [],
+                    pontos,
+                    geom_setor=setor.get("_geom"),
+                    km_oficial=setor.get("km_oficial"),
+                    ruas=ruas,
+                )
+                feitos = compactar_trechos(cob.get("trechos_feitos"))
+                faltando = compactar_trechos(cob.get("trechos_faltando"))
+            except Exception as exc:
+                print(f"mapa visual: trechos de {codigo} não gravados ({exc})", flush=True)
+        rota["trechos_feitos"] = json.dumps(feitos, separators=(",", ":"))
+        rota["trechos_faltando"] = json.dumps(faltando, separators=(",", ":"))
 
 
 def _sem_cursor(placas: list[dict[str, Any]]) -> bool:

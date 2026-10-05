@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import shutil
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -15,12 +14,6 @@ from pyproj import Transformer
 
 from .config import ROOT
 
-GPKG_CANDIDATOS = (
-    Path.home() / "Downloads" / "Pacote de camadas Coleta RSD Aparecida.gpkg",
-    ROOT / "data" / "mapa-coleta-aparecida.gpkg",
-    Path.home() / "Downloads" / "MAPA COLETA RV02 - COM NUM MORADIAS E KM (1).gpkg",
-    Path.home() / "Downloads" / "MAPA COLETA RV02 - COM NUM MORADIAS E KM.gpkg",
-)
 GPKG_LOCAL = ROOT / "data" / "mapa-coleta-aparecida.gpkg"
 ENVELOPE = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
 ALIAS_DIA = {0: "SEG", 1: "TER", 2: "QUA", 3: "QUI", 4: "SEX", 5: "SAB", 6: "DOM"}
@@ -30,20 +23,11 @@ _CODIGO = re.compile(r"\b(\d{2}[A-Z]{2,4})\b")
 
 
 def caminho_gpkg() -> Path | None:
-    for caminho in GPKG_CANDIDATOS:
-        if caminho.is_file():
-            return caminho
-    return None
+    return GPKG_LOCAL if GPKG_LOCAL.is_file() else None
 
 
 def _sincronizar_gpkg() -> Path | None:
-    origem = caminho_gpkg()
-    if not origem:
-        return None
-    GPKG_LOCAL.parent.mkdir(parents=True, exist_ok=True)
-    if origem.resolve() != GPKG_LOCAL.resolve():
-        shutil.copy2(origem, GPKG_LOCAL)
-    return GPKG_LOCAL if GPKG_LOCAL.is_file() else origem
+    return caminho_gpkg()
 
 
 def _gpkg_geom(blob: bytes):

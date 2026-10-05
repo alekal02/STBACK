@@ -269,8 +269,11 @@ def load_settings() -> Settings:
     else:
         output_dir = ROOT / "output"
         session_dir = ROOT / "sessions"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    session_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Aviso: não consegui criar a pasta de coletas ({exc}).", flush=True)
 
     return Settings(
         username=username,

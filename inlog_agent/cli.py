@@ -3,11 +3,6 @@ from __future__ import annotations
 import argparse
 
 from .config import aplicar_periodo, load_settings, rotulo_periodo
-from .pdf import gerar_pdf_dia
-from .argos_rotas import executar_argos
-from .export_gpkg import gerar_gpkg_argos, gerar_gpkg_inlog, gerar_gpkg_segtrack
-from .rotas import executar_rotas
-from .segtrack_rotas import executar_segtrack
 from .server import servir
 
 
@@ -25,6 +20,8 @@ def cmd_rotas(
             **settings.__dict__,
             "filtro_veiculos": tuple(item.strip() for item in veiculos.split(",") if item.strip()),
         })
+
+    from .rotas import executar_rotas
 
     print(
         f"Extraindo rotas de {rotulo_periodo(settings.data_rota, settings.hora_inicio, settings.hora_fim, settings.data_fim)}...",
@@ -57,6 +54,8 @@ def cmd_segtrack_rotas(
     hora_fim: str | None = None,
     data_fim: str | None = None,
 ) -> None:
+    from .segtrack_rotas import executar_segtrack
+
     settings = aplicar_periodo(load_settings(), data=data, hora_inicio=hora_inicio, hora_fim=hora_fim, data_fim=data_fim)
     print(
         f"Extraindo Segtrack de {rotulo_periodo(settings.data_rota, settings.hora_inicio, settings.hora_fim, settings.data_fim)}...",
@@ -81,6 +80,8 @@ def cmd_argos_rotas(
     hora_fim: str | None = None,
     data_fim: str | None = None,
 ) -> None:
+    from .argos_rotas import executar_argos
+
     settings = aplicar_periodo(load_settings(), data=data, hora_inicio=hora_inicio, hora_fim=hora_fim, data_fim=data_fim)
     print(
         f"Extraindo Argos de {rotulo_periodo(settings.data_rota, settings.hora_inicio, settings.hora_fim, settings.data_fim)}...",
@@ -178,6 +179,8 @@ def main(argv: list[str] | None = None) -> None:
         servir(porta=args.porta, host=args.host)
         return
     if args.comando == "pdf":
+        from .pdf import gerar_pdf_dia
+
         settings = load_settings()
         if args.argos:
             pasta = settings.output_dir / "argos" / args.data
@@ -200,11 +203,15 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.comando == "argos-gpkg":
+        from .export_gpkg import gerar_gpkg_argos
+
         settings = load_settings()
         caminho = gerar_gpkg_argos(settings.output_dir / "argos" / args.data)
         print(f"GPKG: {caminho}", flush=True)
         return
     if args.comando == "gpkg":
+        from .export_gpkg import gerar_gpkg_inlog
+
         settings = load_settings()
         caminho = gerar_gpkg_inlog(settings.output_dir / "rotas" / args.data)
         print(f"GPKG: {caminho}", flush=True)
@@ -219,6 +226,8 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.comando == "segtrack-gpkg":
+        from .export_gpkg import gerar_gpkg_segtrack
+
         settings = load_settings()
         caminho = gerar_gpkg_segtrack(settings.output_dir / "segtrack" / args.data)
         print(f"GPKG: {caminho}", flush=True)

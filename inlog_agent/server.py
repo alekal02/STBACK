@@ -1381,8 +1381,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/arquivos/"):
             settings = load_settings()
             relativo = path.removeprefix("/arquivos/")
-            alvo = (settings.output_dir / Path(relativo)).resolve()
-            if not str(alvo).startswith(str(settings.output_dir.resolve())) or not alvo.is_file():
+            base = settings.output_dir.resolve()
+            alvo = (base / Path(relativo)).resolve()
+            if not alvo.is_relative_to(base) or not alvo.is_file():
                 self._json(404, {"erro": "Arquivo não encontrado."})
                 return
             tipo = mimetypes.guess_type(alvo.name)[0] or "application/octet-stream"
@@ -1574,12 +1575,22 @@ class SalaHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
+def _porta_do_ambiente(explicita: int | None) -> int:
+    if explicita:
+        return explicita
+    bruto = (os.getenv("PORT") or os.getenv("PORTA") or "").strip()
+    try:
+        return int(bruto) if bruto else 5889
+    except ValueError:
+        return 5889
+
+
 def servir(porta: int | None = None, host: str | None = None) -> None:
     try:
         settings = load_settings()
-        usada = porta or settings.porta
+        usada = porta or settings.porta or _porta_do_ambiente(None)
     except Exception:
-        usada = porta or 5889
+        usada = _porta_do_ambiente(porta)
     padrao_host = "0.0.0.0" if os.getenv("PORT") else "127.0.0.1"
     usado_host = (host or os.getenv("HOST") or padrao_host).strip() or padrao_host
     try:

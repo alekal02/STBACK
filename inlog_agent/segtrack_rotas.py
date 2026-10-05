@@ -18,13 +18,6 @@ from .relatorio_diario import (
     html_secao_mapas_caminhao,
     montar_linhas_setores,
 )
-from .segtrack_web import (
-    extrair_frota_e_percursos,
-    fazer_login,
-    open_segtrack_session,
-)
-
-
 def _norm_placa(placa: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (placa or "").upper())
 
@@ -285,6 +278,8 @@ def executar_segtrack(
             progress(f"API Fulltrack falhou ({exc}). Tentando o site Segtrack...")
             rotas = []
     if not rotas and usa_site:
+        from .segtrack_web import extrair_frota_e_percursos, fazer_login, open_segtrack_session
+
         with open_segtrack_session(settings, headed=headed) as session:
             page = session.page
             assert page is not None

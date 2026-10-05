@@ -1200,7 +1200,7 @@ class Handler(BaseHTTPRequestHandler):
             "Access-Control-Allow-Headers",
             "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token, If-None-Match",
         )
-        self.send_header("Access-Control-Expose-Headers", "ETag")
+        self.send_header("Access-Control-Expose-Headers", "ETag, Content-Disposition")
 
     def _json(self, status: int, payload: Any, extra: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1346,6 +1346,20 @@ class Handler(BaseHTTPRequestHandler):
                         "resumo": {},
                     },
                 )
+            return
+        if path == "/api/live-report/operacao.pdf":
+            from .live_pdf import gerar_operacao
+
+            qs = parse_qs(parsed.query)
+            try:
+                conteudo, nome = gerar_operacao((qs.get("data") or [None])[0], (qs.get("turno") or [None])[0])
+                self._bytes(200, conteudo, "application/pdf", download=nome)
+            except TimeoutError as exc:
+                self._json(429, {"ok": False, "erro": str(exc)})
+            except ValueError as exc:
+                self._json(400, {"ok": False, "erro": str(exc)})
+            except Exception as exc:
+                self._json(500, {"ok": False, "erro": str(exc)})
             return
         if path in {
             "/api/live-report/geometry",

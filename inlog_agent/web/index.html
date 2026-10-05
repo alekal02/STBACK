@@ -1095,7 +1095,7 @@
     function erroPainel(e) {
       const t = String((e && e.message) || e || "");
       if (/Failed to fetch|NetworkError|ERR_CONNECTION|Load failed|Network request failed/i.test(t)) {
-        return "O servidor do painel fechou. Feche esta aba, clique de novo em iniciar.bat e NAO feche a janela preta. O relatorio so funciona com ela aberta.";
+        return "Não foi possível falar com o servidor. Espere alguns segundos e tente de novo.";
       }
       return t || "Falha na API";
     }

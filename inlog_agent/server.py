@@ -1590,8 +1590,6 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         print(exc, flush=True)
         return
     print(f"Sala tecnica em http://{usado_host}:{usada}", flush=True)
-    print("NAO feche esta janela. Sem ela o navegador mostra Failed to fetch.", flush=True)
-    print("Ctrl+C para encerrar.", flush=True)
     iniciar_disparo_automatico()
     try:
         httpd.serve_forever()
@@ -1601,6 +1599,6 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         import traceback
 
         traceback.print_exc()
-        print("\nO painel caiu. Rode iniciar.bat de novo.", flush=True)
+        print("\nO servidor parou.", flush=True)
     finally:
         httpd.server_close()

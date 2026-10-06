@@ -190,14 +190,15 @@ def _compactador_rsd_aparecida(
     evento: dict[str, Any] | None,
     placas_inlog: set[str] | None = None,
 ) -> bool:
-    """Compactador de Aparecida: frota Inlog (CCL) ou VW 17.260/18.260. Sem Iveco nem Argos puro."""
+    """Compactador de Aparecida: frota Inlog (CCL) ou VW 17.260/18.260.
+
+    O prefixo da placa nao entra na decisao. Vale modelo, tipo e localizacao.
+    """
     placa = _norm_placa(str(item.get("ras_vei_placa") or ""))
     if not placa:
         return False
     if placas_inlog and placa in placas_inlog:
         return True
-    if placa.startswith("RB"):
-        return False
     try:
         tipo = int(item.get("ras_vei_tipo") or 0)
     except (TypeError, ValueError):

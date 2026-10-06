@@ -37,9 +37,12 @@ FOLGA_S = 90
 POSICAO_S = 30
 GPS_S = 120
 ATRASO_S = 15 * 60
+REDESCOBERTA_S = 10 * 60
 _RECON_ESPERA_S = (0, 180, 480, 900)
 _CICLOS = 0
 _RECONSTRUINDO = False
+_CACHE_FROTA_EM = 0.0
+_CACHE_FROTA: list[dict[str, Any]] | None = None
 _ULTIMO_CICLO_S = 0.0
 _MAIOR_CICLO_S = 0.0
 _ROTAS_CICLO = 0
@@ -453,8 +456,9 @@ def ciclo_gps(
             "19:00" if pedido == "noturno" else "06:00",
             "05:59" if pedido == "noturno" else "18:59",
         )
+        limite = fim_da_consulta(dia, pedido, momento)
         placas = ler_placas(con, dia.isoformat(), pedido)
-        pesada = _sem_cursor(placas)
+        pesada = _turno_sem_estado(placas)
         inicio_pesada = 0.0
         if pesada:
             falta = _atraso_reconstrucao(con, dia.isoformat(), pedido, momento)
@@ -506,10 +510,26 @@ def ciclo_gps(
                         con.commit()
                         print("Reconstrução falhou: Fulltrack não devolveu placas.", flush=True)
                         return {"novos": 0, "rotas": []}
+        elif placas:
+            placas = [item for item in placas if str(item["last_gps_timestamp"] or "").strip()]
         novos_total = 0
         pontos_novos: list[dict[str, Any]] = []
         falha = ""
-        limite = fim_da_consulta(dia, pedido, momento)
+        aberto = situacao is not None and str(situacao["situacao"] or "") == "ABERTO"
+        if not pesada and aberto:
+            extras, gravados = _bootstrap_placas_novas(
+                con,
+                dia,
+                pedido,
+                inicio_turno,
+                limite,
+                momento,
+                buscar_historico or _historico_fulltrack,
+                descobrir,
+                ponto_pertence,
+            )
+            pontos_novos.extend(extras)
+            novos_total += gravados
         global _RECONSTRUINDO
         if inicio_pesada:
             _RECONSTRUINDO = True
@@ -854,6 +874,13 @@ def _importar_pontos_json(con, output_dir: Path, dia: date, turno: str) -> None:
     for item in _ler_rotas_gps(output_dir, dia):
         placa = str(item.get("placa") or "").strip()
         pontos = item.get("pontos") or item.get("pontos_dia") or []
+        from .live_turno import ponto_pertence
+
+        pontos = [
+            ponto
+            for ponto in pontos
+            if ponto_pertence(str(ponto.get("timestamp") or ponto.get("ts") or ""), dia, turno)
+        ]
         if not placa or not pontos:
             continue
         inserir_pontos(con, dia.isoformat(), turno, placa, pontos)
@@ -1003,6 +1030,165 @@ def _sem_cursor(placas: list[dict[str, Any]]) -> bool:
     if not placas:
         return True
     return any(not str(item["last_gps_timestamp"] or "").strip() for item in placas)
+
+
+def _turno_sem_estado(placas: list[dict[str, Any]]) -> bool:
+    """Reconstrucao so quando nenhuma placa tem cursor. Placa nova nao reconstrui."""
+    if not placas:
+        return True
+    return not any(str(item["last_gps_timestamp"] or "").strip() for item in placas)
+
+
+def _limpar_cache_frota() -> None:
+    global _CACHE_FROTA_EM, _CACHE_FROTA
+    _CACHE_FROTA_EM = 0.0
+    _CACHE_FROTA = None
+
+
+def _catalogo_frota(
+    descobrir: Callable[[], list[dict[str, Any]]] | None,
+) -> list[dict[str, Any]]:
+    """Catalogo da frota valida. Repete no maximo a cada 10 minutos, sem historico."""
+    global _CACHE_FROTA_EM, _CACHE_FROTA
+    agora_m = time.monotonic()
+    if _CACHE_FROTA is not None and agora_m - _CACHE_FROTA_EM < REDESCOBERTA_S:
+        return _CACHE_FROTA
+    try:
+        achadas = list((descobrir or _descobrir_frota)() or [])
+    except Exception as exc:
+        print(f"Redescoberta da frota falhou: {exc}", flush=True)
+        return list(_CACHE_FROTA or [])
+    _CACHE_FROTA = achadas
+    _CACHE_FROTA_EM = agora_m
+    return achadas
+
+
+def _baixar_desde_inicio(
+    con,
+    dia: date,
+    turno: str,
+    placa: str,
+    veiculo: str,
+    vehicle_id: str,
+    inicio_turno: datetime,
+    limite: datetime,
+    momento: datetime,
+    buscar_historico: Callable[..., list[dict[str, Any]]],
+    ponto_pertence: Callable[..., bool],
+) -> tuple[list[dict[str, Any]], int]:
+    """Historico de uma placa desde o inicio do turno. Falha deixa o cursor vazio."""
+    try:
+        eventos = buscar_historico(placa, vehicle_id, inicio_turno, limite)
+    except Exception as exc:
+        print(f"Historico inicial de {placa} falhou: {exc}", flush=True)
+        return [], 0
+    recebidos = [_ponto_local(evento, placa) for evento in eventos or []]
+    recebidos = [
+        ponto
+        for ponto in recebidos
+        if ponto and ponto_pertence(str(ponto.get("timestamp") or ""), dia, turno)
+    ]
+    gravados = inserir_pontos(con, dia.isoformat(), turno, placa, recebidos)
+    if recebidos:
+        cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
+        novos = recebidos
+    else:
+        cursor = limite.isoformat(timespec="seconds")
+        novos = []
+    marcar_placa(
+        con,
+        dia.isoformat(),
+        turno,
+        placa,
+        veiculo=veiculo,
+        vehicle_id=vehicle_id,
+        last_gps_timestamp=cursor,
+        telemetria=classificar_telemetria(cursor, momento),
+    )
+    return novos, gravados
+
+
+def _bootstrap_placas_novas(
+    con,
+    dia: date,
+    turno: str,
+    inicio_turno: datetime,
+    limite: datetime,
+    momento: datetime,
+    buscar_historico: Callable[..., list[dict[str, Any]]],
+    descobrir: Callable[[], list[dict[str, Any]]] | None,
+    ponto_pertence: Callable[..., bool],
+) -> tuple[list[dict[str, Any]], int]:
+    """Placa ausente ou ja cadastrada sem cursor: historico so dela, desde o inicio."""
+    from .fulltrack_api import _fmt_placa, _norm_placa
+
+    linhas = list(ler_placas(con, dia.isoformat(), turno))
+    atuais = {_norm_placa(str(row["placa"])) for row in linhas}
+    novos: list[dict[str, Any]] = []
+    gravados_total = 0
+    for row in linhas:
+        if str(row["last_gps_timestamp"] or "").strip():
+            continue
+        placa = str(row["placa"] or "").strip()
+        if not placa:
+            continue
+        extras, gravados = _baixar_desde_inicio(
+            con,
+            dia,
+            turno,
+            placa,
+            str(row["veiculo"] or placa),
+            str(row["vehicle_id"] or ""),
+            inicio_turno,
+            limite,
+            momento,
+            buscar_historico,
+            ponto_pertence,
+        )
+        novos.extend(extras)
+        gravados_total += gravados
+        if extras or gravados:
+            print(
+                f"Placa sem cursor {placa} no {turno} {dia.isoformat()}: historico desde o inicio do turno.",
+                flush=True,
+            )
+    for item in _catalogo_frota(descobrir):
+        placa = _fmt_placa(str(item.get("placa") or ""))
+        chave = _norm_placa(placa)
+        if not placa or chave in atuais:
+            continue
+        atuais.add(chave)
+        veiculo = str(item.get("veiculo") or placa)
+        vehicle_id = str(item.get("vehicle_id") or "")
+        marcar_placa(
+            con,
+            dia.isoformat(),
+            turno,
+            placa,
+            veiculo=veiculo,
+            vehicle_id=vehicle_id,
+        )
+        extras, gravados = _baixar_desde_inicio(
+            con,
+            dia,
+            turno,
+            placa,
+            veiculo,
+            vehicle_id,
+            inicio_turno,
+            limite,
+            momento,
+            buscar_historico,
+            ponto_pertence,
+        )
+        novos.extend(extras)
+        gravados_total += gravados
+        if extras or gravados:
+            print(
+                f"Placa nova {placa} no {turno} {dia.isoformat()}: historico desde o inicio do turno.",
+                flush=True,
+            )
+    return novos, gravados_total
 
 
 def _atraso_reconstrucao(con, data: str, turno: str, momento: datetime) -> int | None:

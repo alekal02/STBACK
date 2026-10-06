@@ -201,14 +201,21 @@ def _simplificar(coords: list[tuple[float, float]]) -> list[list[float]]:
     return pontos
 
 
-def codigo_que_contem(lat: float, lon: float, setores: list[dict[str, Any]]) -> str | None:
-    """Setor oficial que cobre o ponto. O menor polígono ganha se houver sobreposição."""
-    from shapely.geometry import Point, Polygon
+_SETORES_TURNO: dict[tuple[str, str], list[dict[str, Any]]] = {}
+_POLIGONOS_PRONTOS: dict[tuple[tuple[str, int], ...], list[tuple[str, Any, float]]] = {}
 
-    ponto = Point(float(lon), float(lat))
-    melhor = None
-    area = None
+
+def _preparar_setores(setores: list[dict[str, Any]]) -> list[tuple[str, Any, float]]:
+    from shapely.geometry import Polygon
+    from shapely.prepared import prep
+
+    chave = tuple((str(setor.get("codigo") or ""), len(setor.get("aneis") or [])) for setor in setores or [])
+    pronto = _POLIGONOS_PRONTOS.get(chave)
+    if pronto is not None:
+        return pronto
+    itens: list[tuple[str, Any, float]] = []
     for setor in setores or []:
+        codigo = str(setor.get("codigo") or "")
         for anel in setor.get("aneis") or []:
             coords = [(float(par[1]), float(par[0])) for par in anel if isinstance(par, (list, tuple)) and len(par) >= 2]
             if len(coords) < 4:
@@ -216,12 +223,26 @@ def codigo_que_contem(lat: float, lon: float, setores: list[dict[str, Any]]) -> 
             poly = Polygon(coords)
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            if poly.is_empty or not poly.covers(ponto):
+            if poly.is_empty:
                 continue
-            tamanho = float(poly.area)
-            if area is None or tamanho < area:
-                area = tamanho
-                melhor = str(setor.get("codigo") or "")
+            itens.append((codigo, prep(poly), float(poly.area)))
+    _POLIGONOS_PRONTOS[chave] = itens
+    return itens
+
+
+def codigo_que_contem(lat: float, lon: float, setores: list[dict[str, Any]]) -> str | None:
+    """Setor oficial que cobre o ponto. O menor polígono ganha se houver sobreposição."""
+    from shapely.geometry import Point
+
+    ponto = Point(float(lon), float(lat))
+    melhor = None
+    area = None
+    for codigo, pronto, tamanho in _preparar_setores(setores):
+        if not pronto.covers(ponto):
+            continue
+        if area is None or tamanho < area:
+            area = tamanho
+            melhor = codigo
     return melhor or None
 
 
@@ -229,11 +250,17 @@ def _setores_do_turno(dia: date, turno: str) -> list[dict[str, Any]]:
     from .mapa_oficial import _freq_do_dia
     from .unificado import _casa_turno
 
-    return [
+    chave = (dia.isoformat(), turno)
+    guardado = _SETORES_TURNO.get(chave)
+    if guardado is not None:
+        return guardado
+    saida = [
         setor
         for setor in _poligonos()
         if _freq_do_dia(str(setor.get("frequencia") or ""), dia) and _casa_turno(str(setor.get("frequencia") or ""), turno)
     ]
+    _SETORES_TURNO[chave] = saida
+    return saida
 
 
 def _partir_trilha(

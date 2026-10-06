@@ -8,6 +8,7 @@ Cobertura: o mesmo cálculo do relatório, apenas nas rotas com ponto novo.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -1047,6 +1048,61 @@ def passo_reconciliacao(output_dir: Path, *, orcamento_s: float) -> dict[str, An
     return resultado
 
 
+_RECALC_VIAS_FEITO = False
+_RECALC_VIAS_TENTATIVAS = 0
+
+
+def recalcular_vias_persistidas(output_dir: Path, dia: date, turno: str) -> list[str]:
+    """Uma vez, só o turno ABERTO, com o GPS já gravado. Encerrado não é lido para gravar."""
+    global _RECALC_VIAS_FEITO, _RECALC_VIAS_TENTATIVAS
+    if _RECALC_VIAS_FEITO or _RECALC_VIAS_TENTATIVAS >= 2:
+        return []
+    pedido = (turno or "").strip().lower()
+    if pedido not in {"diurno", "noturno"}:
+        return []
+    con = conectar()
+    try:
+        row = con.execute(
+            "SELECT situacao FROM turno WHERE data = ? AND turno = ?",
+            (dia.isoformat(), pedido),
+        ).fetchone()
+        if row is None or str(row["situacao"] or "") != "ABERTO":
+            return []
+        from .live_turno import situacao_pelo_relogio
+
+        if situacao_pelo_relogio(dia, pedido) != "ABERTO":
+            return []
+        _RECALC_VIAS_TENTATIVAS += 1
+        _RECALC_VIAS_FEITO = True
+        codigos = [
+            str(item[0] or "").upper()
+            for item in con.execute(
+                "SELECT codigo FROM rota WHERE data = ? AND turno = ? AND na_grade = 1 ORDER BY codigo",
+                (dia.isoformat(), pedido),
+            )
+            if str(item[0] or "").strip()
+        ]
+        if not codigos:
+            return []
+        print(
+            f"Cobertura viária: recálculo único de {dia.isoformat()} {pedido}, {len(codigos)} rotas, GPS já persistido.",
+            flush=True,
+        )
+        rotas = _recalcular_oficial(con, output_dir, dia, pedido, codigos)
+        if rotas:
+            gravar_rotas(con, dia.isoformat(), pedido, rotas)
+            con.commit()
+        print(f"Cobertura viária gravada: {len(rotas)} rotas do turno aberto.", flush=True)
+        return [str(item.get("codigo") or "") for item in rotas]
+    except Exception as exc:
+        if _RECALC_VIAS_TENTATIVAS < 2:
+            _RECALC_VIAS_FEITO = False
+        print(f"Cobertura viária não recalculada: {exc}", flush=True)
+        return []
+    finally:
+        con.close()
+
+
 def iniciar_loop() -> None:
     global _THREAD
     if (os.getenv("SAGTRACK_LIVE_SYNC") or "1").strip().lower() in {"0", "false", "nao", "não"}:
@@ -1062,6 +1118,13 @@ def _loop() -> None:
     global _RECON_PROXIMA, _RECON_PAUSA_ATE
     ultima_posicao = 0.0
     ultima_gps = 0.0
+    try:
+        from .config import load_settings
+
+        dia, pedido = turno_operacional()
+        recalcular_vias_persistidas(load_settings().output_dir, dia, pedido)
+    except Exception as exc:
+        print(f"Cobertura viária não recalculada na subida: {exc}", flush=True)
     while True:
         time.sleep(5)
         if ocupada():
@@ -1141,6 +1204,8 @@ def atender_turnos(
                 posicao(output_dir, dia.isoformat(), turno, agora=momento)
                 ordem.append(sit)
         else:
+            if sit == "ABERTO":
+                recalcular_vias_persistidas(output_dir, dia, turno)
             resultado = gps(output_dir, dia.isoformat(), turno, agora=momento)
             rotas += len(resultado.get("rotas") or [])
             ordem.append(sit)
@@ -1350,18 +1415,45 @@ def _par_latlon(ponto: Any) -> tuple[float | None, float | None]:
         return None, None
 
 
+def _metros_trechos(linhas: list[Any]) -> float:
+    """Comprimento das vias que o mapa vai desenhar, no mesmo UTM da cobertura."""
+    from shapely.geometry import LineString
+
+    from .cobertura import TO_UTM
+
+    total = 0.0
+    for linha in linhas or []:
+        if not isinstance(linha, list):
+            continue
+        xy: list[tuple[float, float]] = []
+        for par in linha:
+            if not isinstance(par, (list, tuple)) or len(par) < 2:
+                continue
+            try:
+                lat, lon = float(par[0]), float(par[1])
+            except (TypeError, ValueError):
+                continue
+            x, y = TO_UTM.transform(lon, lat)
+            if xy and math.hypot(x - xy[-1][0], y - xy[-1][1]) < 0.4:
+                continue
+            xy.append((float(x), float(y)))
+        if len(xy) >= 2:
+            total += LineString(xy).length
+    return total
+
+
 def _anexar_geometria_visual(
     setores: list[dict[str, Any]],
     caminhoes: list[dict[str, Any]],
     rotas: list[dict[str, Any]],
 ) -> None:
-    """Guarda entrada, saída e trechos que a cobertura deste passo já sabe desenhar.
+    """Verde, vermelho e percentual saem da mesma classificação de vias, raio 45 m.
 
-    O percentual gravado continua o de _linha. avaliar_cobertura só empresta
-    trechos_feitos e trechos_faltando; o percentual dela é ignorado.
+    Não usa a área do polígono nem o km oficial. 100% só sem trecho faltante.
     """
-    from .cobertura import avaliar_cobertura
+    from .cobertura import avaliar_cobertura, percentual_das_vias
     from .live_mapa import compactar_trechos
+    from .live_report import _faixa_percentual
 
     por_codigo = {str(item.get("codigo") or "").upper(): item for item in setores}
     pontos_placa = {str(item.get("placa") or ""): item.get("pontos") or [] for item in caminhoes}
@@ -1388,11 +1480,16 @@ def _anexar_geometria_visual(
                     [],
                     pontos,
                     geom_setor=setor.get("_geom"),
-                    km_oficial=setor.get("km_oficial"),
                     ruas=ruas,
                 )
                 feitos = compactar_trechos(cob.get("trechos_feitos"))
                 faltando = compactar_trechos(cob.get("trechos_faltando"))
+                rota["percentual"] = percentual_das_vias(
+                    _metros_trechos(feitos),
+                    _metros_trechos(faltando),
+                )
+                if str(rota.get("grupo") or "") != "apoio":
+                    rota["grupo"], rota["status"] = _faixa_percentual(rota["percentual"])
             except Exception as exc:
                 print(f"mapa visual: trechos de {codigo} não gravados ({exc})", flush=True)
         rota["trechos_feitos"] = json.dumps(feitos, separators=(",", ":"))

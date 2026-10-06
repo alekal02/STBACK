@@ -385,6 +385,26 @@ def avaliar_cobertura(
     }
 
 
+def percentual_das_vias(metros_feitos: float, metros_faltando: float) -> float:
+    """Metros verdes / metros de vias desenhadas. O raio continua o de avaliar_cobertura.
+
+    100 só quando não há trecho faltante. 99,x não vira 100.
+    """
+    feitos = max(0.0, float(metros_feitos or 0))
+    faltando = max(0.0, float(metros_faltando or 0))
+    total = feitos + faltando
+    if total <= 0 or feitos <= 0:
+        return 0.0
+    if faltando <= 0:
+        return 100.0
+    pct = round(100.0 * feitos / total, 1)
+    if pct >= 100.0:
+        return 99.9
+    if pct <= 0.0:
+        return 0.1
+    return pct
+
+
 def linhas_de_coords(coords: list[list[list[float]]]) -> list[LineString]:
     linhas = []
     for trecho in coords or []:

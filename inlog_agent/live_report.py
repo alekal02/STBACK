@@ -274,14 +274,14 @@ def _gps_desatualizado(telemetria: str, instante: str) -> bool:
 
 
 def _faixa_percentual(valor: Any) -> tuple[str, str]:
-    """0% não iniciada, 1% a 99% parcial, 100% concluída. O percentual não muda."""
+    """0% não iniciada, acima de 0 e abaixo de 100 parcial, 100 concluída."""
     try:
         pct = float(valor)
     except (TypeError, ValueError):
         pct = 0.0
     if pct >= 100:
         return "concluida", "Concluída"
-    if pct >= 1:
+    if pct > 0:
         return "parcial", "Parcial"
     return "nao", "Não iniciada"
 

@@ -568,18 +568,32 @@ def ciclo_gps(
                 gravados = inserir_pontos(con, dia.isoformat(), pedido, placa["placa"], recebidos)
                 novos_total += gravados
                 if gravados:
-                    maior = max(str(item["timestamp"]) for item in recebidos if item.get("timestamp"))
+                    maior_item = max(recebidos, key=lambda item: str(item.get("timestamp") or ""))
+                    maior = str(maior_item.get("timestamp") or "")
+                    from .dificil_acesso import eh_basculante
+
+                    bascula = eh_basculante(str(placa["placa"]), str(placa["veiculo"] or ""))
+                    lat = lon = None
+                    if bascula:
+                        try:
+                            lat = float(maior_item["latitude"])
+                            lon = float(maior_item["longitude"])
+                        except (KeyError, TypeError, ValueError):
+                            lat = lon = None
                     marcar_placa(
                         con,
                         dia.isoformat(),
                         pedido,
                         placa["placa"],
                         last_gps_timestamp=maior,
+                        lat=lat,
+                        lon=lon,
                         telemetria=classificar_telemetria(maior, momento),
                     )
-                    for item in recebidos:
-                        if str(item.get("timestamp") or "") > cursor:
-                            pontos_novos.append(item)
+                    if not bascula:
+                        for item in recebidos:
+                            if str(item.get("timestamp") or "") > cursor:
+                                pontos_novos.append(item)
         finally:
             if inicio_pesada:
                 _RECONSTRUINDO = False
@@ -952,7 +966,11 @@ def _recalcular_oficial(con, output_dir: Path, dia: date, turno: str, codigos: l
 
     placas = ler_placas(con, dia.isoformat(), turno)
     caminhoes = []
+    from .dificil_acesso import eh_basculante
+
     for placa in placas:
+        if eh_basculante(str(placa["placa"]), str(placa["veiculo"] or "")):
+            continue
         pontos = ler_pontos_placa(con, dia.isoformat(), turno, placa["placa"])
         if len(pontos) < 8:
             continue
@@ -1148,6 +1166,16 @@ def _baixar_desde_inicio(
         return [], 0
     gravados = inserir_pontos(con, dia.isoformat(), turno, placa, recebidos)
     cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
+    from .dificil_acesso import eh_basculante
+
+    ultimo = max(recebidos, key=lambda item: str(item.get("timestamp") or ""))
+    lat = lon = None
+    if eh_basculante(placa, veiculo):
+        try:
+            lat = float(ultimo["latitude"])
+            lon = float(ultimo["longitude"])
+        except (KeyError, TypeError, ValueError):
+            lat = lon = None
     marcar_placa(
         con,
         dia.isoformat(),
@@ -1156,6 +1184,8 @@ def _baixar_desde_inicio(
         veiculo=veiculo,
         vehicle_id=vehicle_id,
         last_gps_timestamp=cursor,
+        lat=lat,
+        lon=lon,
         telemetria=classificar_telemetria(cursor, momento),
     )
     limpar_falha_consulta(con, dia.isoformat(), turno, placa)
@@ -1204,7 +1234,10 @@ def _bootstrap_placas_novas(
             buscar_historico,
             ponto_pertence,
         )
-        novos.extend(extras)
+        from .dificil_acesso import eh_basculante
+
+        if not eh_basculante(placa, str(row["veiculo"] or "")):
+            novos.extend(extras)
         gravados_total += gravados
         if extras or gravados:
             print(
@@ -1240,7 +1273,10 @@ def _bootstrap_placas_novas(
             buscar_historico,
             ponto_pertence,
         )
-        novos.extend(extras)
+        from .dificil_acesso import eh_basculante
+
+        if not eh_basculante(placa, veiculo):
+            novos.extend(extras)
         gravados_total += gravados
         if extras or gravados:
             print(
@@ -1313,6 +1349,8 @@ def _descobrir_frota() -> list[dict[str, Any]]:
     except Exception:
         eventos = []
     escolhidos = _escolher_veiculos(veiculos, eventos, settings.segtrack_veiculos, None)
+    from .dificil_acesso import norm_placa, presentes_no_cadastro
+
     saida: list[dict[str, Any]] = []
     for item in escolhidos:
         placa = _fmt_placa(str(item.get("ras_vei_placa") or ""))
@@ -1325,6 +1363,11 @@ def _descobrir_frota() -> list[dict[str, Any]]:
                 "vehicle_id": str(item.get("ras_vei_id") or ""),
             }
         )
+    ja = {norm_placa(str(item.get("placa") or "")) for item in saida}
+    for extra in presentes_no_cadastro(veiculos):
+        if norm_placa(extra["placa"]) in ja:
+            continue
+        saida.append(extra)
     return saida
 
 

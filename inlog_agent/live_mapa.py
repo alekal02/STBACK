@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from datetime import date, datetime
 from typing import Any
 
@@ -327,7 +328,11 @@ def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
     veiculos = []
     visuais = 0
     setores = _setores_do_turno(dia, pedido)
+    from .dificil_acesso import eh_basculante
+
     for placa, brutos in por_placa.items():
+        if eh_basculante(placa):
+            continue
         linhas = _linhas_visuais(brutos)
         fora = []
         if setores and linhas:
@@ -352,6 +357,107 @@ def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
     }
 
 
+def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
+    """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
+    from .dificil_acesso import BASCULANTES, codigo_da_frota, montar_trajetoria
+
+    dia, pedido = _dia_turno(data, turno)
+    inicio = time.perf_counter()
+    con = conectar()
+    try:
+        placas = _placas_basculante(con, dia.isoformat(), pedido)
+        bruto: dict[str, list[tuple[str, float, float]]] = {item["codigo"]: [] for item in BASCULANTES}
+        if placas:
+            marcas = list(placas)
+            consulta = ",".join("?" for _ in marcas)
+            rows = con.execute(
+                f"""
+                SELECT placa, ts, lat, lon FROM ponto
+                WHERE data = ? AND turno = ? AND placa IN ({consulta})
+                ORDER BY placa, ts
+                """,
+                [dia.isoformat(), pedido, *marcas],
+            ).fetchall()
+        else:
+            rows = []
+    finally:
+        con.close()
+    for row in rows:
+        codigo = placas.get(str(row["placa"] or ""))
+        if not codigo:
+            codigo = codigo_da_frota(str(row["placa"] or ""))
+        if not codigo:
+            continue
+        bruto[codigo].append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
+    setores = _setores_do_turno(dia, pedido)
+
+    def contem(lat: float, lon: float) -> bool:
+        if not setores:
+            return False
+        return codigo_que_contem(lat, lon, setores) is not None
+
+    veiculos = []
+    pulsos = fora = 0
+    trechos_dificil = trechos_desloc = trechos_rota = 0
+    for item in BASCULANTES:
+        serie = bruto.get(item["codigo"]) or []
+        desenho = montar_trajetoria(serie, contem)
+        pulsos += desenho["pulsos"]
+        fora += desenho["pontos_fora"]
+        trechos_rota += len(desenho["na_rota"])
+        trechos_desloc += len(desenho["deslocamento"])
+        trechos_dificil += len(desenho["dificil"])
+        veiculos.append(
+            {
+                "codigo": item["codigo"],
+                "placa": item["placa"],
+                "situacao": desenho["situacao"],
+                "ultimo_gps": desenho["ultimo_gps"],
+                "lat": desenho["lat"],
+                "lon": desenho["lon"],
+                "pulsos": desenho["pulsos"],
+                "pontos_fora": desenho["pontos_fora"],
+                "na_rota": desenho["na_rota"],
+                "deslocamento": desenho["deslocamento"],
+                "dificil": desenho["dificil"],
+            }
+        )
+    return {
+        "data": dia.isoformat(),
+        "turno": pedido,
+        "fonte": "live_sync",
+        "veiculos": veiculos,
+        "resumo": {
+            "pulsos": pulsos,
+            "pontos_fora": fora,
+            "trechos_na_rota": trechos_rota,
+            "trechos_deslocamento": trechos_desloc,
+            "trechos_dificil": trechos_dificil,
+            "ms": round((time.perf_counter() - inicio) * 1000, 1),
+        },
+    }
+
+
+def _placas_basculante(con, data: str, turno: str) -> dict[str, str]:
+    """Grafias já usadas no banco. A consulta de ponto fica na chave, sem varrer o turno."""
+    from .dificil_acesso import BASCULANTES, codigo_da_frota
+
+    achadas: dict[str, str] = {}
+    for item in BASCULANTES:
+        cru = item["placa"]
+        achadas[cru] = item["codigo"]
+        if len(cru) > 3:
+            achadas[f"{cru[:3]}-{cru[3:]}"] = item["codigo"]
+    for row in con.execute(
+        "SELECT placa, veiculo FROM placa WHERE data = ? AND turno = ?",
+        (data, turno),
+    ):
+        codigo = codigo_da_frota(str(row["placa"] or ""), str(row["veiculo"] or ""))
+        if codigo:
+            achadas[str(row["placa"])] = codigo
+    return achadas
+
+
 def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict[str, Any]:
     dia, pedido = _dia_turno(data, turno)
     cursor_cliente = (since or "").strip()
@@ -370,21 +476,29 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
         ).fetchall()
     finally:
         con.close()
+    from .dificil_acesso import eh_basculante
+
     setores = _setores_do_turno(dia, pedido)
     pontos = []
+    cursor = cursor_cliente
     for row in rows:
+        ts = str(row["ts"] or "")
+        if ts > cursor:
+            cursor = ts
+        placa = str(row["placa"] or "")
+        if eh_basculante(placa):
+            continue
         lat = float(row["lat"])
         lon = float(row["lon"])
         pontos.append(
             {
-                "placa": str(row["placa"] or ""),
-                "ts": str(row["ts"] or ""),
+                "placa": placa,
+                "ts": ts,
                 "lat": lat,
                 "lon": lon,
                 "deslocamento": bool(setores) and codigo_que_contem(lat, lon, setores) is None,
             }
         )
-    cursor = pontos[-1]["ts"] if pontos else cursor_cliente
     return {
         "data": dia.isoformat(),
         "turno": pedido,

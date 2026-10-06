@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw
 
+from .trilha_via import trilhas_na_via, vias_de
+
 _PDF = threading.Lock()
 _BRT = ZoneInfo("America/Sao_Paulo")
 _CORES = {
@@ -268,6 +270,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
     largura, altura = A4
     _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm)
     pdf.showPage()
+    feitos_geral, faltando_geral = _trechos_do_pacote(pacote)
     geral = _mapa(
         poligonos,
         [linha for linhas in trilhas.values() for linha in linhas],
@@ -275,6 +278,8 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
         largura=1100,
         altura_px=760,
         individual=False,
+        feitos=feitos_geral,
+        faltando=faltando_geral,
     )
     _pagina_mapa(pdf, "Mapa geral da operação", geral, fonte, forte, largura, altura, mm, legenda=True)
     pdf.showPage()
@@ -463,17 +468,31 @@ def _pagina_mapa(pdf, titulo, imagem, fonte, forte, largura, altura, mm, legenda
         return
     pdf.setFillColorRGB(0.25, 0.32, 0.36)
     pdf.setFont(fonte, 8)
-    pdf.drawString(14 * mm, y_mapa - 8 * mm, "Áreas oficiais pelo status. Linha escura: trajetória já gravada. Sem mapa de ruas.")
-    itens = list(_LEGENDAS) + [("trilha", "Trajetória")]
+    pdf.drawString(14 * mm, y_mapa - 8 * mm, "Cinza: via prevista. Verde: executado. Vermelho tracejado: faltante. GPS fino, só sobre a via.")
+    itens = list(_LEGENDAS) + [
+        ("via", "Via prevista"),
+        ("feito", "Executado"),
+        ("faltante", "Faltante"),
+        ("gps", "GPS"),
+    ]
     for indice, (grupo, nome) in enumerate(itens):
         coluna = indice % 4
         linha = indice // 4
         x = 14 * mm + coluna * 46 * mm
         y = y_mapa - 16 * mm - linha * 7 * mm
-        if grupo == "trilha":
-            pdf.setStrokeColorRGB(0.09, 0.2, 0.3)
-            pdf.setLineWidth(1.4)
+        if grupo in {"via", "feito", "faltante", "gps"}:
+            cores_linha = {
+                "via": (0.47, 0.50, 0.53),
+                "feito": (0.11, 0.54, 0.35),
+                "faltante": (0.70, 0.25, 0.27),
+                "gps": (0.16, 0.22, 0.28),
+            }
+            pdf.setStrokeColorRGB(*cores_linha[grupo])
+            pdf.setLineWidth(1.6 if grupo != "gps" else 1.0)
+            if grupo == "faltante":
+                pdf.setDash(1.2, 1.2)
             pdf.line(x, y + 2 * mm, x + 6 * mm, y + 2 * mm)
+            pdf.setDash()
         else:
             cor = _CORES[grupo]
             pdf.setFillColorRGB(cor[0] / 255, cor[1] / 255, cor[2] / 255)
@@ -666,6 +685,15 @@ def _mapa_rota(rota: dict[str, Any], aneis: list, linhas: list, detalhe: dict[st
     )
 
 
+def _trechos_do_pacote(pacote: dict[str, Any]) -> tuple[list, list]:
+    feitos: list = []
+    faltando: list = []
+    for detalhe in (pacote.get("detalhes") or {}).values():
+        feitos.extend(_linhas_geo((detalhe or {}).get("trechos_feitos")))
+        faltando.extend(_linhas_geo((detalhe or {}).get("trechos_faltando")))
+    return feitos, faltando
+
+
 def _linhas_geo(colecao: dict[str, Any] | None) -> list[list[tuple[float, float]]]:
     saida = []
     for feat in (colecao or {}).get("features") or []:
@@ -761,18 +789,22 @@ def _mapa(
             desenho.polygon(seq, fill=cor + (150,))
             if len(seq) >= 2:
                 desenho.line(seq + [seq[0]], fill=cor + (255,), width=2)
-    for linha in trilhas:
-        seq = [xy(*_par_trilha(p)) for p in _amostra(linha, 300)]
+    malha = vias_de(feitos, faltando)
+    for linha in malha:
+        seq = [xy(lon, lat) for lon, lat in linha]
         if len(seq) >= 2:
-            desenho.line(seq, fill=(23, 50, 77, 220), width=3 if individual else 2)
+            desenho.line(seq, fill=(120, 128, 134, 230), width=7 if individual else 4)
+    for linha in trilhas_na_via(trilhas, malha):
+        seq = [xy(lon, lat) for lon, lat in linha]
+        if len(seq) >= 2:
+            desenho.line(seq, fill=(40, 55, 70, 150), width=2)
     for linha in feitos or []:
-        seq = [xy(lon, lat) for lon, lat in _amostra(linha, 300)]
+        seq = [xy(lon, lat) for lon, lat in linha]
         if len(seq) >= 2:
-            desenho.line(seq, fill=(27, 138, 90, 230), width=4)
+            desenho.line(seq, fill=(27, 138, 90, 235), width=4 if individual else 3)
     for linha in faltando or []:
-        seq = [xy(lon, lat) for lon, lat in _amostra(linha, 300)]
-        if len(seq) >= 2:
-            desenho.line(seq, fill=(179, 65, 69, 210), width=3)
+        seq = [xy(lon, lat) for lon, lat in linha]
+        _tracejado(desenho, seq, (179, 65, 69, 230), 3 if individual else 2)
     if entrada:
         desenho.ellipse(_bolha(xy(float(entrada["lon"]), float(entrada["lat"]))), fill=(27, 138, 90, 255))
     if saida:
@@ -787,6 +819,34 @@ def _mapa(
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=72, optimize=True)
     return buf.getvalue()
+
+
+def _tracejado(desenho: ImageDraw.ImageDraw, seq: list[tuple[float, float]], fill: tuple[int, int, int, int], width: int) -> None:
+    if len(seq) < 2:
+        return
+    traco, vao = 11.0, 8.0
+    ciclo = traco + vao
+    percorrido = 0.0
+    for a, b in zip(seq, seq[1:]):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        comp = math.hypot(dx, dy)
+        if comp < 0.5:
+            continue
+        ux, uy = dx / comp, dy / comp
+        pos = 0.0
+        while pos < comp:
+            fase = percorrido % ciclo
+            if fase < traco:
+                falta = min(traco - fase, comp - pos)
+                ini = (a[0] + ux * pos, a[1] + uy * pos)
+                fim = (a[0] + ux * (pos + falta), a[1] + uy * (pos + falta))
+                desenho.line([ini, fim], fill=fill, width=width)
+                pos += falta
+                percorrido += falta
+            else:
+                pula = min(ciclo - fase, comp - pos)
+                pos += pula
+                percorrido += pula
 
 
 def _par_trilha(ponto: Any) -> tuple[float, float]:

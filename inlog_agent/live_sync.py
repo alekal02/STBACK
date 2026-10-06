@@ -24,6 +24,9 @@ from .live_db import (
     gravar_turno,
     inserir_pontos,
     ler_placas,
+    limpar_falha_consulta,
+    registrar_consulta_sem_dados,
+    registrar_falha_consulta,
     ler_pontos_placa,
     ler_view,
     marcar_placa,
@@ -38,6 +41,7 @@ POSICAO_S = 30
 GPS_S = 120
 ATRASO_S = 15 * 60
 REDESCOBERTA_S = 10 * 60
+BOOT_FALHA_S = 10 * 60
 _RECON_ESPERA_S = (0, 180, 480, 900)
 _CICLOS = 0
 _RECONSTRUINDO = False
@@ -550,8 +554,11 @@ def ciclo_gps(
                         limite,
                     )
                 except Exception as exc:
-                    falha = str(exc)
-                    continue
+                    if _eh_sem_dados(exc):
+                        eventos = []
+                    else:
+                        falha = str(exc)
+                        continue
                 recebidos = [_ponto_local(item, placa["placa"]) for item in eventos]
                 recebidos = [
                     item
@@ -1063,6 +1070,22 @@ def _catalogo_frota(
     return achadas
 
 
+def _eh_sem_dados(exc: BaseException) -> bool:
+    from .fulltrack_api import FulltrackSemDados
+
+    if isinstance(exc, FulltrackSemDados):
+        return True
+    texto = str(exc)
+    return "400" in texto and "No data were found!" in texto
+
+
+def _adiar_falha_consulta(row, momento: datetime) -> bool:
+    falha_em = _parse_ts(str(row["consulta_falha_em"] or ""))
+    if falha_em is None:
+        return False
+    return (momento - falha_em).total_seconds() < BOOT_FALHA_S
+
+
 def _baixar_desde_inicio(
     con,
     dia: date,
@@ -1070,31 +1093,61 @@ def _baixar_desde_inicio(
     placa: str,
     veiculo: str,
     vehicle_id: str,
-    inicio_turno: datetime,
+    comeco: datetime,
     limite: datetime,
     momento: datetime,
     buscar_historico: Callable[..., list[dict[str, Any]]],
     ponto_pertence: Callable[..., bool],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Historico de uma placa desde o inicio do turno. Falha deixa o cursor vazio."""
+    """Historico so desta placa. Sem GPS, avanca a marca. Cursor GPS so com ponto real."""
     try:
-        eventos = buscar_historico(placa, vehicle_id, inicio_turno, limite)
+        eventos = buscar_historico(placa, vehicle_id, comeco, limite)
     except Exception as exc:
-        print(f"Historico inicial de {placa} falhou: {exc}", flush=True)
+        if not _eh_sem_dados(exc):
+            registrar_falha_consulta(
+                con,
+                dia.isoformat(),
+                turno,
+                placa,
+                momento.isoformat(timespec="seconds"),
+            )
+            print(f"Consulta de {placa} falhou; nova tentativa em {BOOT_FALHA_S // 60} min.", flush=True)
+            return [], 0
+        eventos = []
+    recebidos: list[dict[str, Any]] = []
+    invalidos = 0
+    for evento in eventos or []:
+        try:
+            ponto = _ponto_local(evento, placa)
+        except Exception:
+            invalidos += 1
+            continue
+        if not ponto or not ponto.get("timestamp"):
+            invalidos += 1
+            continue
+        if ponto_pertence(str(ponto.get("timestamp") or ""), dia, turno):
+            recebidos.append(ponto)
+    if eventos and not recebidos and invalidos == len(eventos):
+        registrar_falha_consulta(
+            con,
+            dia.isoformat(),
+            turno,
+            placa,
+            momento.isoformat(timespec="seconds"),
+        )
+        print(f"Consulta de {placa} falhou; nova tentativa em {BOOT_FALHA_S // 60} min.", flush=True)
         return [], 0
-    recebidos = [_ponto_local(evento, placa) for evento in eventos or []]
-    recebidos = [
-        ponto
-        for ponto in recebidos
-        if ponto and ponto_pertence(str(ponto.get("timestamp") or ""), dia, turno)
-    ]
+    if not recebidos:
+        registrar_consulta_sem_dados(
+            con,
+            dia.isoformat(),
+            turno,
+            placa,
+            limite.isoformat(timespec="seconds"),
+        )
+        return [], 0
     gravados = inserir_pontos(con, dia.isoformat(), turno, placa, recebidos)
-    if recebidos:
-        cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
-        novos = recebidos
-    else:
-        cursor = limite.isoformat(timespec="seconds")
-        novos = []
+    cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
     marcar_placa(
         con,
         dia.isoformat(),
@@ -1105,7 +1158,8 @@ def _baixar_desde_inicio(
         last_gps_timestamp=cursor,
         telemetria=classificar_telemetria(cursor, momento),
     )
-    return novos, gravados
+    limpar_falha_consulta(con, dia.isoformat(), turno, placa)
+    return recebidos, gravados
 
 
 def _bootstrap_placas_novas(
@@ -1132,6 +1186,11 @@ def _bootstrap_placas_novas(
         placa = str(row["placa"] or "").strip()
         if not placa:
             continue
+        if _adiar_falha_consulta(row, momento):
+            continue
+        comeco = inicio_da_consulta(str(row["consulta_ate"] or ""), inicio_turno)
+        if comeco > limite:
+            continue
         extras, gravados = _baixar_desde_inicio(
             con,
             dia,
@@ -1139,7 +1198,7 @@ def _bootstrap_placas_novas(
             placa,
             str(row["veiculo"] or placa),
             str(row["vehicle_id"] or ""),
-            inicio_turno,
+            comeco,
             limite,
             momento,
             buscar_historico,

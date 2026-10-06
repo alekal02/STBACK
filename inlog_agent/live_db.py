@@ -324,6 +324,9 @@ def _schema(con: sqlite3.Connection) -> None:
             ultimo_lon REAL,
             telemetria TEXT NOT NULL DEFAULT '',
             atualizado_em TEXT NOT NULL DEFAULT '',
+            consulta_ate TEXT NOT NULL DEFAULT '',
+            consulta_falha_em TEXT NOT NULL DEFAULT '',
+            consulta_falhas INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (data, turno, placa)
         );
         CREATE TABLE IF NOT EXISTS ponto (
@@ -385,6 +388,15 @@ def _schema(con: sqlite3.Connection) -> None:
     for nome, tipo in extras_rota.items():
         if nome not in colunas_rota:
             con.execute(f"ALTER TABLE rota ADD COLUMN {nome} {tipo}")
+    colunas_placa = {str(row[1]) for row in con.execute("PRAGMA table_info(placa)")}
+    extras_placa = {
+        "consulta_ate": "TEXT NOT NULL DEFAULT ''",
+        "consulta_falha_em": "TEXT NOT NULL DEFAULT ''",
+        "consulta_falhas": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for nome, tipo in extras_placa.items():
+        if nome not in colunas_placa:
+            con.execute(f"ALTER TABLE placa ADD COLUMN {nome} {tipo}")
     con.commit()
     from .live_turno import classificar_vazios
 
@@ -628,6 +640,61 @@ def marcar_placa(
             telemetria or (atual["telemetria"] if atual else ""),
             agora_iso(),
         ),
+    )
+
+
+def registrar_consulta_sem_dados(
+    con: sqlite3.Connection,
+    data: str,
+    turno: str,
+    placa: str,
+    consulta_ate: str,
+) -> None:
+    """Marca a janela ja consultada. Nao grava cursor GPS."""
+    con.execute(
+        """
+        UPDATE placa SET
+            consulta_ate = ?,
+            consulta_falha_em = '',
+            consulta_falhas = 0,
+            telemetria = CASE
+                WHEN last_gps_timestamp = '' THEN 'sem_dados'
+                ELSE telemetria
+            END,
+            atualizado_em = ?
+        WHERE data = ? AND turno = ? AND placa = ?
+        """,
+        (consulta_ate, agora_iso(), data, turno, placa),
+    )
+
+
+def registrar_falha_consulta(
+    con: sqlite3.Connection,
+    data: str,
+    turno: str,
+    placa: str,
+    falha_em: str,
+) -> None:
+    """Falha real. Nao avanca a marca e nao vira sem dados."""
+    con.execute(
+        """
+        UPDATE placa SET
+            consulta_falha_em = ?,
+            consulta_falhas = consulta_falhas + 1,
+            atualizado_em = ?
+        WHERE data = ? AND turno = ? AND placa = ?
+        """,
+        (falha_em, agora_iso(), data, turno, placa),
+    )
+
+
+def limpar_falha_consulta(con: sqlite3.Connection, data: str, turno: str, placa: str) -> None:
+    con.execute(
+        """
+        UPDATE placa SET consulta_falha_em = '', consulta_falhas = 0
+        WHERE data = ? AND turno = ? AND placa = ?
+        """,
+        (data, turno, placa),
     )
 
 

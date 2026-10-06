@@ -16,6 +16,10 @@ TIPOS_CAMINHAO = {3, 9, 12, 25, 28}
 RAIO_BASE_M = 800.0
 
 
+class FulltrackSemDados(RuntimeError):
+    """HTTP 400 com 'No data were found!'. A consulta existiu e nao achou GPS."""
+
+
 def _req(method: str, url: str, headers: dict[str, str], data: bytes | None = None, timeout: int = 90) -> Any:
     request = Request(url, data=data, headers=headers, method=method)
     try:
@@ -23,6 +27,8 @@ def _req(method: str, url: str, headers: dict[str, str], data: bytes | None = No
             raw = resp.read()
     except HTTPError as exc:
         detalhe = exc.read()[:400].decode("utf-8", "replace")
+        if exc.code == 400 and "No data were found!" in detalhe:
+            raise FulltrackSemDados("No data were found!") from exc
         raise RuntimeError(f"Fulltrack {exc.code} {url.split('ftdata.com.br', 1)[-1]}: {detalhe[:180]}") from exc
     except URLError as exc:
         raise RuntimeError(f"Fulltrack sem conexão: {exc.reason}") from exc

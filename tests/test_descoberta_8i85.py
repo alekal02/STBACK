@@ -484,3 +484,259 @@ def test_placa_cadastrada_sem_cursor_recebe_bootstrap():
     assert int(turno["reconstrucao_pontos"] or 0) == 0
     assert int(turno["reconstrucao_tentativas"] or 0) == 0
     assert recalculos[1] == ["75AN"]
+
+
+SEM_CURSOR = ("SCW-4F36", "SDE-6B76", "SDO-5B17", "SDN-9G76")
+SEM_DADOS = RuntimeError('Fulltrack 400 /events/interval: {"detail":"No data were found!"}')
+GPS_NOVO = {"timestamp": "2026-10-05T22:03:00", "latitude": -16.80, "longitude": -49.24}
+
+
+def _turno_com_ancora():
+    from inlog_agent.live_db import gravar_turno, marcar_placa
+    from inlog_agent.live_sync import _limpar_cache_frota
+
+    _limpar_cache_frota()
+    con = conectar()
+    try:
+        con.execute("DELETE FROM ponto")
+        con.execute("DELETE FROM placa")
+        con.execute("DELETE FROM rota")
+        con.execute("DELETE FROM turno")
+        gravar_turno(con, {"data": DIA.isoformat(), "turno": "noturno"})
+        con.execute(
+            "UPDATE turno SET situacao = 'ABERTO', aberto = 1 WHERE data = ? AND turno = ?",
+            (DIA.isoformat(), "noturno"),
+        )
+        marcar_placa(
+            con,
+            DIA.isoformat(),
+            "noturno",
+            "SCH-9B28",
+            veiculo="SCH-9B28",
+            vehicle_id="id-sch",
+            last_gps_timestamp=CURSOR_24,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _ler_consulta():
+    con = conectar()
+    try:
+        return {
+            linha["placa"]: {
+                "cursor": linha["last_gps_timestamp"],
+                "ate": linha["consulta_ate"],
+                "falha_em": linha["consulta_falha_em"],
+                "falhas": int(linha["consulta_falhas"] or 0),
+                "telemetria": linha["telemetria"],
+            }
+            for linha in con.execute(
+                """
+                SELECT placa, last_gps_timestamp, consulta_ate, consulta_falha_em,
+                       consulta_falhas, telemetria
+                FROM placa WHERE data = ? AND turno = ?
+                """,
+                (DIA.isoformat(), "noturno"),
+            )
+        }
+    finally:
+        con.close()
+
+
+def test_sem_gps_nao_repete_historico_desde_as_19():
+    from datetime import datetime, timedelta
+
+    from inlog_agent.live_db import marcar_placa
+    from inlog_agent.live_sync import ciclo_gps
+
+    _turno_com_ancora()
+    con = conectar()
+    try:
+        for placa in SEM_CURSOR:
+            marcar_placa(
+                con,
+                DIA.isoformat(),
+                "noturno",
+                placa,
+                veiculo=placa,
+                vehicle_id="id-" + placa,
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    chamadas = []
+    gps = {"ligado": False}
+
+    def descobrir():
+        return []
+
+    def historico(placa, _vehicle_id, inicio, fim):
+        chamadas.append((placa, inicio, fim))
+        if placa == "SCH-9B28":
+            return []
+        if placa == "SCW-4F36" and gps["ligado"]:
+            return [GPS_NOVO]
+        raise SEM_DADOS
+
+    def rodar(agora):
+        return ciclo_gps(
+            Path(tempfile.mkdtemp()),
+            DIA.isoformat(),
+            "noturno",
+            agora=agora,
+            limites=[],
+            descobrir=descobrir,
+            buscar_historico=historico,
+            recalcular=lambda *_args: [],
+        )
+
+    primeiro = datetime(2026, 10, 5, 22, 0, 0)
+    assert rodar(primeiro).get("falha", "") == ""
+    das_quatro = [item for item in chamadas if item[0] in SEM_CURSOR]
+    assert sorted(item[0] for item in das_quatro) == sorted(SEM_CURSOR)
+    assert {item[1] for item in das_quatro} == {INICIO_NOITE}
+    estado = _ler_consulta()
+    for placa in SEM_CURSOR:
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["ate"] == "2026-10-05T22:00:00"
+        assert estado[placa]["telemetria"] == "sem_dados"
+        assert estado[placa]["falhas"] == 0
+    assert estado["SCH-9B28"]["cursor"] == CURSOR_24
+
+    chamadas.clear()
+    segundo = datetime(2026, 10, 5, 22, 2, 0)
+    assert rodar(segundo).get("falha", "") == ""
+    das_quatro = [item for item in chamadas if item[0] in SEM_CURSOR]
+    assert len(das_quatro) == 4
+    assert {item[1] for item in das_quatro} == {datetime(2026, 10, 5, 21, 58, 30)}
+    assert all(item[1] != INICIO_NOITE for item in das_quatro)
+    estado = _ler_consulta()
+    for placa in SEM_CURSOR:
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["ate"] == "2026-10-05T22:02:00"
+
+    chamadas.clear()
+    gps["ligado"] = True
+    terceiro = datetime(2026, 10, 5, 22, 4, 0)
+    assert rodar(terceiro).get("falha", "") == ""
+    da_scw = [item for item in chamadas if item[0] == "SCW-4F36"]
+    assert len(da_scw) == 1
+    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 0, 30)
+    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 2, 0) - timedelta(seconds=90)
+    con = conectar()
+    try:
+        pontos = [
+            linha["ts"]
+            for linha in con.execute(
+                "SELECT ts FROM ponto WHERE placa = ? AND turno = ?",
+                ("SCW-4F36", "noturno"),
+            )
+        ]
+    finally:
+        con.close()
+    assert pontos == ["2026-10-05T22:03:00"]
+    estado = _ler_consulta()
+    assert estado["SCW-4F36"]["cursor"] == "2026-10-05T22:03:00"
+    for placa in SEM_CURSOR[1:]:
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["ate"] == "2026-10-05T22:04:00"
+
+    chamadas.clear()
+    assert rodar(datetime(2026, 10, 5, 22, 6, 0)).get("falha", "") == ""
+    da_scw = [item for item in chamadas if item[0] == "SCW-4F36"]
+    assert len(da_scw) == 1
+    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 1, 30)
+    assert da_scw[0][1] != INICIO_NOITE
+    outras = [item for item in chamadas if item[0] in SEM_CURSOR[1:]]
+    assert len(outras) == 3
+    assert all(item[1] != INICIO_NOITE for item in outras)
+    con = conectar()
+    try:
+        pontos = [
+            linha["ts"]
+            for linha in con.execute(
+                "SELECT ts FROM ponto WHERE placa = ? AND turno = ?",
+                ("SCW-4F36", "noturno"),
+            )
+        ]
+        rotas = [
+            linha["status"]
+            for linha in con.execute("SELECT status FROM rota WHERE data = ? AND turno = ?", (DIA.isoformat(), "noturno"))
+        ]
+    finally:
+        con.close()
+    assert pontos == ["2026-10-05T22:03:00"]
+    assert estado["SCH-9B28"]["cursor"] == _ler_consulta()["SCH-9B28"]["cursor"]
+    assert all(status != "sem_dados" for status in rotas)
+
+
+def test_timeout_e_500_nao_avancam_a_marca():
+    from datetime import datetime
+
+    from inlog_agent.live_db import marcar_placa
+    from inlog_agent.live_sync import ciclo_gps
+
+    _turno_com_ancora()
+    con = conectar()
+    try:
+        marcar_placa(con, DIA.isoformat(), "noturno", "SCW-4F36", veiculo="SCW-4F36", vehicle_id="id-scw")
+        marcar_placa(con, DIA.isoformat(), "noturno", "SDE-6B76", veiculo="SDE-6B76", vehicle_id="id-sde")
+        con.commit()
+    finally:
+        con.close()
+
+    chamadas = []
+
+    def historico(placa, _vehicle_id, inicio, fim):
+        chamadas.append((placa, inicio, fim))
+        if placa == "SCW-4F36":
+            raise TimeoutError("timed out")
+        if placa == "SDE-6B76":
+            raise RuntimeError("Fulltrack 500 upstream")
+        return []
+
+    def rodar(agora):
+        return ciclo_gps(
+            Path(tempfile.mkdtemp()),
+            DIA.isoformat(),
+            "noturno",
+            agora=agora,
+            limites=[],
+            descobrir=lambda: [],
+            buscar_historico=historico,
+            recalcular=lambda *_args: [],
+        )
+
+    assert rodar(datetime(2026, 10, 5, 22, 0, 0)).get("falha", "") == ""
+    primeiras = [item for item in chamadas if item[0] in ("SCW-4F36", "SDE-6B76")]
+    assert {item[1] for item in primeiras} == {INICIO_NOITE}
+    estado = _ler_consulta()
+    for placa in ("SCW-4F36", "SDE-6B76"):
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["ate"] == ""
+        assert estado[placa]["falha_em"] == "2026-10-05T22:00:00"
+        assert estado[placa]["falhas"] == 1
+        assert estado[placa]["telemetria"] != "sem_dados"
+
+    chamadas.clear()
+    assert rodar(datetime(2026, 10, 5, 22, 2, 0)).get("falha", "") == ""
+    assert [item for item in chamadas if item[0] in ("SCW-4F36", "SDE-6B76")] == []
+    estado = _ler_consulta()
+    for placa in ("SCW-4F36", "SDE-6B76"):
+        assert estado[placa]["ate"] == ""
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["falhas"] == 1
+
+    chamadas.clear()
+    assert rodar(datetime(2026, 10, 5, 22, 10, 0)).get("falha", "") == ""
+    de_novo = [item for item in chamadas if item[0] in ("SCW-4F36", "SDE-6B76")]
+    assert len(de_novo) == 2
+    assert {item[1] for item in de_novo} == {INICIO_NOITE}
+    estado = _ler_consulta()
+    for placa in ("SCW-4F36", "SDE-6B76"):
+        assert estado[placa]["cursor"] == ""
+        assert estado[placa]["ate"] == ""
+        assert estado[placa]["telemetria"] != "sem_dados"

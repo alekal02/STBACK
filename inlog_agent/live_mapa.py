@@ -201,6 +201,65 @@ def _simplificar(coords: list[tuple[float, float]]) -> list[list[float]]:
     return pontos
 
 
+def codigo_que_contem(lat: float, lon: float, setores: list[dict[str, Any]]) -> str | None:
+    """Setor oficial que cobre o ponto. O menor polígono ganha se houver sobreposição."""
+    from shapely.geometry import Point, Polygon
+
+    ponto = Point(float(lon), float(lat))
+    melhor = None
+    area = None
+    for setor in setores or []:
+        for anel in setor.get("aneis") or []:
+            coords = [(float(par[1]), float(par[0])) for par in anel if isinstance(par, (list, tuple)) and len(par) >= 2]
+            if len(coords) < 4:
+                continue
+            poly = Polygon(coords)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty or not poly.covers(ponto):
+                continue
+            tamanho = float(poly.area)
+            if area is None or tamanho < area:
+                area = tamanho
+                melhor = str(setor.get("codigo") or "")
+    return melhor or None
+
+
+def _setores_do_turno(dia: date, turno: str) -> list[dict[str, Any]]:
+    from .mapa_oficial import _freq_do_dia
+    from .unificado import _casa_turno
+
+    return [
+        setor
+        for setor in _poligonos()
+        if _freq_do_dia(str(setor.get("frequencia") or ""), dia) and _casa_turno(str(setor.get("frequencia") or ""), turno)
+    ]
+
+
+def _partir_trilha(
+    coords: list[tuple[float, float]],
+    setores: list[dict[str, Any]],
+) -> tuple[list[list[tuple[float, float]]], list[list[tuple[float, float]]]]:
+    dentro: list[list[tuple[float, float]]] = []
+    fora: list[list[tuple[float, float]]] = []
+    if not setores:
+        return [coords], []
+    atual = ""
+    balde: list[tuple[float, float]] = []
+    for lat, lon in coords:
+        lugar = "dentro" if codigo_que_contem(lat, lon, setores) else "fora"
+        if atual and lugar != atual:
+            balde.append((lat, lon))
+            (dentro if atual == "dentro" else fora).append(balde)
+            balde = [(lat, lon)]
+        else:
+            balde.append((lat, lon))
+        atual = lugar
+    if len(balde) >= 2:
+        (dentro if atual == "dentro" else fora).append(balde)
+    return dentro, fora
+
+
 def _linhas_visuais(brutos: list[tuple[str, float, float]]) -> list[list[list[float]]]:
     grupos: list[list[tuple[float, float]]] = []
     atual: list[tuple[float, float]] = []
@@ -240,11 +299,22 @@ def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
             cursor = ts
     veiculos = []
     visuais = 0
+    setores = _setores_do_turno(dia, pedido)
     for placa, brutos in por_placa.items():
         linhas = _linhas_visuais(brutos)
-        visuais += sum(len(linha) for linha in linhas)
-        if linhas:
-            veiculos.append({"placa": placa, "linhas": linhas})
+        fora = []
+        if setores and linhas:
+            dentro = []
+            for linha in linhas:
+                coords = [(float(par[0]), float(par[1])) for par in linha]
+                parte_dentro, parte_fora = _partir_trilha(coords, setores)
+                dentro.extend(parte_dentro)
+                fora.extend(parte_fora)
+            linhas = [_simplificar(parte) for parte in dentro if len(parte) >= 2]
+            fora = [_simplificar(parte) for parte in fora if len(parte) >= 2]
+        visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
+        if linhas or fora:
+            veiculos.append({"placa": placa, "linhas": linhas, "deslocamento": fora})
     return {
         "data": dia.isoformat(),
         "turno": pedido,
@@ -273,15 +343,20 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
         ).fetchall()
     finally:
         con.close()
-    pontos = [
-        {
-            "placa": str(row["placa"] or ""),
-            "ts": str(row["ts"] or ""),
-            "lat": float(row["lat"]),
-            "lon": float(row["lon"]),
-        }
-        for row in rows
-    ]
+    setores = _setores_do_turno(dia, pedido)
+    pontos = []
+    for row in rows:
+        lat = float(row["lat"])
+        lon = float(row["lon"])
+        pontos.append(
+            {
+                "placa": str(row["placa"] or ""),
+                "ts": str(row["ts"] or ""),
+                "lat": lat,
+                "lon": lon,
+                "deslocamento": bool(setores) and codigo_que_contem(lat, lon, setores) is None,
+            }
+        )
     cursor = pontos[-1]["ts"] if pontos else cursor_cliente
     return {
         "data": dia.isoformat(),

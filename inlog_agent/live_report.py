@@ -209,6 +209,30 @@ def _tempo(inicio: str, fim: str) -> str:
     return f"{resto} min"
 
 
+def _marcar_deslocamento(estado: dict[str, Any], _rotas: list[dict[str, Any]]) -> None:
+    """Diz onde o veículo está agora. Não grava e não mexe no percentual da rota."""
+    from datetime import date as dia_tipo
+
+    from .config import parse_data
+    from .live_mapa import _setores_do_turno, codigo_que_contem
+
+    dia = parse_data(str(estado.get("data") or "")) or dia_tipo.today()
+    turno = str(estado.get("turno") or "")
+    setores = _setores_do_turno(dia, turno) if turno in {"diurno", "noturno"} else []
+    for pos in estado.get("posicoes") or []:
+        if not isinstance(pos, dict) or pos.get("lat") is None or pos.get("lon") is None:
+            continue
+        if not setores:
+            pos["rota_atual"] = ""
+            pos["deslocamento"] = False
+            pos["rotulo_rota"] = ""
+            continue
+        codigo = codigo_que_contem(float(pos["lat"]), float(pos["lon"]), setores)
+        pos["rota_atual"] = codigo or ""
+        pos["deslocamento"] = not codigo
+        pos["rotulo_rota"] = codigo or "Em deslocamento"
+
+
 def _faixa_percentual(valor: Any) -> tuple[str, str]:
     """Só a faixa exibida. O percentual gravado não muda."""
     try:
@@ -235,6 +259,7 @@ def _exibir_classificacao(estado: dict[str, Any]) -> dict[str, Any]:
         if str(item.get("grupo") or "") != "apoio":
             item["grupo"], item["status"] = _faixa_percentual(item.get("percentual"))
         rotas.append(item)
+    _marcar_deslocamento(estado, rotas)
     resumo = dict(estado.get("resumo") or {})
     previstas = [r for r in rotas if isinstance(r, dict) and r.get("na_grade") and r.get("grupo") != "apoio"]
     def n(grupo: str) -> int:

@@ -209,8 +209,21 @@ def _tempo(inicio: str, fim: str) -> str:
     return f"{resto} min"
 
 
+def _faixa_percentual(valor: Any) -> tuple[str, str]:
+    """Só a faixa exibida. O percentual gravado não muda."""
+    try:
+        pct = float(valor)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if pct >= 80:
+        return "concluida", "Concluída"
+    if pct >= 25:
+        return "parcial", "Parcial"
+    return "nao", "Não iniciada"
+
+
 def _exibir_classificacao(estado: dict[str, Any]) -> dict[str, Any]:
-    """Junta Início e Só passagem na exibição. Não grava e não mexe no percentual."""
+    """Classifica pela faixa do percentual. Não grava e não mexe na cobertura."""
     if not isinstance(estado, dict):
         return estado
     rotas = []
@@ -219,11 +232,8 @@ def _exibir_classificacao(estado: dict[str, Any]) -> dict[str, Any]:
             rotas.append(rota)
             continue
         item = dict(rota)
-        grupo = str(item.get("grupo") or "")
-        status = str(item.get("status") or "")
-        if grupo in {"inicio", "passagem"} or status in {"Início de coleta", "Início", "Só passagem"}:
-            item["grupo"] = "nao"
-            item["status"] = "Não iniciada"
+        if str(item.get("grupo") or "") != "apoio":
+            item["grupo"], item["status"] = _faixa_percentual(item.get("percentual"))
         rotas.append(item)
     resumo = dict(estado.get("resumo") or {})
     previstas = [r for r in rotas if isinstance(r, dict) and r.get("na_grade") and r.get("grupo") != "apoio"]

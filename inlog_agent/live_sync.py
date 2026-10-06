@@ -40,6 +40,13 @@ FOLGA_S = 600
 POSICAO_S = 30
 GPS_S = 120
 ATRASO_S = 15 * 60
+RECONCILIAR_S = 30 * 60
+BURACO_PISO_S = 15.0
+BURACO_FATOR = 1.5
+BURACO_FUNDIR_S = 60
+BURACO_JANELA_MAX_S = 180
+RECON_RESERVA_S = 20.0
+RECON_LOTE_S = 8.0
 REDESCOBERTA_S = 10 * 60
 BOOT_FALHA_S = 10 * 60
 _RECON_ESPERA_S = (0, 180, 480, 900)
@@ -52,6 +59,15 @@ _MAIOR_CICLO_S = 0.0
 _ROTAS_CICLO = 0
 _DURACAO_ABERTO_S = 0.0
 _DURACAO_FINALIZANDO_S = 0.0
+_RECON_CHAMADAS = 0
+_RECON_RECUPERADOS = 0
+_RECON_DURACAO_S = 0.0
+_RECON_MEMORIA_MB = 0.0
+_RECON_FILA: list[tuple[Any, ...]] = []
+_RECON_PONTOS: list[dict[str, Any]] = []
+_RECON_PROXIMA = 0.0
+_RECON_PAUSA_ATE = 0.0
+_RECON_CHAVE = ""
 ORCAMENTO_S = 90.0
 try:
     from zoneinfo import ZoneInfo
@@ -90,6 +106,10 @@ def metricas_ciclo() -> dict[str, float | int]:
         "maior_ciclo_duracao_s": round(_MAIOR_CICLO_S, 3),
         "duracao_aberto_s": round(_DURACAO_ABERTO_S, 3),
         "duracao_finalizando_s": round(_DURACAO_FINALIZANDO_S, 3),
+        "reconciliacao_chamadas": _RECON_CHAMADAS,
+        "reconciliacao_recuperados": _RECON_RECUPERADOS,
+        "reconciliacao_duracao_s": round(_RECON_DURACAO_S, 3),
+        "reconciliacao_memoria_mb": round(_RECON_MEMORIA_MB, 1),
     }
 
 
@@ -139,6 +159,84 @@ def inicio_da_consulta(
     if lido is None:
         return inicio_turno
     return max(inicio_turno, lido - timedelta(seconds=folga_s))
+
+
+def _mediana(valores: list[float]) -> float:
+    ordem = sorted(valores)
+    meio = len(ordem) // 2
+    if len(ordem) % 2:
+        return float(ordem[meio])
+    return (float(ordem[meio - 1]) + float(ordem[meio])) / 2
+
+
+def janela_ociosa(
+    agora: float,
+    ultima_gps: float,
+    *,
+    gps_s: float = GPS_S,
+    reserva_s: float = RECON_RESERVA_S,
+    lote_s: float = RECON_LOTE_S,
+) -> float:
+    """Segundos livres antes do próximo ciclo GPS. Zero se o ciclo normal está perto."""
+    if ultima_gps <= 0:
+        return 0.0
+    restante = gps_s - (agora - ultima_gps)
+    if restante <= reserva_s:
+        return 0.0
+    return min(lote_s, restante - reserva_s)
+
+
+def intervalos_de_buraco(
+    instantes: list[datetime],
+    *,
+    cursor: datetime | None,
+    folga_s: int = FOLGA_S,
+    piso_s: float = BURACO_PISO_S,
+    fator: float = BURACO_FATOR,
+) -> list[tuple[datetime, datetime]]:
+    """Vãos do turno, anteriores à folga do cursor, onde cabe um pulso ausente.
+
+    Não devolve o turno inteiro: cada janela liga dois pontos já gravados,
+    e janelas vizinhas só se unem até BURACO_JANELA_MAX_S.
+    """
+    if cursor is None or len(instantes) < 2:
+        return []
+    serie = sorted(instantes)
+    dts = [(b - a).total_seconds() for a, b in zip(serie, serie[1:]) if b > a]
+    if not dts:
+        return []
+    minimo = max(float(piso_s), _mediana(dts) * float(fator))
+    limite = cursor - timedelta(seconds=folga_s)
+    brutos: list[tuple[datetime, datetime]] = []
+    for anterior, seguinte in zip(serie, serie[1:]):
+        if seguinte <= anterior or anterior >= limite:
+            continue
+        if (seguinte - anterior).total_seconds() < minimo:
+            continue
+        fim = min(seguinte, limite)
+        if fim <= anterior:
+            continue
+        brutos.append((anterior, fim))
+    return _fundir_intervalos(brutos, BURACO_FUNDIR_S, BURACO_JANELA_MAX_S)
+
+
+def _fundir_intervalos(
+    brutos: list[tuple[datetime, datetime]],
+    pausa_s: int,
+    max_s: int,
+) -> list[tuple[datetime, datetime]]:
+    if not brutos:
+        return []
+    ordem = sorted(brutos)
+    saida = [ordem[0]]
+    pausa = timedelta(seconds=pausa_s)
+    for inicio, fim in ordem[1:]:
+        anterior, ate = saida[-1]
+        if inicio - ate <= pausa and (fim - anterior).total_seconds() <= max_s:
+            saida[-1] = (anterior, max(ate, fim))
+        else:
+            saida.append((inicio, fim))
+    return saida
 
 
 def codigos_com_ponto_novo(
@@ -720,6 +818,235 @@ def ciclo_posicao(
         con.close()
 
 
+def planejar_buracos(
+    con,
+    data: str,
+    turno: str,
+) -> list[tuple[str, str, str, datetime, datetime]]:
+    """Uma placa por vez. A fila guarda só o vão, não o histórico."""
+    fila: list[tuple[str, str, str, datetime, datetime]] = []
+    for placa in ler_placas(con, data, turno):
+        cursor = _parse_ts(str(placa["last_gps_timestamp"] or ""))
+        if cursor is None:
+            continue
+        instantes: list[datetime] = []
+        for row in con.execute(
+            "SELECT ts FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
+            (data, turno, placa["placa"]),
+        ):
+            lido = _parse_ts(str(row["ts"] or ""))
+            if lido is not None:
+                instantes.append(lido)
+        for inicio, fim in intervalos_de_buraco(instantes, cursor=cursor):
+            fila.append(
+                (
+                    str(placa["placa"]),
+                    str(placa["vehicle_id"] or ""),
+                    str(placa["veiculo"] or ""),
+                    inicio,
+                    fim,
+                )
+            )
+        del instantes
+    return fila
+
+
+def reconciliar_buracos(
+    output_dir: Path,
+    data: str,
+    turno: str,
+    *,
+    agora: datetime | None = None,
+    buscar_historico: Callable[..., list[dict[str, Any]]] | None = None,
+    recalcular: Callable[..., list[dict[str, Any]]] | None = None,
+    limites: list[dict[str, Any]] | None = None,
+    orcamento_s: float | None = None,
+    intervalos: list[tuple[str, str, str, datetime, datetime]] | None = None,
+    pontos_pendentes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Consulta só os buracos do turno aberto.
+
+    Não move o cursor. Sem ponto novo, não recalcula cobertura.
+    """
+    from .config import parse_data
+    from .live_turno import ponto_pertence, situacao_pelo_relogio, turno_aceita_sync
+
+    pedido = (turno or "").strip().lower()
+    dia = parse_data(data) or date.today()
+    momento = agora or agora_brt()
+    fila = list(intervalos or [])
+    pendentes = list(pontos_pendentes or [])
+    chamadas = 0
+    novos = 0
+    con_turno = conectar()
+    try:
+        aceita = turno_aceita_sync(con_turno, dia, pedido, momento)
+    finally:
+        con_turno.close()
+    if not aceita:
+        return {
+            "chamadas": 0,
+            "novos": 0,
+            "restantes": [],
+            "pendentes": [],
+            "rotas": [],
+            "concluida": True,
+        }
+    aberto = situacao_pelo_relogio(dia, pedido, momento) == "ABERTO"
+    if not aberto:
+        fila = []
+    buscar = buscar_historico
+    if buscar is None and fila:
+        from .config import load_settings
+        from .fulltrack_api import historico_veiculo, login
+
+        settings = load_settings()
+        token = login(settings)
+
+        def buscar(placa, vehicle_id, inicio, fim, _settings=settings, _token=token):
+            if not vehicle_id:
+                return []
+            return historico_veiculo(_settings, vehicle_id, inicio, fim, token=_token)
+
+    inicio_fatia = time.perf_counter()
+    con = conectar()
+    try:
+        from .dificil_acesso import eh_basculante
+
+        while fila and aberto:
+            if orcamento_s is not None and time.perf_counter() - inicio_fatia >= orcamento_s:
+                break
+            placa, vehicle_id, veiculo, inicio, fim = fila.pop(0)
+            if not vehicle_id or fim <= inicio:
+                continue
+            chamadas += 1
+            try:
+                eventos = (buscar or _historico_fulltrack)(placa, vehicle_id, inicio, fim)
+            except Exception as exc:
+                if _eh_sem_dados(exc):
+                    eventos = []
+                else:
+                    print(f"Reconciliação {placa} {inicio:%H:%M:%S} falhou: {exc}", flush=True)
+                    continue
+            recebidos = [_ponto_local(item, placa) for item in eventos]
+            recebidos = [
+                item
+                for item in recebidos
+                if item and ponto_pertence(str(item.get("timestamp") or ""), dia, pedido)
+            ]
+            gravados = inserir_pontos(con, dia.isoformat(), pedido, placa, recebidos)
+            novos += gravados
+            con.commit()
+            if not gravados or eh_basculante(placa, veiculo):
+                continue
+            for item in recebidos:
+                lido = _parse_ts(str(item.get("timestamp") or ""))
+                if lido is not None and inicio < lido < fim:
+                    pendentes.append(item)
+        rotas: list[str] = []
+        concluida = not fila
+        if concluida and pendentes and chamadas and orcamento_s is not None:
+            return {
+                "chamadas": chamadas,
+                "novos": novos,
+                "restantes": [],
+                "pendentes": pendentes,
+                "rotas": [],
+                "concluida": False,
+            }
+        if concluida and pendentes:
+            from .cobertura import _xy
+
+            for ponto in pendentes:
+                ponto["xy"] = _xy(ponto)
+            caixas = limites if limites is not None else _limites(dia, pedido)
+            codigos = codigos_com_ponto_novo(pendentes, caixas)
+            if codigos:
+                funcao = recalcular or _recalcular_oficial
+                atualizadas = funcao(con, output_dir, dia, pedido, codigos)
+                if atualizadas:
+                    gravar_rotas(con, dia.isoformat(), pedido, atualizadas)
+                    con.commit()
+                rotas = [str(item.get("codigo") or "") for item in atualizadas if item.get("codigo")]
+            pendentes = []
+        return {
+            "chamadas": chamadas,
+            "novos": novos,
+            "restantes": fila,
+            "pendentes": pendentes,
+            "rotas": rotas,
+            "concluida": concluida,
+        }
+    finally:
+        con.close()
+
+
+def _reconciliacao_devida(agora: float) -> bool:
+    if agora < _RECON_PAUSA_ATE:
+        return False
+    if _RECON_FILA or _RECON_PONTOS:
+        return True
+    return _RECON_PROXIMA > 0 and agora >= _RECON_PROXIMA
+
+
+def passo_reconciliacao(output_dir: Path, *, orcamento_s: float) -> dict[str, Any]:
+    """Uma fatia da reconciliação, na mesma thread do ciclo normal."""
+    global _RECON_FILA, _RECON_PONTOS, _RECON_PROXIMA, _RECON_CHAVE
+    global _RECON_CHAMADAS, _RECON_RECUPERADOS, _RECON_DURACAO_S, _RECON_MEMORIA_MB
+    momento = agora_brt()
+    dia, turno = turno_operacional(momento)
+    chave = f"{dia.isoformat()}|{turno}"
+    if chave != _RECON_CHAVE:
+        _RECON_FILA = []
+        _RECON_PONTOS = []
+        _RECON_CHAVE = chave
+    if not _RECON_FILA and not _RECON_PONTOS:
+        con = conectar()
+        try:
+            from .live_turno import situacao_pelo_relogio
+
+            if not turno_existe(con, dia.isoformat(), turno) or situacao_pelo_relogio(dia, turno, momento) != "ABERTO":
+                _RECON_PROXIMA = time.time() + RECONCILIAR_S
+                return {"chamadas": 0, "novos": 0, "concluida": True}
+            _RECON_FILA = planejar_buracos(con, dia.isoformat(), turno)
+        finally:
+            con.close()
+        _RECON_CHAMADAS = 0
+        _RECON_RECUPERADOS = 0
+        _RECON_DURACAO_S = 0.0
+        if not _RECON_FILA:
+            _RECON_MEMORIA_MB = round(_memoria_mb(), 1)
+            _RECON_PROXIMA = time.time() + RECONCILIAR_S
+            print("Reconciliação de buracos: nenhum vão fora da folga de 10 min.", flush=True)
+            return {"chamadas": 0, "novos": 0, "concluida": True}
+    t0 = time.perf_counter()
+    resultado = reconciliar_buracos(
+        output_dir,
+        dia.isoformat(),
+        turno,
+        agora=momento,
+        orcamento_s=orcamento_s,
+        intervalos=_RECON_FILA,
+        pontos_pendentes=_RECON_PONTOS,
+    )
+    _RECON_FILA = list(resultado.get("restantes") or [])
+    _RECON_PONTOS = list(resultado.get("pendentes") or [])
+    _RECON_CHAMADAS += int(resultado.get("chamadas") or 0)
+    _RECON_RECUPERADOS += int(resultado.get("novos") or 0)
+    _RECON_DURACAO_S += time.perf_counter() - t0
+    if resultado.get("concluida"):
+        _RECON_MEMORIA_MB = round(_memoria_mb(), 1)
+        _RECON_PROXIMA = time.time() + RECONCILIAR_S
+        _RECON_PONTOS = []
+        print(
+            "Reconciliação de buracos: "
+            f"chamadas={_RECON_CHAMADAS} recuperados={_RECON_RECUPERADOS} "
+            f"tempo={_RECON_DURACAO_S:.1f}s memoria={_RECON_MEMORIA_MB}MB.",
+            flush=True,
+        )
+    return resultado
+
+
 def iniciar_loop() -> None:
     global _THREAD
     if (os.getenv("SAGTRACK_LIVE_SYNC") or "1").strip().lower() in {"0", "false", "nao", "não"}:
@@ -732,6 +1059,7 @@ def iniciar_loop() -> None:
 
 
 def _loop() -> None:
+    global _RECON_PROXIMA, _RECON_PAUSA_ATE
     ultima_posicao = 0.0
     ultima_gps = 0.0
     while True:
@@ -761,6 +1089,18 @@ def _loop() -> None:
             finally:
                 _sair()
             ultima_gps = time.time()
+            if _RECON_PROXIMA <= 0.0:
+                _RECON_PROXIMA = time.time()
+        ocioso = janela_ociosa(time.time(), ultima_gps)
+        if ocioso > 0 and _reconciliacao_devida(time.time()) and _entrar():
+            try:
+                passo_reconciliacao(settings.output_dir, orcamento_s=ocioso)
+            except Exception as exc:
+                _avisar_disco(exc)
+                _RECON_PAUSA_ATE = time.time() + 60
+                print(f"Reconciliação de buracos adiada: {exc}", flush=True)
+            finally:
+                _sair()
 
 
 def atender_turnos(

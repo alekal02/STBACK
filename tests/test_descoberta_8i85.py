@@ -807,3 +807,204 @@ def test_gps_sem_horario_recente_nao_parece_atual():
     assert _gps_desatualizado("atrasado", "2026-10-06T14:00:00") is True
     assert _gps_desatualizado("sem_dados", "") is True
     assert _gps_desatualizado("sem_comunicacao", "2026-10-06T14:00:00") is True
+
+
+def test_ciclo_normal_permanece_com_folga_de_dez_minutos():
+    from inlog_agent.live_sync import FOLGA_S, RECONCILIAR_S, janela_ociosa
+
+    assert FOLGA_S == 600
+    assert RECONCILIAR_S == 30 * 60
+    assert janela_ociosa(100.0, 0.0) == 0.0
+    assert janela_ociosa(200.0, 200.0) == 8.0
+    assert janela_ociosa(300.0, 200.0) == 0.0
+
+
+def test_reconciliacao_consulta_so_buraco_anterior_a_folga():
+    from datetime import datetime, timedelta
+
+    from inlog_agent.cobertura import _xy
+    from inlog_agent.live_db import inserir_pontos, marcar_placa
+    from inlog_agent.live_sync import ciclo_gps, intervalos_de_buraco, planejar_buracos, reconciliar_buracos
+
+    _turno_com_ancora()
+    cursor = datetime(2026, 10, 5, 21, 0, 0)
+    faltou = datetime(2026, 10, 5, 20, 30, 0)
+    serie = []
+    instante = datetime(2026, 10, 5, 20, 20, 0)
+    while instante <= cursor:
+        if instante != faltou:
+            serie.append(
+                {"timestamp": instante.strftime("%Y-%m-%dT%H:%M:%S"), "latitude": -16.82, "longitude": -49.25}
+            )
+        instante += timedelta(seconds=10)
+    con = conectar()
+    try:
+        inserir_pontos(con, DIA.isoformat(), "noturno", "SCH-9B28", serie)
+        marcar_placa(
+            con,
+            DIA.isoformat(),
+            "noturno",
+            "SCH-9B28",
+            lat=-16.80,
+            lon=-49.20,
+            telemetria="atualizado",
+            last_gps_timestamp=CURSOR_24,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    chamadas = []
+
+    def historico(placa, _vid, inicio, _fim):
+        chamadas.append((placa, inicio))
+        if inicio <= datetime(2026, 10, 5, 20, 29, 50):
+            return [
+                {"timestamp": "2026-10-05T20:29:50", "latitude": -16.82, "longitude": -49.25},
+                {"timestamp": "2026-10-05T20:30:00", "latitude": -16.82, "longitude": -49.25},
+                {"timestamp": "2026-10-05T20:30:00", "latitude": -16.82, "longitude": -49.25},
+                {"timestamp": "2026-10-05T20:30:10", "latitude": -16.82, "longitude": -49.25},
+            ]
+        return []
+
+    rotas = []
+    agora = datetime(2026, 10, 5, 21, 2, 0)
+    t0 = __import__("time").perf_counter()
+    ciclo = ciclo_gps(
+        Path(tempfile.mkdtemp()),
+        DIA.isoformat(),
+        "noturno",
+        agora=agora,
+        limites=[],
+        descobrir=lambda: [],
+        buscar_historico=historico,
+        recalcular=lambda *_args: [],
+    )
+    duracao = __import__("time").perf_counter() - t0
+    assert ciclo.get("falha", "") == ""
+    assert duracao < 2
+    assert [item[1] for item in chamadas if item[0] == "SCH-9B28"] == [datetime(2026, 10, 5, 20, 50, 0)]
+
+    con = conectar()
+    try:
+        plano = planejar_buracos(con, DIA.isoformat(), "noturno")
+        antes = con.execute(
+            "SELECT last_gps_timestamp, ultimo_lat, telemetria FROM placa WHERE placa = 'SCH-9B28'"
+        ).fetchone()
+        sync = con.execute("SELECT ultima_sincronizacao FROM turno").fetchone()[0]
+    finally:
+        con.close()
+    assert len(plano) == 1
+    assert plano[0][3] == datetime(2026, 10, 5, 20, 29, 50)
+    assert plano[0][4] == datetime(2026, 10, 5, 20, 30, 10)
+    assert all((fim - inicio).total_seconds() <= 180 for _p, _v, _n, inicio, fim in plano)
+
+    xy = _xy({"latitude": -16.82, "longitude": -49.25})
+    limites = [{"codigo": "R1", "minx": xy[0] - 1, "miny": xy[1] - 1, "maxx": xy[0] + 1, "maxy": xy[1] + 1, "folga": 0}]
+
+    def recalcular(*args):
+        rotas.append(list(args[-1]))
+        return []
+
+    import tracemalloc
+
+    tracemalloc.start()
+    primeiro = reconciliar_buracos(
+        Path(tempfile.mkdtemp()),
+        DIA.isoformat(),
+        "noturno",
+        agora=agora,
+        buscar_historico=historico,
+        recalcular=recalcular,
+        limites=limites,
+        intervalos=plano,
+    )
+    pico = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert primeiro["novos"] == 1
+    assert primeiro["chamadas"] == 1
+    assert primeiro["rotas"] == []
+    assert rotas == [["R1"]]
+    assert pico < 20 * 1024 * 1024
+
+    con = conectar()
+    try:
+        total = con.execute("SELECT COUNT(*) FROM ponto WHERE placa = 'SCH-9B28'").fetchone()[0]
+        atual = con.execute(
+            "SELECT last_gps_timestamp, ultimo_lat, telemetria FROM placa WHERE placa = 'SCH-9B28'"
+        ).fetchone()
+        sync_depois = con.execute("SELECT ultima_sincronizacao FROM turno").fetchone()[0]
+        de_novo = planejar_buracos(con, DIA.isoformat(), "noturno")
+    finally:
+        con.close()
+    assert total == len(serie) + 1
+    assert atual["last_gps_timestamp"] == antes["last_gps_timestamp"] == CURSOR_24
+    assert atual["ultimo_lat"] == antes["ultimo_lat"]
+    assert atual["telemetria"] == antes["telemetria"]
+    assert sync_depois == sync
+    assert de_novo == []
+
+    repetido = reconciliar_buracos(
+        Path(tempfile.mkdtemp()),
+        DIA.isoformat(),
+        "noturno",
+        agora=agora,
+        buscar_historico=historico,
+        recalcular=recalcular,
+        limites=limites,
+        intervalos=plano,
+    )
+    assert repetido["novos"] == 0
+    assert repetido["chamadas"] == 1
+    assert rotas == [["R1"]]
+    dentro = []
+    t = datetime(2026, 10, 5, 20, 40, 0)
+    while t <= cursor:
+        if t != datetime(2026, 10, 5, 20, 55, 0):
+            dentro.append(t)
+        t += timedelta(seconds=10)
+    assert intervalos_de_buraco(dentro, cursor=cursor) == []
+
+
+def test_reconciliacao_nao_junta_o_turno_inteiro_nem_recalcula_sem_ponto():
+    from datetime import datetime, timedelta
+
+    from inlog_agent.live_sync import intervalos_de_buraco, reconciliar_buracos
+
+    cursor = datetime(2026, 10, 5, 21, 0, 0)
+    instantes = []
+    instante = datetime(2026, 10, 5, 20, 0, 0)
+    fim = datetime(2026, 10, 5, 20, 40, 0)
+    while instante <= fim:
+        if instante.second != 0:
+            instantes.append(instante)
+        instante += timedelta(seconds=10)
+    janelas = intervalos_de_buraco(instantes, cursor=cursor)
+    assert len(janelas) > 1
+    assert all((b - a).total_seconds() <= 180 for a, b in janelas)
+    assert janelas[-1][1] < fim
+
+    _turno_com_ancora()
+    chamadas = []
+
+    def historico(placa, _vid, inicio, _fim):
+        chamadas.append(inicio)
+        return []
+
+    def recalcular(*_args):
+        raise AssertionError("cobertura nao deve rodar")
+
+    resultado = reconciliar_buracos(
+        Path(tempfile.mkdtemp()),
+        DIA.isoformat(),
+        "noturno",
+        agora=datetime(2026, 10, 5, 21, 2, 0),
+        buscar_historico=historico,
+        recalcular=recalcular,
+        limites=[],
+        intervalos=[("SCH-9B28", "id-sch", "SCH-9B28", janelas[0][0], janelas[0][1])],
+        orcamento_s=0,
+    )
+    assert resultado["chamadas"] == 0
+    assert resultado["concluida"] is False
+    assert chamadas == []

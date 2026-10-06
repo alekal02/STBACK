@@ -38,7 +38,8 @@ def ler_estado(
     """Leitura para o painel. Não chama a Fulltrack."""
     from .live_sync import ler_painel, ocupada
 
-    return ler_painel(output_dir, data, turno, atualizando=bool(job_rodando or ocupada()))
+    estado = ler_painel(output_dir, data, turno, atualizando=bool(job_rodando or ocupada()))
+    return _exibir_classificacao(estado)
 
 
 def pedir_atualizacao(
@@ -51,7 +52,7 @@ def pedir_atualizacao(
     """Pede uma sincronização. Se já houver uma, devolve o estado atual."""
     from .live_sync import pedir
 
-    return pedir(output_dir, data, turno, job_rodando=job_rodando)
+    return _exibir_classificacao(pedir(output_dir, data, turno, job_rodando=job_rodando))
 
 
 def montar_estado(
@@ -206,6 +207,38 @@ def _tempo(inicio: str, fim: str) -> str:
     if horas:
         return f"{horas} h {resto} min"
     return f"{resto} min"
+
+
+def _exibir_classificacao(estado: dict[str, Any]) -> dict[str, Any]:
+    """Junta Início e Só passagem na exibição. Não grava e não mexe no percentual."""
+    if not isinstance(estado, dict):
+        return estado
+    rotas = []
+    for rota in estado.get("rotas") or []:
+        if not isinstance(rota, dict):
+            rotas.append(rota)
+            continue
+        item = dict(rota)
+        grupo = str(item.get("grupo") or "")
+        status = str(item.get("status") or "")
+        if grupo in {"inicio", "passagem"} or status in {"Início de coleta", "Início", "Só passagem"}:
+            item["grupo"] = "nao"
+            item["status"] = "Não iniciada"
+        rotas.append(item)
+    resumo = dict(estado.get("resumo") or {})
+    previstas = [r for r in rotas if isinstance(r, dict) and r.get("na_grade") and r.get("grupo") != "apoio"]
+    def n(grupo: str) -> int:
+        return sum(1 for r in previstas if r.get("grupo") == grupo)
+    resumo["previstas"] = len(previstas)
+    resumo["concluidas"] = n("concluida")
+    resumo["parciais"] = n("parcial")
+    resumo["nao_iniciadas"] = n("nao")
+    resumo["inicio"] = 0
+    resumo["passagem"] = 0
+    resumo["apoios"] = sum(1 for r in rotas if isinstance(r, dict) and r.get("grupo") == "apoio")
+    estado["rotas"] = rotas
+    estado["resumo"] = resumo
+    return estado
 
 
 def _resumo(rotas: list[dict[str, Any]]) -> dict[str, Any]:

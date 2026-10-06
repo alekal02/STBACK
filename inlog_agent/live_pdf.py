@@ -33,9 +33,7 @@ _CORES = {
 _LEGENDAS = (
     ("concluida", "Concluída"),
     ("parcial", "Parcial"),
-    ("inicio", "Início"),
     ("nao", "Não iniciada"),
-    ("passagem", "Só passagem"),
     ("apoio", "Apoio"),
 )
 
@@ -75,7 +73,7 @@ def _validar(data: str | None, turno: str | None) -> tuple[date, str]:
 def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     """Uma transação de leitura. O desenho usa só este dicionário."""
     from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos
-    from .live_report import _hora_curta, _periodo_padrao, _resumo
+    from .live_report import _exibir_classificacao, _hora_curta, _periodo_padrao, _resumo
     from .live_turno import resumo_guardado
     from .mapa_oficial import _freq_do_dia
     from .unificado import _casa_turno
@@ -146,7 +144,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     if guardado:
         resumo = guardado
     atualizado = str(cab["atualizado_em"] or cab["ultima_sincronizacao"] or "")
-    estado = {
+    estado = _exibir_classificacao({
         "data": dia.isoformat(),
         "turno": pedido,
         "periodo": str(cab["periodo"] or "") or _periodo_padrao(dia, pedido),
@@ -156,7 +154,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
         "consolidar_ate": str(cab["consolidar_ate"] or "") if "consolidar_ate" in cab.keys() else "",
         "resumo": resumo,
         "rotas": rotas,
-    }
+    })
     return {
         "estado": estado,
         "data": dia.isoformat(),
@@ -404,9 +402,7 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
         ("Previstas", resumo.get("previstas")),
         ("Concluídas", resumo.get("concluidas")),
         ("Parciais", resumo.get("parciais")),
-        ("Início", resumo.get("inicio")),
         ("Não iniciadas", resumo.get("nao_iniciadas")),
-        ("Só passagem", resumo.get("passagem")),
         ("Apoio", resumo.get("apoios")),
     ]
     x = 14 * mm

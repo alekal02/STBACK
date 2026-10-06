@@ -231,17 +231,41 @@ def _marcar_deslocamento(estado: dict[str, Any], _rotas: list[dict[str, Any]]) -
         pos["rota_atual"] = codigo or ""
         pos["deslocamento"] = not codigo
         pos["rotulo_rota"] = codigo or "Em deslocamento"
+        pos["gps_ha"] = _idade_gps(pos.get("ultimo_gps"))
+
+
+def _idade_gps(valor: Any) -> str:
+    """Tempo desde o último ponto já gravado. Não cria posição nova."""
+    from datetime import datetime
+
+    from .live_sync import agora_brt
+
+    texto = str(valor or "").strip().replace("Z", "")
+    if not texto:
+        return ""
+    try:
+        momento = datetime.fromisoformat(texto[:19])
+    except ValueError:
+        return ""
+    segundos = int((agora_brt() - momento).total_seconds())
+    if segundos < 90:
+        return ""
+    minutos = max(1, segundos // 60)
+    if minutos < 60:
+        return f"há {minutos} min"
+    horas, resto = divmod(minutos, 60)
+    return f"há {horas} h {resto} min"
 
 
 def _faixa_percentual(valor: Any) -> tuple[str, str]:
-    """Só a faixa exibida. O percentual gravado não muda."""
+    """0% não iniciada, 1% a 99% parcial, 100% concluída. O percentual não muda."""
     try:
         pct = float(valor)
     except (TypeError, ValueError):
         pct = 0.0
-    if pct >= 80:
+    if pct >= 100:
         return "concluida", "Concluída"
-    if pct >= 25:
+    if pct >= 1:
         return "parcial", "Parcial"
     return "nao", "Não iniciada"
 

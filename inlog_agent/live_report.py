@@ -222,6 +222,9 @@ def _marcar_deslocamento(estado: dict[str, Any], _rotas: list[dict[str, Any]]) -
     for pos in estado.get("posicoes") or []:
         if not isinstance(pos, dict) or pos.get("lat") is None or pos.get("lon") is None:
             continue
+        instante = str(pos.get("posicao_em") or pos.get("ultimo_gps") or "")
+        pos["gps_ha"] = _idade_gps(instante)
+        pos["gps_desatualizado"] = _gps_desatualizado(str(pos.get("telemetria") or ""), instante)
         if not setores:
             pos["rota_atual"] = ""
             pos["deslocamento"] = False
@@ -231,7 +234,6 @@ def _marcar_deslocamento(estado: dict[str, Any], _rotas: list[dict[str, Any]]) -
         pos["rota_atual"] = codigo or ""
         pos["deslocamento"] = not codigo
         pos["rotulo_rota"] = codigo or "Em deslocamento"
-        pos["gps_ha"] = _idade_gps(pos.get("ultimo_gps"))
 
 
 def _idade_gps(valor: Any) -> str:
@@ -254,7 +256,21 @@ def _idade_gps(valor: Any) -> str:
     if minutos < 60:
         return f"há {minutos} min"
     horas, resto = divmod(minutos, 60)
+    if horas >= 24:
+        dias = horas // 24
+        return f"há {dias} dia" if dias == 1 else f"há {dias} dias"
     return f"há {horas} h {resto} min"
+
+
+def _gps_desatualizado(telemetria: str, instante: str) -> bool:
+    """Pino antigo não conta como posição atual. Não apaga a coordenada."""
+    from .live_sync import classificar_telemetria
+
+    if telemetria in {"atrasado", "sem_dados", "sem_comunicacao"}:
+        return True
+    if not instante.strip():
+        return True
+    return classificar_telemetria(instante) != "atualizado"
 
 
 def _faixa_percentual(valor: Any) -> tuple[str, str]:

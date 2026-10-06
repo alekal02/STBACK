@@ -393,6 +393,7 @@ def _schema(con: sqlite3.Connection) -> None:
         "consulta_ate": "TEXT NOT NULL DEFAULT ''",
         "consulta_falha_em": "TEXT NOT NULL DEFAULT ''",
         "consulta_falhas": "INTEGER NOT NULL DEFAULT 0",
+        "posicao_em": "TEXT NOT NULL DEFAULT ''",
     }
     for nome, tipo in extras_placa.items():
         if nome not in colunas_placa:
@@ -608,6 +609,7 @@ def marcar_placa(
     lat: float | None = None,
     lon: float | None = None,
     telemetria: str = "",
+    posicao_em: str = "",
 ) -> None:
     atual = con.execute(
         "SELECT veiculo, vehicle_id, last_gps_timestamp, ultimo_lat, ultimo_lon, telemetria FROM placa WHERE data = ? AND turno = ? AND placa = ?",
@@ -641,6 +643,11 @@ def marcar_placa(
             agora_iso(),
         ),
     )
+    if posicao_em:
+        con.execute(
+            "UPDATE placa SET posicao_em = ? WHERE data = ? AND turno = ? AND placa = ?",
+            (posicao_em, data, turno, placa),
+        )
 
 
 def registrar_consulta_sem_dados(
@@ -762,6 +769,7 @@ def ler_view(
             "lat": row["ultimo_lat"],
             "lon": row["ultimo_lon"],
             "ultimo_gps": row["last_gps_timestamp"],
+            "posicao_em": row["posicao_em"] if "posicao_em" in row.keys() else "",
             "telemetria": row["telemetria"],
         }
         for row in ler_placas(con, data, turno)

@@ -303,9 +303,9 @@ def test_rbm_8i85_entra_no_noturno_ja_aberto():
     assert int(turno["reconstrucao_pontos"] or 0) == 0
     da_nova = [item for item in chamadas if item[0] == "RBM-8I85"]
     assert len(da_nova) == 2
-    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 38, 30)
+    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 30, 0)
     assert da_nova[1][2] != INICIO_NOITE
-    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 40, 0) - timedelta(seconds=90)
+    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 40, 0) - timedelta(seconds=600)
     assert recalculos[1] == ["75AN"]
 
 
@@ -475,7 +475,7 @@ def test_placa_cadastrada_sem_cursor_recebe_bootstrap():
 
     da_nova = [item for item in chamadas if item[0] == "RBM-8I85"]
     assert len(da_nova) == 2
-    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 40, 0) - timedelta(seconds=90)
+    assert da_nova[1][2] == datetime(2026, 10, 5, 20, 40, 0) - timedelta(seconds=600)
     assert da_nova[1][2] != INICIO_NOITE
     for placa in FROTA_24:
         assert placas[placa] == CURSOR_24
@@ -611,7 +611,7 @@ def test_sem_gps_nao_repete_historico_desde_as_19():
     assert rodar(segundo).get("falha", "") == ""
     das_quatro = [item for item in chamadas if item[0] in SEM_CURSOR]
     assert len(das_quatro) == 4
-    assert {item[1] for item in das_quatro} == {datetime(2026, 10, 5, 21, 58, 30)}
+    assert {item[1] for item in das_quatro} == {datetime(2026, 10, 5, 21, 50, 0)}
     assert all(item[1] != INICIO_NOITE for item in das_quatro)
     estado = _ler_consulta()
     for placa in SEM_CURSOR:
@@ -624,8 +624,8 @@ def test_sem_gps_nao_repete_historico_desde_as_19():
     assert rodar(terceiro).get("falha", "") == ""
     da_scw = [item for item in chamadas if item[0] == "SCW-4F36"]
     assert len(da_scw) == 1
-    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 0, 30)
-    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 2, 0) - timedelta(seconds=90)
+    assert da_scw[0][1] == datetime(2026, 10, 5, 21, 52, 0)
+    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 2, 0) - timedelta(seconds=600)
     con = conectar()
     try:
         pontos = [
@@ -648,7 +648,7 @@ def test_sem_gps_nao_repete_historico_desde_as_19():
     assert rodar(datetime(2026, 10, 5, 22, 6, 0)).get("falha", "") == ""
     da_scw = [item for item in chamadas if item[0] == "SCW-4F36"]
     assert len(da_scw) == 1
-    assert da_scw[0][1] == datetime(2026, 10, 5, 22, 1, 30)
+    assert da_scw[0][1] == datetime(2026, 10, 5, 21, 53, 0)
     assert da_scw[0][1] != INICIO_NOITE
     outras = [item for item in chamadas if item[0] in SEM_CURSOR[1:]]
     assert len(outras) == 3
@@ -740,3 +740,70 @@ def test_timeout_e_500_nao_avancam_a_marca():
         assert estado[placa]["cursor"] == ""
         assert estado[placa]["ate"] == ""
         assert estado[placa]["telemetria"] != "sem_dados"
+
+
+def test_dez_minutos_recupera_pulso_sem_duplicar_nem_rebaixar_cursor():
+    from datetime import datetime
+
+    from inlog_agent.live_sync import ciclo_gps
+
+    _turno_com_ancora()
+    chamadas = []
+
+    def historico(placa, _vid, inicio, _fim):
+        chamadas.append((placa, inicio))
+        if placa != "SCH-9B28":
+            return []
+        return [
+            {"timestamp": "2026-10-05T20:55:00", "latitude": -16.82, "longitude": -49.25},
+            {"timestamp": CURSOR_24, "latitude": -16.82, "longitude": -49.25},
+        ]
+
+    def rodar(agora):
+        return ciclo_gps(
+            Path(tempfile.mkdtemp()),
+            DIA.isoformat(),
+            "noturno",
+            agora=agora,
+            limites=[],
+            descobrir=lambda: [],
+            buscar_historico=historico,
+            recalcular=lambda *_args: [],
+        )
+
+    assert rodar(datetime(2026, 10, 5, 21, 2, 0)).get("falha", "") == ""
+    assert [item for item in chamadas if item[0] == "SCH-9B28"][0][1] == datetime(2026, 10, 5, 20, 50, 0)
+    con = conectar()
+    try:
+        pontos = [
+            linha["ts"]
+            for linha in con.execute("SELECT ts FROM ponto WHERE placa = 'SCH-9B28' ORDER BY ts")
+        ]
+        cursor = con.execute(
+            "SELECT last_gps_timestamp FROM placa WHERE placa = 'SCH-9B28'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert pontos == ["2026-10-05T20:55:00", CURSOR_24]
+    assert cursor == CURSOR_24
+
+    assert rodar(datetime(2026, 10, 5, 21, 4, 0)).get("falha", "") == ""
+    con = conectar()
+    try:
+        total = con.execute("SELECT COUNT(*) FROM ponto WHERE placa = 'SCH-9B28'").fetchone()[0]
+        cursor = con.execute(
+            "SELECT last_gps_timestamp FROM placa WHERE placa = 'SCH-9B28'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert total == 2
+    assert cursor == CURSOR_24
+
+
+def test_gps_sem_horario_recente_nao_parece_atual():
+    from inlog_agent.live_report import _gps_desatualizado
+
+    assert _gps_desatualizado("atualizado", "") is True
+    assert _gps_desatualizado("atrasado", "2026-10-06T14:00:00") is True
+    assert _gps_desatualizado("sem_dados", "") is True
+    assert _gps_desatualizado("sem_comunicacao", "2026-10-06T14:00:00") is True

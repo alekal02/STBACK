@@ -36,7 +36,7 @@ from .live_db import (
 _SYNC = threading.Lock()
 _OCUPADO = False
 _THREAD: threading.Thread | None = None
-FOLGA_S = 90
+FOLGA_S = 600
 POSICAO_S = 30
 GPS_S = 120
 ATRASO_S = 15 * 60
@@ -570,11 +570,14 @@ def ciclo_gps(
                 if gravados:
                     maior_item = max(recebidos, key=lambda item: str(item.get("timestamp") or ""))
                     maior = str(maior_item.get("timestamp") or "")
+                    if cursor and maior < cursor:
+                        maior = cursor
+                        maior_item = None
                     from .dificil_acesso import eh_basculante
 
                     bascula = eh_basculante(str(placa["placa"]), str(placa["veiculo"] or ""))
                     lat = lon = None
-                    if bascula:
+                    if bascula and maior_item is not None:
                         try:
                             lat = float(maior_item["latitude"])
                             lon = float(maior_item["longitude"])
@@ -679,6 +682,8 @@ def ciclo_posicao(
             con.commit()
             return {"ok": False, "falha": falha}
         por_placa = {str(row["placa"]): row for row in ler_placas(con, dia.isoformat(), pedido)}
+        from .fulltrack_api import _ponto
+
         for evento in eventos:
             placa = _placa_do_evento(evento)
             if not placa or placa not in por_placa:
@@ -687,6 +692,8 @@ def ciclo_posicao(
             lon = _float(evento.get("ras_eve_longitude"))
             if lat is None or lon is None:
                 continue
+            ponto = _ponto(evento, placa)
+            quando = str((ponto or {}).get("timestamp") or "")
             marcar_placa(
                 con,
                 dia.isoformat(),
@@ -694,7 +701,8 @@ def ciclo_posicao(
                 placa,
                 lat=lat,
                 lon=lon,
-                telemetria="atualizado",
+                telemetria=classificar_telemetria(quando, momento),
+                posicao_em=quando,
             )
         marca = momento.isoformat(timespec="seconds")
         atualizar_turno(

@@ -236,6 +236,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
     apoios = [r for r in todas if r.get("grupo") == "apoio"]
     poligonos = _poligonos(pacote.get("geometria") or {})
     _anotar_fora(pacote, poligonos)
+    pacote.pop("pontos", None)
     trilhas = {str(item.get("placa") or ""): item.get("linhas") or [] for item in (pacote.get("trilhas") or {}).get("veiculos") or []}
     buf = io.BytesIO()
 

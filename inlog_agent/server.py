@@ -1348,10 +1348,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
         if path == "/api/live-report/operacao.pdf":
-            from .live_pdf import gerar_operacao
-
             qs = parse_qs(parsed.query)
             try:
+                from .live_pdf import gerar_operacao
+
                 conteudo, nome = gerar_operacao((qs.get("data") or [None])[0], (qs.get("turno") or [None])[0])
                 self._bytes(200, conteudo, "application/pdf", download=nome)
             except TimeoutError as exc:

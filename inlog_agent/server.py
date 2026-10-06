@@ -1823,9 +1823,34 @@ def _porta_do_ambiente(explicita: int | None) -> int:
         return 5889
 
 
+def _garantir_bibliotecas_pdf() -> None:
+    """Garante Pillow e ReportLab no mesmo Python que atende a API."""
+    try:
+        import PIL  # noqa: F401
+        import reportlab  # noqa: F401
+        return
+    except ImportError:
+        import subprocess
+        import sys
+
+        print("Instalando Pillow e ReportLab.", flush=True)
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "pillow>=10.4.0",
+                "reportlab>=4.2.0",
+            ]
+        )
+
+
 def servir(porta: int | None = None, host: str | None = None) -> None:
     # O glibc do Linux abre várias arenas e estoura os 512 MB do Render.
     os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+    _garantir_bibliotecas_pdf()
     try:
         settings = load_settings()
         usada = porta or settings.porta or _porta_do_ambiente(None)

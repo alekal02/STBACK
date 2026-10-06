@@ -420,7 +420,7 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
     pdf.setFillColorRGB(0.1, 0.16, 0.2)
     pdf.drawString(14 * mm, y, "Rotas da operação")
     y -= 6 * mm
-    colunas = [14, 38, 78, 108, 132, 156, 184]
+    colunas = [14, 30, 66, 86, 108, 122, 164]
     cabecalhos = ["ROTA", "VEÍCULO", "PLACA", "INÍCIO", "EXECUÇÃO", "STATUS", "ÚLTIMO GPS"]
     pdf.setFont(forte, 8)
     for xcol, texto in zip(colunas, cabecalhos):

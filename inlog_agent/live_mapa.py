@@ -15,14 +15,14 @@ import time
 from datetime import date, datetime
 from typing import Any
 
-from shapely.geometry import LineString
+import math
 
 from .live_db import conectar
 
 _LOCK = threading.Lock()
 _POLIGONOS: list[dict[str, Any]] | None = None
 _CORPOS: dict[tuple[Any, ...], tuple[bytes, str]] = {}
-_TOLERANCIA = 0.00008
+_GAP_M = 480.0
 
 
 def _dia_turno(data: str | None, turno: str | None) -> tuple[date, str]:
@@ -189,16 +189,12 @@ def _gap_segundos(anterior: str, atual: str) -> float:
 
 
 def _simplificar(coords: list[tuple[float, float]]) -> list[list[float]]:
-    if len(coords) < 2:
-        return [[lat, lon] for lat, lon in coords]
-    linha = LineString([(lon, lat) for lat, lon in coords])
-    curta = linha.simplify(_TOLERANCIA, preserve_topology=True)
-    pontos = [[round(lat, 5), round(lon, 5)] for lon, lat in curta.coords]
-    if len(pontos) < 2:
-        pontos = [
-            [round(coords[0][0], 5), round(coords[0][1], 5)],
-            [round(coords[-1][0], 5), round(coords[-1][1], 5)],
-        ]
+    """Mantém cada pulso persistido. Sem atalho entre o primeiro e o último."""
+    pontos: list[list[float]] = []
+    for lat, lon in coords:
+        par = [round(float(lat), 5), round(float(lon), 5)]
+        if not pontos or par != pontos[-1]:
+            pontos.append(par)
     return pontos
 
 
@@ -288,16 +284,32 @@ def _partir_trilha(
     return dentro, fora
 
 
+def _metros(a: tuple[float, float], b: tuple[float, float]) -> float:
+    r = 6371000.0
+    lat1, lon1, lat2, lon2 = map(math.radians, [a[0], a[1], b[0], b[1]])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(min(1.0, h)))
+
+
 def _linhas_visuais(brutos: list[tuple[str, float, float]]) -> list[list[list[float]]]:
     grupos: list[list[tuple[float, float]]] = []
     atual: list[tuple[float, float]] = []
     anterior = ""
+    anterior_xy: tuple[float, float] | None = None
     for ts, lat, lon in brutos:
+        quebra = False
         if atual and anterior and _gap_segundos(anterior, ts) > 600:
+            quebra = True
+        if atual and anterior_xy is not None and _metros(anterior_xy, (lat, lon)) > _GAP_M:
+            quebra = True
+        if quebra:
             grupos.append(atual)
             atual = []
         atual.append((lat, lon))
         anterior = ts
+        anterior_xy = (lat, lon)
     if atual:
         grupos.append(atual)
     return [_simplificar(grupo) for grupo in grupos if len(grupo) >= 2]

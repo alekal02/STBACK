@@ -425,17 +425,18 @@ def passagens_na_rota(
     geom,
     dia,
 ) -> list[dict[str, Any]]:
-    """Cada permanência dentro do polígono, sem cortar o meio do percurso.
+    """Cada permanência dentro do polígono.
 
-    A hora de entrada e de saída é o cruzamento com a borda.
-    O traço liga esse ponto de entrada aos pulsos reais até a saída.
+    A hora de entrada e de saída pode usar o cruzamento com a borda.
+    O traço desenhado usa só pulsos GPS persistidos: sem vértice sintético
+    na borda e sem corda quando o salto passa de JUNTA_M.
     """
     if geom is None or geom.is_empty or not pontos:
         return []
     from datetime import datetime
 
     from .gps import _datetime_do_timestamp
-    from .traco_agente import _chave_tempo
+    from .traco_agente import JUNTA_M, _chave_tempo
 
     bruto: list[tuple[datetime | None, dict[str, Any], tuple[float, float]]] = []
     for ponto in pontos:
@@ -460,11 +461,7 @@ def passagens_na_rota(
     if not itens:
         return []
 
-    teleporte_m = 1400.0
-
-    def _wgs(xy: tuple[float, float]) -> list[float]:
-        lon, lat = TO_WGS.transform(xy[0], xy[1])
-        return [round(lat, 6), round(lon, 6)]
+    gap_m = JUNTA_M
 
     def _latlon(ponto: dict[str, Any]) -> list[float] | None:
         try:
@@ -545,12 +542,10 @@ def passagens_na_rota(
     aberta: dict[str, Any] | None = None
     saida: list[dict[str, Any]] = []
 
-    def _fechar(xy_saida: tuple[float, float] | None, hora: datetime | None) -> None:
+    def _fechar(hora: datetime | None) -> None:
         nonlocal aberta
         if not aberta:
             return
-        if xy_saida is not None:
-            _junta(aberta["linha"], _wgs(xy_saida))
         ini = aberta.get("hora_ini")
         fim = hora or aberta.get("hora_ultimo") or ini
         linha = aberta["linha"]
@@ -567,37 +562,37 @@ def passagens_na_rota(
             )
         aberta = None
 
-    def _abrir(xy_entrada: tuple[float, float] | None, hora: datetime | None, ponto: dict[str, Any]) -> None:
+    def _abrir(hora: datetime | None, ponto: dict[str, Any]) -> None:
         nonlocal aberta
         linha: list[list[float]] = []
-        if xy_entrada is not None:
-            _junta(linha, _wgs(xy_entrada))
         _junta(linha, _latlon(ponto))
         aberta = {"linha": linha, "hora_ini": hora, "hora_ultimo": hora}
 
     for i, (dt, ponto, xy, dentro) in enumerate(itens):
         if i == 0:
             if dentro:
-                _abrir(xy, dt, ponto)
+                _abrir(dt, ponto)
             continue
         dt0, ponto0, xy0, dentro0 = itens[i - 1]
         dist = math.hypot(xy[0] - xy0[0], xy[1] - xy0[1])
-        if dist > teleporte_m:
+        if dist > gap_m:
             if dentro0:
-                _fechar(xy0, dt0)
+                if aberta is None:
+                    _abrir(dt0, ponto0)
+                _fechar(dt0)
             if dentro:
-                _abrir(xy, dt, ponto)
+                _abrir(dt, ponto)
             continue
         if not dentro0 and dentro:
             cruz = _cruzar(xy0, xy, True)
             if cruz:
-                xy_ent, frac = cruz
-                _abrir(xy_ent, _hora(dt0, dt, frac), ponto)
+                _xy_ent, frac = cruz
+                _abrir(_hora(dt0, dt, frac), ponto)
             else:
-                _abrir(xy, dt, ponto)
+                _abrir(dt, ponto)
         elif dentro0 and dentro:
             if aberta is None:
-                _abrir(xy0, dt0, ponto0)
+                _abrir(dt0, ponto0)
             if aberta is not None:
                 _junta(aberta["linha"], _latlon(ponto))
                 if dt:
@@ -605,12 +600,12 @@ def passagens_na_rota(
         elif dentro0 and not dentro:
             cruz = _cruzar(xy0, xy, False)
             if aberta is None:
-                _abrir(xy0, dt0, ponto0)
+                _abrir(dt0, ponto0)
             if cruz:
-                xy_sai, frac = cruz
-                _fechar(xy_sai, _hora(dt0, dt, frac))
+                _xy_sai, frac = cruz
+                _fechar(_hora(dt0, dt, frac))
             else:
-                _fechar(xy0, dt0)
+                _fechar(dt0)
     if aberta:
-        _fechar(None, aberta.get("hora_ultimo"))
+        _fechar(aberta.get("hora_ultimo"))
     return saida

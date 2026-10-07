@@ -144,7 +144,7 @@ def write_mapa_html(
                         "trechos": trechos_cob,
                         "lacunas": lacunas_cob,
                         "poligonos": aneis,
-                        "vias": cob.get("vias") or rota.get("vias") or [],
+                        "vias": [],
                         "caminhoes": cob.get("caminhoes") or rota.get("caminhoes") or [],
                         "ontem": bool(rota.get("ontem")),
                         "inspecao": bool(rota.get("inspecao")),
@@ -192,7 +192,7 @@ def write_mapa_html(
                         "trechos": trechos,
                         "lacunas": pacote.get("lacunas") or rota.get("lacunas") or [],
                         "poligonos": poligonos,
-                        "vias": rota.get("vias") or [],
+                        "vias": [],
                         "caminhoes": rota.get("caminhoes") or [],
                         "ontem": bool(rota.get("ontem")),
                         "inspecao": bool(rota.get("inspecao")),
@@ -254,7 +254,7 @@ def write_mapa_html(
   <aside class="painel" id="painel">
     <button class="toggle" type="button" id="toggle-painel">Rotas e %</button>
     <strong class="titulo-mapa">{_xml(titulo)}</strong>
-    <p class="legenda-mapa"><small>Faixa preta + laranja = deliminação oficial da rota. Área amarela = polígono. Cada cor de linha = um caminhão. Tracejado = lacuna de sinal. Pino verde = entrada. Pino vermelho = saída.</small></p>
+    <p class="legenda-mapa"><small>Faixa preta + laranja = deliminação oficial da rota. Área amarela = polígono. Cada cor de linha = um caminhão. Buraco na linha = gap de GPS, sem completar o caminho. Pino verde = entrada. Pino vermelho = saída.</small></p>
     <button class="todos" type="button" id="ver-todos">Ver todos</button>
     <div id="lista"></div>
   </aside>
@@ -308,7 +308,7 @@ def write_mapa_html(
     }}
     function trechosDe(rota) {{
       if (rota.trechos && rota.trechos.length) return rota.trechos;
-      return (rota.executada && rota.executada.length) ? [rota.executada] : [];
+      return [];
     }}
     function caminhoesDe(rota) {{
       const lista = (rota.caminhoes || []).filter((c) => (c.trechos && c.trechos.length) || (c.lacunas && c.lacunas.length));
@@ -333,18 +333,7 @@ def write_mapa_html(
       const sit = rotuloSit(rota, pct);
       const c = cor(pct, rota);
       const horas = [rota.horario_apoio || rota.horario, (rota.horario_rota && rota.rota_principal) ? ("rota " + rota.rota_principal + ": " + rota.horario_rota) : ""].filter(Boolean).join(" · ");
-      const layer = {{ exe: [], plan: [], feitos: [], falta: [], setor: [], vias: [], marks: [], bounds: rota.bounds || null }};
-      (rota.vias || []).forEach((pts) => {{
-        if (!pts || pts.length < 2) return;
-        const via = L.polyline(pts, {{
-          color: "#6b7280",
-          weight: 1.6,
-          opacity: 0.55,
-          lineJoin: "round"
-        }}).addTo(mapa);
-        layer.vias.push(via);
-        grupo.push(via);
-      }});
+      const layer = {{ exe: [], plan: [], feitos: [], falta: [], setor: [], marks: [], bounds: rota.bounds || null }};
       (rota.poligonos || []).forEach((pts) => {{
         if (!pts || pts.length < 4) return;
         const corBorda = rota.ontem ? "#1a4e86" : "#6b5210";

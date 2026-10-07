@@ -241,9 +241,7 @@ def html_mapa_print(
     function caminhoesDe(rota) {{
       const lista = (rota.caminhoes || []).filter((c) => (c.trechos && c.trechos.length) || (c.lacunas && c.lacunas.length));
       if (lista.length) return lista;
-      const gps = (rota.trechos && rota.trechos.length)
-        ? rota.trechos
-        : ((rota.executada && rota.executada.length) ? [rota.executada] : []);
+      const gps = (rota.trechos && rota.trechos.length) ? rota.trechos : [];
       return [{{
         placa: rota.placa,
         veiculo: rota.veiculo,
@@ -258,13 +256,6 @@ def html_mapa_print(
       }}];
     }}
     rotas.forEach((rota, idx) => {{
-      (rota.vias || []).forEach((pts) => {{
-        const via = limpar(pts);
-        if (via.length < 2) return;
-        L.polyline(via, {{
-          color: "#7b8790", weight: detalhe ? 1.5 : 1, opacity: 0.45, lineJoin: "round"
-        }}).addTo(mapa);
-      }});
       (rota.poligonos || []).forEach((pts) => {{
         const anel = limpar(pts);
         if (anel.length < 4) return;

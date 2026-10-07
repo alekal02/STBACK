@@ -412,7 +412,7 @@ def html_secao_mapas_caminhao(rotas: list[dict[str, Any]] | None) -> str:
         )
         leve.append(
             {
-                "trechos": [_thin_pts(t, 450) for t in (item.get("trechos") or []) if t],
+                "trechos": [list(t) for t in (item.get("trechos") or []) if t and len(t) >= 2],
                 "poligonos": [_thin_pts(p, 120) for p in (item.get("poligonos") or [])[:3] if p],
                 "bounds": item.get("bounds"),
             }

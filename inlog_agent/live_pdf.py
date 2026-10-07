@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw
 
-from .trilha_via import trilhas_na_via, vias_de
 
 _PDF = threading.Lock()
 _BRT = ZoneInfo("America/Sao_Paulo")
@@ -785,22 +784,14 @@ def _mapa(
             desenho.polygon(seq, fill=cor + (150,))
             if len(seq) >= 2:
                 desenho.line(seq + [seq[0]], fill=cor + (255,), width=2)
-    malha = vias_de(feitos, faltando)
-    for linha in malha:
-        seq = [xy(lon, lat) for lon, lat in linha]
+    for linha in trilhas or []:
+        seq = []
+        for ponto in linha:
+            if not isinstance(ponto, (list, tuple)) or len(ponto) < 2:
+                continue
+            seq.append(xy(float(ponto[1]), float(ponto[0])))
         if len(seq) >= 2:
-            desenho.line(seq, fill=(120, 128, 134, 230), width=7 if individual else 4)
-    for linha in trilhas_na_via(trilhas, malha):
-        seq = [xy(lon, lat) for lon, lat in linha]
-        if len(seq) >= 2:
-            desenho.line(seq, fill=(40, 55, 70, 150), width=2)
-    for linha in feitos or []:
-        seq = [xy(lon, lat) for lon, lat in linha]
-        if len(seq) >= 2:
-            desenho.line(seq, fill=(27, 138, 90, 235), width=4 if individual else 3)
-    for linha in faltando or []:
-        seq = [xy(lon, lat) for lon, lat in linha]
-        _tracejado(desenho, seq, (179, 65, 69, 230), 3 if individual else 2)
+            desenho.line(seq, fill=(40, 55, 70, 230), width=3 if individual else 2)
     if entrada:
         desenho.ellipse(_bolha(xy(float(entrada["lon"]), float(entrada["lat"]))), fill=(27, 138, 90, 255))
     if saida:
@@ -815,34 +806,6 @@ def _mapa(
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=72, optimize=True)
     return buf.getvalue()
-
-
-def _tracejado(desenho: ImageDraw.ImageDraw, seq: list[tuple[float, float]], fill: tuple[int, int, int, int], width: int) -> None:
-    if len(seq) < 2:
-        return
-    traco, vao = 11.0, 8.0
-    ciclo = traco + vao
-    percorrido = 0.0
-    for a, b in zip(seq, seq[1:]):
-        dx, dy = b[0] - a[0], b[1] - a[1]
-        comp = math.hypot(dx, dy)
-        if comp < 0.5:
-            continue
-        ux, uy = dx / comp, dy / comp
-        pos = 0.0
-        while pos < comp:
-            fase = percorrido % ciclo
-            if fase < traco:
-                falta = min(traco - fase, comp - pos)
-                ini = (a[0] + ux * pos, a[1] + uy * pos)
-                fim = (a[0] + ux * (pos + falta), a[1] + uy * (pos + falta))
-                desenho.line([ini, fim], fill=fill, width=width)
-                pos += falta
-                percorrido += falta
-            else:
-                pula = min(ciclo - fase, comp - pos)
-                pos += pula
-                percorrido += pula
 
 
 def _par_trilha(ponto: Any) -> tuple[float, float]:

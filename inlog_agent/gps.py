@@ -285,9 +285,8 @@ def tracos_realistas(
 
     trechos = []
     for trecho in brutos:
-        limpo = _rdp(trecho, tolerancia_m)
-        if len(limpo) >= 2:
-            trechos.append([[lat, lon] for lat, lon in limpo])
+        if len(trecho) >= 2:
+            trechos.append([[lat, lon] for lat, lon in trecho])
     return trechos
 
 

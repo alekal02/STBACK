@@ -797,7 +797,7 @@ def _paginas_detalhe(pasta: Path, rotas_mapa: list[dict[str, Any]]) -> list[dict
                     "lacunas": lacunas,
                     "executada": [pt for trecho in trechos for pt in trecho],
                     "poligonos": polys,
-                    "vias": cob.get("vias") or item.get("vias") or [],
+                    "vias": [],
                     "horario": cob.get("horario") or item.get("horario") or "",
                     "hora_inicio": cob.get("hora_inicio") or item.get("hora_inicio") or "",
                     "hora_fim": cob.get("hora_fim") or item.get("hora_fim") or "",
@@ -863,7 +863,7 @@ def _thin(pts: list, max_pts: int) -> list:
 
 
 def _simplificar_rota(rota: dict[str, Any], max_linha: int = 450, max_poly: int = 250, *, detalhe: bool = True) -> dict[str, Any]:
-    trechos = [_thin(t, max_linha) for t in (rota.get("trechos") or []) if t]
+    trechos = [list(t) for t in (rota.get("trechos") or []) if t and len(t) >= 2]
     item = {
         "veiculo": rota.get("veiculo"),
         "placa": rota.get("placa"),
@@ -874,10 +874,10 @@ def _simplificar_rota(rota: dict[str, Any], max_linha: int = 450, max_poly: int 
         "km_coleta": rota.get("km_coleta"),
         "km_total": rota.get("km_total"),
         "trechos": trechos,
-        "lacunas": [t for t in (rota.get("lacunas") or []) if t and len(t) >= 2],
-        "executada": _thin(rota.get("executada") or [], max_linha),
+        "lacunas": [],
+        "executada": [list(p) for p in (rota.get("executada") or []) if p],
         "poligonos": [_thin(p, max_poly) for p in (rota.get("poligonos") or []) if p],
-        "vias": [_thin(v, max_linha) for v in (rota.get("vias") or [])[:80] if v],
+        "vias": [],
         "horario": rota.get("horario") or "",
         "hora_inicio": rota.get("hora_inicio") or "",
         "hora_fim": rota.get("hora_fim") or "",
@@ -888,7 +888,7 @@ def _simplificar_rota(rota: dict[str, Any], max_linha: int = 450, max_poly: int 
         "caminhoes": [
             {
                 **cam,
-                "trechos": [_thin(t, max_linha) for t in (cam.get("trechos") or []) if t],
+                "trechos": [list(t) for t in (cam.get("trechos") or []) if t and len(t) >= 2],
                 "lacunas": [],
             }
             for cam in (rota.get("caminhoes") or [])
@@ -896,9 +896,14 @@ def _simplificar_rota(rota: dict[str, Any], max_linha: int = 450, max_poly: int 
         "bounds": None,
     }
     if not item["trechos"] and item["executada"]:
-        from .traco_agente import recortar_trechos_ao_setor
+        from .traco_agente import montar_traco_continuo
 
-        item["trechos"] = recortar_trechos_ao_setor([item["executada"]], [], buffer_m=0)
+        pontos = [
+            {"latitude": p[0], "longitude": p[1]}
+            for p in item["executada"]
+            if p and len(p) >= 2
+        ]
+        item["trechos"] = montar_traco_continuo(pontos)["trechos"]
     return completar_extremos_rota(item)
 
 

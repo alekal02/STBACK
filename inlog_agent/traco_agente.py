@@ -1,12 +1,8 @@
-"""Liga o pulso do rastreador sem inventar coleta.
+"""Desenha só pulsos GPS persistidos.
 
-O compactador manda um ponto a cada 30–90 s. Em marcha de coleta isso dá
-200–500 m entre pulsos. Cortar em 95 m ou jogar fora trecho curto
-quebra o nexo dentro do polígono. Aqui:
-
-- linha contínua = pulsos reais em sequência
-- linha tracejada = lacuna de sinal (só desenho, não entra no %)
-- teleporte grande continua cortado
+Pulsos consecutivos até JUNTA_M formam a linha. Acima disso é gap:
+a linha quebra e o pulso seguinte não é ligado. Não há vértice
+inventado, lacuna desenhada nem atalho por simplificação.
 """
 
 from __future__ import annotations
@@ -14,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .gps import haversine_m, tracos_realistas
+from .gps import haversine_m
 
 Ponto = tuple[float, float]
 VEL_ABSURDA = 88.0
@@ -98,86 +94,32 @@ def _par_lista(par: Any) -> Ponto | None:
 
 
 def _partir_pulsos(pares: list[Ponto]) -> tuple[list[list[list[float]]], list[list[list[float]]]]:
+    """Um trecho = pulsos persistidos em sequência. Gap não gera corda nem lacuna."""
     if len(pares) < 2:
-        if len(pares) == 1:
-            pt = [pares[0][0], pares[0][1]]
-            return [[pt, pt]], []
         return [], []
 
-    from .gps import _rdp
-
-    brutos: list[list[Ponto]] = []
-    lacunas: list[list[list[float]]] = []
+    trechos: list[list[list[float]]] = []
     atual = [pares[0]]
     for cur in pares[1:]:
         dist = haversine_m(atual[-1], cur)
-        if dist <= JUNTA_M:
-            if dist >= 2.0:
-                atual.append(cur)
-            continue
-        if dist <= LACUNA_M:
+        if dist > JUNTA_M:
             if len(atual) >= 2:
-                brutos.append(atual)
-            lacunas.append([[atual[-1][0], atual[-1][1]], [cur[0], cur[1]]])
+                trechos.append([[p[0], p[1]] for p in atual])
             atual = [cur]
             continue
-        if len(atual) >= 2:
-            brutos.append(atual)
-        atual = [cur]
+        if dist >= 2.0:
+            atual.append(cur)
     if len(atual) >= 2:
-        brutos.append(atual)
-    elif atual and brutos and haversine_m(brutos[-1][-1], atual[0]) <= LACUNA_M:
-        lacunas.append(
-            [[brutos[-1][-1][0], brutos[-1][-1][1]], [atual[0][0], atual[0][1]]]
-        )
-        brutos[-1].append(atual[0])
-
-    if not brutos:
-        return tracos_realistas(
-            [{"latitude": p[0], "longitude": p[1]} for p in pares],
-            salto_max_m=JUNTA_M,
-            tolerancia_m=4,
-        ), lacunas
-
-    trechos: list[list[list[float]]] = []
-    for trecho in brutos:
-        metros = sum(haversine_m(a, b) for a, b in zip(trecho, trecho[1:]))
-        if len(trecho) < 2 or metros < MIN_M_TRECHO:
-            if len(trecho) >= 2:
-                trechos.append([[p[0], p[1]] for p in trecho])
-            continue
-        limpo = _rdp(trecho, 4.0)
-        if len(limpo) < 2:
-            limpo = [trecho[0], trecho[-1]]
-        trechos.append([[lat, lon] for lat, lon in limpo])
-    return trechos, lacunas
+        trechos.append([[p[0], p[1]] for p in atual])
+    return trechos, []
 
 
 def ligar_trechos(
     trechos: list[list[list[float]]] | None,
 ) -> dict[str, list]:
-    """Reata fragmentos vizinhos sem inventar vértice: junta ou marca lacuna."""
-    limpos = [t for t in (trechos or []) if t and len(t) >= 2]
-    if not limpos:
-        return {"trechos": [], "lacunas": []}
-    juntos: list[list[list[float]]] = [list(limpos[0])]
-    lacunas: list[list[list[float]]] = []
-    for trecho in limpos[1:]:
-        a = juntos[-1][-1]
-        b = trecho[0]
-        try:
-            dist = haversine_m((float(a[0]), float(a[1])), (float(b[0]), float(b[1])))
-        except (TypeError, ValueError, IndexError):
-            juntos.append(list(trecho))
-            continue
-        if dist <= JUNTA_M:
-            juntos[-1].extend(trecho)
-        elif dist <= LACUNA_M:
-            lacunas.append([a, b])
-            juntos.append(list(trecho))
-        else:
-            juntos.append(list(trecho))
-    return {"trechos": juntos, "lacunas": lacunas}
+    """Não reata trechos. Gap permanece quebrado, sem corda entre pulsos."""
+    limpos = [list(t) for t in (trechos or []) if t and len(t) >= 2]
+    return {"trechos": limpos, "lacunas": []}
 
 
 def recortar_trechos_ao_setor(
@@ -236,7 +178,7 @@ def recortar_trechos_ao_setor(
                     )
                 except (TypeError, ValueError):
                     dist = JUNTA_M + 1
-                if dist > TELEPORTE_M:
+                if dist > JUNTA_M:
                     if len(atual) >= 2:
                         saida.append(atual)
                     atual = [par]

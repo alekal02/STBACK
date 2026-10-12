@@ -388,6 +388,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
     from .dificil_acesso import (
         BASCULANTES,
+        anotar_programacao,
         codigo_da_frota,
         eventos_nas_areas,
         montar_trajetoria,
@@ -497,7 +498,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         "turno": pedido,
         "fonte": "live_sync",
         "camada": "Áreas de difícil acesso",
-        "areas": areas,
+        "areas": anotar_programacao(areas, dia, pedido),
         "veiculos": veiculos,
         "eventos": eventos,
         "resumo": {

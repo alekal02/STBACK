@@ -8,8 +8,10 @@ de novo e nenhum evento e inventado entre dois GPS.
 
 from __future__ import annotations
 
+import json
 import math
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from .gps import haversine_m
@@ -50,6 +52,94 @@ def codigo_da_frota(placa: str, veiculo: str = "") -> str | None:
 
 def eh_basculante(placa: str, veiculo: str = "") -> bool:
     return codigo_da_frota(placa, veiculo) is not None
+
+
+def _norm_area(texto: str) -> str:
+    bruto = (texto or "").strip().upper()
+    return (
+        bruto.replace("Á", "A")
+        .replace("À", "A")
+        .replace("Ã", "A")
+        .replace("Â", "A")
+        .replace("É", "E")
+        .replace("Ê", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ô", "O")
+        .replace("Ú", "U")
+        .replace("Ç", "C")
+    )
+
+
+def carregar_excecoes(arquivo: Path | None = None) -> list[dict[str, Any]]:
+    """Exceções por data. Os dias da semana continuam na frequência do GPKG."""
+    from .config import ROOT
+
+    caminho = arquivo or (ROOT / "data" / "programacao_areas_dificil.json")
+    if not caminho.is_file():
+        return []
+    try:
+        dados = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(dados, dict):
+        linhas = dados.get("excecoes") or []
+    elif isinstance(dados, list):
+        linhas = dados
+    else:
+        return []
+    return [item for item in linhas if isinstance(item, dict)]
+
+
+def _excecao_desta(excecao: dict[str, Any], area: dict[str, Any], dia: date, turno: str) -> bool:
+    bruto = str(excecao.get("data") or "").strip()
+    if bruto != dia.isoformat():
+        return False
+    pedido = str(excecao.get("turno") or "").strip().lower()
+    if pedido and pedido != (turno or "").strip().lower():
+        return False
+    ident = str(excecao.get("id") or "").strip()
+    nome = _norm_area(str(excecao.get("nome") or ""))
+    if ident:
+        return ident == str(area.get("id") or "")
+    if nome:
+        return nome == _norm_area(str(area.get("nome") or ""))
+    return False
+
+
+def programada_na_data(
+    area: dict[str, Any],
+    dia: date,
+    turno: str,
+    excecoes: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Dia e turno saem da frequência oficial. Uma exceção da mesma data pode inverter."""
+    from .mapa_oficial import _freq_do_dia
+    from .unificado import _casa_turno
+
+    freq = str(area.get("frequencia") or "")
+    prevista = bool(freq) and _freq_do_dia(freq, dia) and _casa_turno(freq, turno)
+    for excecao in excecoes or []:
+        if "executar" not in excecao or not _excecao_desta(excecao, area, dia, turno):
+            continue
+        prevista = bool(excecao.get("executar"))
+    return prevista
+
+
+def anotar_programacao(
+    areas: list[dict[str, Any]],
+    dia: date,
+    turno: str,
+    excecoes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Copia cada área e marca `programada`. Não altera o anel oficial."""
+    linhas = carregar_excecoes() if excecoes is None else excecoes
+    saida: list[dict[str, Any]] = []
+    for area in areas:
+        item = dict(area)
+        item["programada"] = programada_na_data(item, dia, turno, linhas)
+        saida.append(item)
+    return saida
 
 
 def presentes_no_cadastro(veiculos: list[dict[str, Any]] | None) -> list[dict[str, str]]:

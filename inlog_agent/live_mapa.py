@@ -429,9 +429,12 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "lon": desenho["lon"],
                 "pulsos": desenho["pulsos"],
                 "pontos_fora": desenho["pontos_fora"],
+                "trajeto": desenho["trajeto"],
                 "na_rota": desenho["na_rota"],
                 "deslocamento": desenho["deslocamento"],
                 "dificil": desenho["dificil"],
+                "isolados": desenho["isolados"],
+                "poligonos": desenho["poligonos"],
             }
         )
     return {

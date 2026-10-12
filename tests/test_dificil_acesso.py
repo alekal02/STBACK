@@ -253,13 +253,18 @@ def test_cenario_do_primeiro_gps_ate_recorrencia(monkeypatch, tmp_path):
     assert cbt018["ultimo_gps"].startswith("2026-10-06T08:00:00")
     assert cbt018["lat"] is not None
     assert cbt018["deslocamento"] == [] and cbt018["dificil"] == []
+    assert cbt018["trajeto"] == []
+    assert cbt018["isolados"]
+    assert cbt018["poligonos"] == []
 
     serie.extend(_passo(i, 8, i * 10) for i in range(1, 6))
     ciclo()
     cbt018 = next(item for item in dificil_acesso(dia, "diurno")["veiculos"] if item["codigo"] == "CBT018")
     assert cbt018["pulsos"] == 6
     assert cbt018["deslocamento"]
+    assert cbt018["trajeto"]
     assert cbt018["dificil"] == []
+    assert cbt018["poligonos"] == []
     assert cbt018["situacao"] == "Deslocamento"
     linha = cbt018["deslocamento"][0]
     assert linha[0][0] > linha[-1][0]
@@ -268,6 +273,8 @@ def test_cenario_do_primeiro_gps_ate_recorrencia(monkeypatch, tmp_path):
     ciclo()
     cbt018 = next(item for item in dificil_acesso(dia, "diurno")["veiculos"] if item["codigo"] == "CBT018")
     assert cbt018["dificil"]
+    assert cbt018["trajeto"]
+    assert cbt018["poligonos"] == []
     assert cbt018["situacao"] == DIFICIL
     placas_trilha = {item["placa"] for item in trilhas(dia, "diurno")["veiculos"]}
     assert "SCN-4B49" not in placas_trilha
@@ -279,3 +286,44 @@ def test_cenario_do_primeiro_gps_ate_recorrencia(monkeypatch, tmp_path):
     assert all(row["percentual"] == 0 and row["status"] == "N\u00e3o iniciada" and row["grupo"] == "nao" for row in rotas)
     assert chamadas == []
     _limpar_cache_frota()
+
+
+def test_salto_curto_nao_liga_e_nao_inventa_poligono():
+    pontos = [
+        ("2026-10-06T08:00:00", -16.82, -49.25),
+        ("2026-10-06T08:00:10", -16.827, -49.25),
+    ]
+    desenho = montar_trajetoria(pontos, _fora)
+    assert desenho["trajeto"] == []
+    assert desenho["deslocamento"] == []
+    assert desenho["dificil"] == []
+    assert desenho["poligonos"] == []
+    assert len(desenho["isolados"]) == 2
+
+
+def test_amostra_valida_permanece_continua():
+    pontos = [
+        ("2026-10-06T08:00:00", -16.8200, -49.2500),
+        ("2026-10-06T08:00:10", -16.8203, -49.2500),
+        ("2026-10-06T08:00:20", -16.8206, -49.2500),
+        ("2026-10-06T08:00:30", -16.8209, -49.2500),
+    ]
+    desenho = montar_trajetoria(pontos, _fora)
+    assert len(desenho["trajeto"]) == 1
+    assert len(desenho["trajeto"][0]) == 4
+    assert desenho["isolados"] == []
+    assert desenho["poligonos"] == []
+
+
+def test_heartbeat_parado_nao_vira_reta():
+    pontos = [
+        ("2026-10-12T06:17:29", -16.82054, -49.25535),
+        ("2026-10-12T06:47:29", -16.82053, -49.25534),
+    ]
+    desenho = montar_trajetoria(pontos, _fora)
+    assert desenho["pulsos"] == 2
+    assert desenho["trajeto"] == []
+    assert desenho["dificil"] == []
+    assert desenho["deslocamento"] == []
+    assert desenho["poligonos"] == []
+    assert len(desenho["isolados"]) == 2

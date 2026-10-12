@@ -23,16 +23,11 @@ DESLOCAMENTO = "Deslocamento"
 DIFICIL = "Dif\u00edcil acesso"
 NA_ROTA = "Na rota"
 
-# Mesmo corte de buraco de sinal j usado na trilha do mapa.
+# Mesmo corte da trilha dos compactadores: buraco de 10 min ou salto de 480 m.
 GAP_S = 600.0
-# Amostra rara e longa: a reta entre os dois pontos inventaria a rua.
-GAP_CURTO_S = 120.0
-MAX_CORDA_M = 280.0
-# Salto de coordenada, independente do intervalo.
-SALTO_M = 1500.0
-# Clula de ~24 m. Duas passagens na mesma clula marcam recorrncia.
+GAP_M = 480.0
+# Célula de ~24 m. Duas passagens na mesma célula marcam recorrência.
 CELULA = 0.00022
-MINIMO_M = 8.0
 
 Contem = Callable[[float, float], bool]
 
@@ -83,15 +78,19 @@ def montar_trajetoria(
     pontos: list[tuple[str, float, float]],
     contem: Contem | None = None,
 ) -> dict[str, Any]:
-    """Trajetoria completa, em ordem de tempo, sem cortar pelo poligono.
+    """Trajetoria dos pontos já gravados, sem cortar pelo polígono.
 
     contem(lat, lon) diz se o ponto cai numa rota oficial. Fora dela,
-    passagem unica vira deslocamento e repeticao vira dificil acesso.
+    passagem única vira deslocamento e repetição vira difícil acesso.
+    O mapa oficial não tem polígono dessa área: a resposta leva linhas
+    e pontos. poligonos fica vazio até existir geometria válida.
     """
     ordenados = sorted(set(pontos), key=lambda item: (item[0], item[1], item[2]))
     corridas = _quebrar(ordenados)
     fora: list[list[tuple[float, float]]] = []
     dentro: list[list[tuple[float, float]]] = []
+    base: list[list[tuple[float, float]]] = []
+    soltos: list[tuple[float, float]] = []
     pontos_fora = 0
     pontos_dentro = 0
     for corrida in corridas:
@@ -101,6 +100,10 @@ def montar_trajetoria(
                 pontos_dentro += 1
             else:
                 pontos_fora += 1
+        if len(coords) >= 2:
+            base.append(coords)
+        else:
+            soltos.extend(coords)
         parte_dentro, parte_fora = _partir(coords, contem)
         dentro.extend(parte_dentro)
         fora.extend(parte_fora)
@@ -129,9 +132,12 @@ def montar_trajetoria(
         "pulsos": len(ordenados),
         "pontos_fora": pontos_fora,
         "pontos_na_rota": pontos_dentro,
+        "trajeto": _linhas(base),
         "na_rota": _linhas(dentro),
         "deslocamento": _linhas(desloc),
         "dificil": _linhas(dificil),
+        "isolados": _pontos(soltos),
+        "poligonos": [],
         "situacao": situacao,
         "ultimo_gps": ultimo_gps,
         "lat": None if lat is None else round(lat, 5),
@@ -160,12 +166,9 @@ def _quebrar(pontos: list[tuple[str, float, float]]) -> list[list[tuple[str, flo
 
 def _gap(anterior: tuple[str, float, float], atual: tuple[str, float, float]) -> bool:
     dist = haversine_m((anterior[1], anterior[2]), (atual[1], atual[2]))
-    if dist >= SALTO_M:
+    if dist > GAP_M:
         return True
-    dt = _segundos(anterior[0], atual[0])
-    if dt > GAP_S:
-        return True
-    return dt >= GAP_CURTO_S and dist >= MAX_CORDA_M
+    return _segundos(anterior[0], atual[0]) > GAP_S
 
 
 def _ler_hora(texto: str) -> datetime | None:
@@ -236,26 +239,16 @@ def _visitas(trechos: list[list[tuple[float, float]]]) -> dict[tuple[int, int], 
 def _linhas(trechos: list[list[tuple[float, float]]]) -> list[list[list[float]]]:
     saida = []
     for trecho in trechos:
-        fino = _afinar(trecho)
-        linha = [[round(lat, 5), round(lon, 5)] for lat, lon in fino]
-        compacta = [linha[0]] if linha else []
-        for ponto in linha[1:]:
-            if ponto != compacta[-1]:
-                compacta.append(ponto)
-        if len(compacta) >= 2:
-            saida.append(compacta)
+        linha = _pontos(trecho)
+        if len(linha) >= 2:
+            saida.append(linha)
     return saida
 
 
-def _afinar(pontos: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    if len(pontos) <= 2:
-        return list(pontos)
-    saida = [pontos[0]]
-    for ponto in pontos[1:-1]:
-        if haversine_m(saida[-1], ponto) >= MINIMO_M:
+def _pontos(coords: list[tuple[float, float]]) -> list[list[float]]:
+    saida: list[list[float]] = []
+    for lat, lon in coords:
+        ponto = [round(lat, 5), round(lon, 5)]
+        if not saida or ponto != saida[-1]:
             saida.append(ponto)
-    if haversine_m(saida[-1], pontos[-1]) < MINIMO_M and len(saida) > 1:
-        saida[-1] = pontos[-1]
-    else:
-        saida.append(pontos[-1])
     return saida

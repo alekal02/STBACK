@@ -82,8 +82,8 @@ def montar_trajetoria(
 
     contem(lat, lon) diz se o ponto cai numa rota oficial. Fora dela,
     passagem única vira deslocamento e repetição vira difícil acesso.
-    O mapa oficial não tem polígono dessa área: a resposta leva linhas
-    e pontos. poligonos fica vazio até existir geometria válida.
+    Os polígonos oficiais vão na camada separada de áreas. Aqui poligonos
+    fica vazio para não misturar o contorno do bairro com o GPS.
     """
     ordenados = sorted(set(pontos), key=lambda item: (item[0], item[1], item[2]))
     corridas = _quebrar(ordenados)

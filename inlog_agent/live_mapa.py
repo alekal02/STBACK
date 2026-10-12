@@ -21,6 +21,7 @@ from .live_db import conectar
 
 _LOCK = threading.Lock()
 _POLIGONOS: list[dict[str, Any]] | None = None
+_AREAS: list[dict[str, Any]] | None = None
 _CORPOS: dict[tuple[Any, ...], tuple[bytes, str]] = {}
 _GAP_M = 480.0
 
@@ -54,6 +55,7 @@ def _poligonos() -> list[dict[str, Any]]:
         _quote,
         _sincronizar_gpkg,
         _tabela_setores,
+        eh_area_dificil,
     )
 
     arquivo = _sincronizar_gpkg()
@@ -74,11 +76,8 @@ def _poligonos() -> list[dict[str, Any]]:
                 select = ", ".join(_quote(c) if c else "NULL" for c in campos)
                 for blob, codigo, nome, freq in con.execute(f"SELECT {select} FROM {_quote(tabela)}"):
                     codigo = str(codigo or "").strip()
-                    if not codigo or not blob:
+                    if not codigo or not blob or eh_area_dificil(codigo):
                         continue
-                    if codigo.upper().startswith("DIFIC") or codigo.upper().startswith("DIF"):
-                        if "ACESSO" in codigo.upper():
-                            continue
                     geom = _gpkg_geom(blob)
                     aneis = _poligonos_wgs(geom)
                     if not aneis:
@@ -99,6 +98,22 @@ def _poligonos() -> list[dict[str, Any]]:
             _POLIGONOS = saida
             print(f"GPKG polígonos: 1 leitura, {len(saida)} setores.", flush=True)
         return _POLIGONOS
+
+
+def areas_dificil() -> list[dict[str, Any]]:
+    """Camada separada. Não entra no GeoJSON das rotas oficiais."""
+    global _AREAS
+    with _LOCK:
+        if _AREAS is not None:
+            return _AREAS
+    from .mapa_oficial import carregar_areas_dificil
+
+    saida = carregar_areas_dificil()
+    with _LOCK:
+        if _AREAS is None:
+            _AREAS = saida
+            print(f"GPKG áreas de difícil acesso: {len(saida)} polígonos.", flush=True)
+        return _AREAS
 
 
 def _codigos_persistidos(dia: date, turno: str) -> list[str] | None:
@@ -408,6 +423,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
             return False
         return codigo_que_contem(lat, lon, setores) is not None
 
+    areas = areas_dificil()
     veiculos = []
     pulsos = fora = 0
     trechos_dificil = trechos_desloc = trechos_rota = 0
@@ -441,6 +457,8 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         "data": dia.isoformat(),
         "turno": pedido,
         "fonte": "live_sync",
+        "camada": "Áreas de difícil acesso",
+        "areas": areas,
         "veiculos": veiculos,
         "resumo": {
             "pulsos": pulsos,
@@ -448,6 +466,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
             "trechos_na_rota": trechos_rota,
             "trechos_deslocamento": trechos_desloc,
             "trechos_dificil": trechos_dificil,
+            "areas": len(areas),
             "ms": round((time.perf_counter() - inicio) * 1000, 1),
         },
     }

@@ -133,6 +133,14 @@ def _codigo_setor(texto: str) -> str:
     return achado.group(1) if achado else ""
 
 
+def eh_area_dificil(codigo: str) -> bool:
+    """Polígono oficial de difícil acesso. Não entra na grade nem na cobertura."""
+    bruto = (codigo or "").strip().upper()
+    if not bruto.startswith("DIFIC") and not bruto.startswith("DIF"):
+        return False
+    return "ACESSO" in bruto
+
+
 def geometrias_inlog(dia: date | None = None) -> dict[str, list[dict[str, Any]]]:
     base = ROOT / "output" / "rotas"
     if not base.exists():
@@ -264,11 +272,8 @@ def listar_rotas_oficiais(dia: date | None = None) -> list[dict[str, str]]:
     vistos: set[str] = set()
     for codigo, nome, freq, completo in con.execute(f"SELECT {select} FROM {_quote(tabela)}"):
         codigo = str(codigo or "").strip()
-        if not codigo:
+        if not codigo or eh_area_dificil(codigo):
             continue
-        if codigo.upper().startswith("DIFIC") or codigo.upper().startswith("DIF"):
-            if "ACESSO" in codigo.upper():
-                continue
         freq_txt = str(freq or "").strip()
         if dia is not None and not _freq_do_dia(freq_txt, dia):
             continue
@@ -314,9 +319,8 @@ def carregar_setores(dia: date | None = None) -> list[dict[str, Any]]:
         f"SELECT {select} FROM {_quote(tabela)}"
     ):
         codigo = str(codigo or "").strip()
-        if codigo.upper().startswith("DIFIC") or codigo.upper().startswith("DIF"):
-            if "ACESSO" in codigo.upper():
-                continue
+        if eh_area_dificil(codigo):
+            continue
         if dia is not None and not _freq_do_dia(str(freq or ""), dia):
             continue
         if not blob:
@@ -339,6 +343,48 @@ def carregar_setores(dia: date | None = None) -> list[dict[str, Any]]:
     con.close()
     _anexar_vias(setores)
     return setores
+
+
+def carregar_areas_dificil() -> list[dict[str, Any]]:
+    """Os 11 polígonos oficiais. Não anexa vias e não alimenta a cobertura."""
+    arquivo = _sincronizar_gpkg()
+    if not arquivo:
+        return []
+    con = sqlite3.connect(str(arquivo))
+    try:
+        tabela = _tabela_setores(con)
+        if not tabela:
+            return []
+        cols = _colunas(con, tabela)
+        geom_col = _achar_coluna(cols, "geom", "geometry") or "geom"
+        col_codigo = _achar_coluna(cols, "NOVO_CODIGO", "CODIGO")
+        col_nome = _achar_coluna(cols, "NOVO_CODINOME", "CODINOME", "NOME")
+        col_freq = _achar_coluna(cols, "FREQUÊNCIA", "FREQUENCIA")
+        col_completo = _achar_coluna(cols, "CODIGO COMPLETO", "COMPLETO")
+        campos = [geom_col, col_codigo, col_nome, col_freq, col_completo]
+        select = ", ".join(_quote(c) if c else "NULL" for c in campos)
+        areas: list[dict[str, Any]] = []
+        for blob, codigo, nome, freq, completo in con.execute(f"SELECT {select} FROM {_quote(tabela)}"):
+            codigo = str(codigo or "").strip()
+            if not eh_area_dificil(codigo) or not blob:
+                continue
+            geom = _gpkg_geom(blob)
+            aneis = _poligonos_wgs(geom)
+            if not aneis:
+                continue
+            bairro = str(nome or "").strip()
+            areas.append(
+                {
+                    "codigo": codigo,
+                    "nome": bairro,
+                    "frequencia": str(freq or "").strip(),
+                    "completo": str(completo or "").strip() or (f"{codigo} - {bairro}" if bairro else codigo),
+                    "poligonos": aneis,
+                }
+            )
+        return areas
+    finally:
+        con.close()
 
 
 def recortar_se_houver(pontos: list[dict[str, Any]], geom) -> list[dict[str, Any]]:

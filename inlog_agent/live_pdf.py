@@ -18,8 +18,12 @@ from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw
 
+from .pdf_tiles import carimbar, enquadrar, obter_tiles, pintar_fundo, projetar, reiniciar_orcamento
+
 
 _PDF = threading.Lock()
+mapas_tiles = 0
+mapas_fallback = 0
 _BRT = ZoneInfo("America/Sao_Paulo")
 _CORES = {
     "concluida": (27, 138, 90),
@@ -237,6 +241,10 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
     _anotar_fora(pacote, poligonos)
     pacote.pop("pontos", None)
     trilhas = {str(item.get("placa") or ""): item.get("linhas") or [] for item in (pacote.get("trilhas") or {}).get("veiculos") or []}
+    global mapas_tiles, mapas_fallback
+    mapas_tiles = 0
+    mapas_fallback = 0
+    reiniciar_orcamento()
     buf = io.BytesIO()
 
     class _Folha(canvas.Canvas):
@@ -268,24 +276,24 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
     _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm)
     pdf.showPage()
     feitos_geral, faltando_geral = _trechos_do_pacote(pacote)
-    geral = _mapa(
+    geral, itens_geral = _mapa(
         poligonos,
         [linha for linhas in trilhas.values() for linha in linhas],
         rotas,
-        largura=1100,
-        altura_px=760,
+        largura=1500,
+        altura_px=1280,
         individual=False,
         feitos=feitos_geral,
         faltando=faltando_geral,
     )
-    _pagina_mapa(pdf, "Mapa geral da operação", geral, fonte, forte, largura, altura, mm, legenda=True)
+    _pagina_mapa(pdf, "Mapa geral da operação", geral, itens_geral, fonte, forte, largura, altura, mm)
     pdf.showPage()
     for rota in rotas + apoios:
         codigo = str(rota.get("codigo") or "")
         aneis = poligonos.get(codigo) or []
         detalhe = (pacote.get("detalhes") or {}).get(codigo) or {}
-        figura = _mapa_rota(rota, aneis, trilhas.get(str(rota.get("placa") or ""), []), detalhe)
-        _pagina_rota(pdf, rota, detalhe, figura, fonte, forte, largura, altura, mm)
+        figura, itens = _mapa_rota(rota, aneis, trilhas.get(str(rota.get("placa") or ""), []), detalhe)
+        _pagina_rota(pdf, rota, detalhe, figura, itens, fonte, forte, largura, altura, mm)
         pdf.showPage()
     pdf.save()
     return buf.getvalue()
@@ -449,55 +457,45 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
             pdf.drawString(xcol * mm, y, texto)
 
 
-def _pagina_mapa(pdf, titulo, imagem, fonte, forte, largura, altura, mm, legenda: bool) -> None:
+def _legenda_pdf(pdf, itens: list[tuple[str, str]], x: float, y: float, fonte: str, mm) -> None:
+    """Só o que o mapa desta página realmente desenha."""
+    cursor = x
+    for chave, nome in itens:
+        if chave in {"gps", "trilha"}:
+            cor_linha = (0.11, 0.31, 0.85) if chave == "gps" else (0.16, 0.22, 0.28)
+            pdf.setStrokeColorRGB(*cor_linha)
+            pdf.setLineWidth(1.8)
+            pdf.line(cursor, y + 1.2 * mm, cursor + 7 * mm, y + 1.2 * mm)
+            cursor += 8 * mm
+        elif chave == "area":
+            pdf.setFillColorRGB(0.92, 0.35, 0.05)
+            pdf.rect(cursor, y, 4 * mm, 3 * mm, fill=1, stroke=0)
+            cursor += 5.5 * mm
+        else:
+            cor = _CORES.get(chave, _CORES["nao"])
+            pdf.setFillColorRGB(cor[0] / 255, cor[1] / 255, cor[2] / 255)
+            pdf.rect(cursor, y, 3.5 * mm, 3.5 * mm, fill=1, stroke=0)
+            cursor += 5 * mm
+        pdf.setFillColorRGB(0.15, 0.18, 0.2)
+        pdf.setFont(fonte, 8)
+        pdf.drawString(cursor, y + 0.4 * mm, nome)
+        cursor += pdf.stringWidth(nome, fonte, 8) + 4 * mm
+
+
+def _pagina_mapa(pdf, titulo, imagem, itens, fonte, forte, largura, altura, mm) -> None:
     pdf.setFillColorRGB(0.07, 0.16, 0.22)
     pdf.rect(0, altura - 16 * mm, largura, 16 * mm, fill=1, stroke=0)
     pdf.setFillColorRGB(1, 1, 1)
     pdf.setFont(forte, 13)
     pdf.drawString(14 * mm, altura - 10 * mm, titulo)
     largura_mapa = 186 * mm
-    altura_mapa = 128 * mm
-    y_mapa = altura - 22 * mm - altura_mapa
+    altura_mapa = 175 * mm
+    y_mapa = altura - 20 * mm - altura_mapa
     pdf.drawImage(ImageReader_de(imagem), 12 * mm, y_mapa, width=largura_mapa, height=altura_mapa, preserveAspectRatio=True, anchor="c")
-    if not legenda:
-        return
-    pdf.setFillColorRGB(0.25, 0.32, 0.36)
-    pdf.setFont(fonte, 8)
-    pdf.drawString(14 * mm, y_mapa - 8 * mm, "Cinza: via prevista. Verde: executado. Vermelho tracejado: faltante. GPS fino, só sobre a via.")
-    itens = list(_LEGENDAS) + [
-        ("via", "Via prevista"),
-        ("feito", "Executado"),
-        ("faltante", "Faltante"),
-        ("gps", "GPS"),
-    ]
-    for indice, (grupo, nome) in enumerate(itens):
-        coluna = indice % 4
-        linha = indice // 4
-        x = 14 * mm + coluna * 46 * mm
-        y = y_mapa - 16 * mm - linha * 7 * mm
-        if grupo in {"via", "feito", "faltante", "gps"}:
-            cores_linha = {
-                "via": (0.47, 0.50, 0.53),
-                "feito": (0.11, 0.54, 0.35),
-                "faltante": (0.70, 0.25, 0.27),
-                "gps": (0.16, 0.22, 0.28),
-            }
-            pdf.setStrokeColorRGB(*cores_linha[grupo])
-            pdf.setLineWidth(1.6 if grupo != "gps" else 1.0)
-            if grupo == "faltante":
-                pdf.setDash(1.2, 1.2)
-            pdf.line(x, y + 2 * mm, x + 6 * mm, y + 2 * mm)
-            pdf.setDash()
-        else:
-            cor = _CORES[grupo]
-            pdf.setFillColorRGB(cor[0] / 255, cor[1] / 255, cor[2] / 255)
-            pdf.rect(x, y, 4 * mm, 4 * mm, fill=1, stroke=0)
-        pdf.setFillColorRGB(0.15, 0.18, 0.2)
-        pdf.setFont(fonte, 8)
-        pdf.drawString(x + 8 * mm, y + 0.8 * mm, nome)
+    _legenda_pdf(pdf, itens, 14 * mm, y_mapa - 6 * mm, fonte, mm)
 
 
-def _pagina_rota(pdf, rota, detalhe, imagem, fonte, forte, largura, altura, mm) -> None:
+def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altura, mm) -> None:
     codigo = _texto(rota.get("codigo"))
     pdf.setFillColorRGB(0.07, 0.16, 0.22)
     pdf.rect(0, altura - 18 * mm, largura, 18 * mm, fill=1, stroke=0)
@@ -548,9 +546,12 @@ def _pagina_rota(pdf, rota, detalhe, imagem, fonte, forte, largura, altura, mm) 
             y -= 24 * mm
         else:
             y -= 18 * mm
+    if itens:
+        _legenda_pdf(pdf, itens, 14 * mm, y - 1 * mm, fonte, mm)
+        y -= 6 * mm
     base = 16 * mm
-    topo = max(y - 4 * mm, base + 60 * mm)
-    pdf.drawImage(ImageReader_de(imagem), 12 * mm, base, width=186 * mm, height=topo - base, preserveAspectRatio=True, anchor="n")
+    topo = max(y - 2 * mm, base + 60 * mm)
+    pdf.drawImage(ImageReader_de(imagem), 12 * mm, base, width=186 * mm, height=topo - base, preserveAspectRatio=True, anchor="c")
 
 
 def ImageReader_de(imagem: bytes):
@@ -659,19 +660,19 @@ def _texto_fora(fora: dict[str, Any]) -> str:
     return " · ".join(partes)
 
 
-def _mapa_rota(rota: dict[str, Any], aneis: list, linhas: list, detalhe: dict[str, Any]) -> bytes:
+def _mapa_rota(rota: dict[str, Any], aneis: list, linhas: list, detalhe: dict[str, Any]) -> tuple[bytes, list[tuple[str, str]]]:
     codigo = str(rota.get("codigo") or "")
     grupo = str(rota.get("grupo") or "nao")
     if grupo == "nao":
-        return _mapa({codigo: aneis}, [], [rota], largura=1000, altura_px=620, individual=True)
+        return _mapa({codigo: aneis}, [], [rota], largura=1600, altura_px=1120, individual=True)
     feitos = _linhas_geo((detalhe or {}).get("trechos_feitos"))
     faltando = _linhas_geo((detalhe or {}).get("trechos_faltando"))
     return _mapa(
         {codigo: aneis},
         linhas,
         [rota],
-        largura=1000,
-        altura_px=620,
+        largura=1600,
+        altura_px=1120,
         individual=True,
         feitos=feitos,
         faltando=faltando,
@@ -728,7 +729,132 @@ def _anel(pontos: list) -> list[tuple[float, float]]:
     return anel
 
 
+def _legenda_de(
+    rotas: list[dict[str, Any]],
+    trilhas: list,
+    *,
+    tiles: bool,
+    tem_area: bool,
+) -> list[tuple[str, str]]:
+    itens: list[tuple[str, str]] = []
+    if tiles:
+        if tem_area:
+            itens.append(("area", "Área oficial"))
+        if trilhas:
+            itens.append(("gps", "GPS"))
+        return itens
+    vistos: list[str] = []
+    for rota in rotas:
+        grupo = str(rota.get("grupo") or "nao")
+        if grupo not in vistos and grupo in _CORES:
+            vistos.append(grupo)
+    nomes = {chave: nome for chave, nome in _LEGENDAS}
+    for grupo in vistos:
+        itens.append((grupo, nomes.get(grupo, grupo)))
+    if trilhas:
+        itens.append(("trilha", "GPS"))
+    return itens
+
+
 def _mapa(
+    poligonos: dict[str, list],
+    trilhas: list,
+    rotas: list[dict[str, Any]],
+    *,
+    largura: int,
+    altura_px: int,
+    individual: bool,
+    feitos: list | None = None,
+    faltando: list | None = None,
+    entrada: dict | None = None,
+    saida: dict | None = None,
+) -> tuple[bytes, list[tuple[str, str]]]:
+    global mapas_tiles, mapas_fallback
+    try:
+        desenhado = _mapa_tiles(poligonos, trilhas, largura, altura_px, individual)
+        if desenhado is not None:
+            mapas_tiles += 1
+            return desenhado, _legenda_de(rotas, trilhas, tiles=True, tem_area=bool(poligonos))
+    except Exception as exc:
+        print(f"[PDF] mapa sem fundo cartográfico: {exc}", flush=True)
+    mapas_fallback += 1
+    return (
+        _mapa_simples(
+            poligonos,
+            trilhas,
+            rotas,
+            largura=largura,
+            altura_px=altura_px,
+            individual=individual,
+            feitos=feitos,
+            faltando=faltando,
+            entrada=entrada,
+            saida=saida,
+        ),
+        _legenda_de(rotas, trilhas, tiles=False, tem_area=bool(poligonos)),
+    )
+
+
+def _pontos_quadro(poligonos: dict[str, list], trilhas: list) -> list[tuple[float, float]]:
+    pontos: list[tuple[float, float]] = []
+    for aneis in poligonos.values():
+        for anel in aneis:
+            pontos.extend(anel)
+    if pontos:
+        return pontos
+    for linha in trilhas or []:
+        for ponto in linha:
+            if isinstance(ponto, (list, tuple)) and len(ponto) >= 2:
+                pontos.append((float(ponto[1]), float(ponto[0])))
+    return pontos
+
+
+def _mapa_tiles(
+    poligonos: dict[str, list],
+    trilhas: list,
+    largura: int,
+    altura_px: int,
+    individual: bool,
+) -> bytes | None:
+    pontos = _pontos_quadro(poligonos, trilhas)
+    vista = enquadrar(pontos, largura, altura_px)
+    if not vista:
+        return None
+    tiles = obter_tiles(vista["tiles"])
+    if not tiles:
+        return None
+    img = pintar_fundo(vista, tiles)
+    if img is None:
+        return None
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    desenho = ImageDraw.Draw(overlay)
+
+    def xy(lon: float, lat: float) -> tuple[float, float]:
+        return projetar(vista, lon, lat)
+
+    for aneis in poligonos.values():
+        for anel in aneis:
+            seq = [xy(lon, lat) for lon, lat in anel]
+            if len(seq) < 3:
+                continue
+            desenho.polygon(seq, fill=(244, 168, 40, 78))
+            desenho.line(seq + [seq[0]], fill=(234, 88, 12, 255), width=5 if individual else 3, joint="curve")
+    for linha in trilhas or []:
+        seq = []
+        for ponto in linha:
+            if not isinstance(ponto, (list, tuple)) or len(ponto) < 2:
+                continue
+            seq.append(xy(float(ponto[1]), float(ponto[0])))
+        if len(seq) >= 2:
+            desenho.line(seq, fill=(29, 78, 216, 235), width=4 if individual else 2, joint="curve")
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    carimbar(img)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=72, optimize=True)
+    return buf.getvalue()
+
+
+def _mapa_simples(
     poligonos: dict[str, list],
     trilhas: list,
     rotas: list[dict[str, Any]],

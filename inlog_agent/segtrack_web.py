@@ -269,7 +269,7 @@ def fazer_login(page: Page, settings: Settings) -> dict[str, Any]:
                 || {}).innerText || ''"""
         )
         raise RuntimeError(
-            "Login Segtrack recusado. Confira SEGTRACK_USER e SEGTRACK_PASSWORD no .env"
+            "Login SEGTRACK recusado. Confira SEGTRACK_USER e SEGTRACK_PASSWORD no .env"
             + (f" ({erro.strip()})" if erro and str(erro).strip() else "")
         )
     if settings.segtrack_home_url and "dashboard_controller" not in (page.url or "").lower():
@@ -756,7 +756,7 @@ def extrair_frota_e_percursos(
         placas_inlog = set()
 
     if settings.segtrack_home_url:
-        progress("Abrindo o painel da Segtrack...")
+        progress("Abrindo o painel da SEGTRACK...")
         page.goto(settings.segtrack_home_url, wait_until="domcontentloaded")
         page.wait_for_timeout(1200)
     progress("Abrindo o Mapa Geral 3.0...")
@@ -769,9 +769,9 @@ def extrair_frota_e_percursos(
     for alvo in settings.segtrack_veiculos:
         _buscar_placa_mapa_v3(page, alvo)
 
-    progress("Abrindo o histórico de posições da Segtrack...")
+    progress("Abrindo o histórico de posições da SEGTRACK...")
     ativos = listar_ativos_historico(page, settings)
-    progress(f"Frota na Segtrack: {len(ativos)} veículos.")
+    progress(f"Frota na SEGTRACK: {len(ativos)} veículos.")
 
     escolhidos: list[dict[str, str]] = []
     if settings.segtrack_veiculos:
@@ -788,7 +788,7 @@ def extrair_frota_e_percursos(
         if faltando:
             lista = ", ".join((item.get("texto") or "") for item in ativos[:30])
             raise RuntimeError(
-                f"A placa {', '.join(faltando)} não está nesta conta Segtrack "
+                f"A placa {', '.join(faltando)} não está nesta conta SEGTRACK "
                 f"({settings.segtrack_user}). Pesquise sem hífen, ex.: SDG1J76. "
                 f"Veículos cadastrados: {lista}"
             )
@@ -842,6 +842,6 @@ def extrair_frota_e_percursos(
     if settings.segtrack_veiculos and candidatos and not filtrados:
         placas = ", ".join(_fmt_placa(item.get("placa") or "") for item in candidatos)
         raise RuntimeError(
-            f"A placa {placas} existe nesta Segtrack, mas o GPS não está em Aparecida."
+            f"A placa {placas} existe nesta SEGTRACK, mas o GPS não está em Aparecida."
         )
     return filtrados, ativos, {"historico": True}

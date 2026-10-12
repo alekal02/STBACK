@@ -77,7 +77,7 @@ def montar_estado(
     return {
         "ok": not falha,
         "vazio": not rotas,
-        "empresa": "Segtrack",
+        "empresa": "SEGTRACK",
         "data": dia.isoformat(),
         "turno": pedido,
         "periodo": periodo,

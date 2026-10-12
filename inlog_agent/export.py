@@ -420,7 +420,7 @@ def write_mapa_html(
       const box = document.createElement("div");
       box.className = "item";
       box.innerHTML = `<div class="linha-rota"><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>
-        <div class="detalhe"><small>${{sit}} · Segtrack<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
+        <div class="detalhe"><small>${{sit}} · SEGTRACK<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
         <div style="margin-top:6px;font-size:12px;line-height:1.45">${{chips}}</div></div>
         <div class="barra"><span style="width:${{Math.min(pct,100)}}%;background:${{c}}"></span></div>`;
       box.onclick = () => focar(idx);
@@ -526,7 +526,7 @@ def reconstruir_mapa(pasta: Path) -> Path:
     if pasta.parent.name == "argos":
         titulo = f"Argos Aparecida — {dia}"
     elif pasta.parent.name == "segtrack":
-        titulo = f"Segtrack Aparecida — {dia}"
+        titulo = f"SEGTRACK Aparecida — {dia}"
     else:
         titulo = f"Rotas {dia}"
     return write_mapa_html(pasta / "mapa.html", titulo, dados.get("rotas") or [])

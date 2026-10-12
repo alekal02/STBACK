@@ -527,12 +527,12 @@ def _html_inlog(
 </head>
 <body>
   <header>
-    <div class="marca">Sala técnica</div>
+    <div class="marca">SEGTRACK</div>
     <h1>{_esc(titulo)}</h1>
     <p>Setor oficial do mapa de coleta (GPKG). % = km do GPS dentro do setor / km oficial do setor. Linha no mapa = trajeto do compactador no histórico do sinótico.</p>
   </header>
   <div class="wrap">
-    <p class="resumo"><b>{len(linhas)}</b> setores oficiais com GPS Segtrack · média concluída <b>{str(media).replace('.', ',')}%</b></p>
+    <p class="resumo"><b>{len(linhas)}</b> setores oficiais com GPS SEGTRACK · média concluída <b>{str(media).replace('.', ',')}%</b></p>
     <table>
       <thead>
         <tr>

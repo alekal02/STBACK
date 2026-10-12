@@ -947,15 +947,15 @@ def _garantir_pdf_segtrack(data: str) -> Path:
     settings = load_settings()
     pasta = _pasta_segtrack(settings.output_dir, data)
     if not pasta:
-        raise FileNotFoundError("Não há extração Segtrack deste dia. Extraia os percursos antes de baixar o PDF.")
+        raise FileNotFoundError("Não há extração SEGTRACK deste dia. Extraia os percursos antes de baixar o PDF.")
     alvo = pasta / "relatorio-rotas.pdf"
     mapa = pasta / "mapa.html"
     diario = pasta / "relatorio-diario.json"
     rotas = pasta / "rotas.json"
     if not mapa.is_file() or not diario.is_file():
-        raise FileNotFoundError("Faltam o mapa ou o relatório Segtrack deste dia.")
+        raise FileNotFoundError("Faltam o mapa ou o relatório SEGTRACK deste dia.")
     if not rotas.is_file():
-        raise FileNotFoundError("Falta o arquivo de rotas Segtrack deste dia.")
+        raise FileNotFoundError("Falta o arquivo de rotas SEGTRACK deste dia.")
     if alvo.is_file():
         fontes = [mapa, diario, rotas]
         mais_novo = max(arq.stat().st_mtime for arq in fontes)
@@ -966,7 +966,7 @@ def _garantir_pdf_segtrack(data: str) -> Path:
     reconstruir_mapa(pasta)
     _rodar_rastreado([sys.executable, "-u", "-m", "inlog_agent", "pdf", "--data", data, "--segtrack"])
     if not alvo.is_file():
-        raise RuntimeError("Falha ao gerar o PDF Segtrack.")
+        raise RuntimeError("Falha ao gerar o PDF SEGTRACK.")
     return alvo
 
 
@@ -974,7 +974,7 @@ def _garantir_gpkg_segtrack(data: str) -> Path:
     settings = load_settings()
     pasta = _pasta_segtrack(settings.output_dir, data)
     if not pasta or not (pasta / "rotas.json").is_file():
-        raise FileNotFoundError("Não há extração Segtrack deste dia. Extraia os percursos antes de exportar o GPKG.")
+        raise FileNotFoundError("Não há extração SEGTRACK deste dia. Extraia os percursos antes de exportar o GPKG.")
     alvo = pasta / "segtrack-rotas.gpkg"
     fonte = pasta / "rotas.json"
     if alvo.is_file() and alvo.stat().st_mtime >= fonte.stat().st_mtime:
@@ -1033,7 +1033,7 @@ def _enviar_chatbot_apos_unificado(data: str | None, payload: dict[str, Any]) ->
         try:
             enviar_texto_grupo(
                 destino,
-                "Sala tecnica: relatorio pronto. O PDF (capa, frota, grade e mapas) segue agora.",
+                "SEGTRACK: relatorio pronto. O PDF (capa, frota, grade e mapas) segue agora.",
             )
             JOB.append("Aviso enviado no grupo. Montando o PDF...")
             registrar_retorno_chatbot("Aviso enviado no grupo. Montando o PDF...")
@@ -1449,7 +1449,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = (parse_qs(parsed.query).get("data") or [None])[0]
                 if not data:
-                    self._json(400, {"erro": "Informe a data do GeoPackage Segtrack."})
+                    self._json(400, {"erro": "Informe a data do GeoPackage SEGTRACK."})
                     return
                 gpkg = _garantir_gpkg_segtrack(data)
                 self._bytes(
@@ -1465,7 +1465,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data = (parse_qs(parsed.query).get("data") or [None])[0]
                 if not data:
-                    self._json(400, {"erro": "Informe a data do relatório Segtrack."})
+                    self._json(400, {"erro": "Informe a data do relatório SEGTRACK."})
                     return
                 pdf = _garantir_pdf_segtrack(data)
                 self._bytes(
@@ -1722,7 +1722,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         enviar_texto_grupo(
                             grupo,
-                            f"Sala tecnica: gerando o relatorio de {rotulo_aviso}. "
+                            f"SEGTRACK: gerando o relatorio de {rotulo_aviso}. "
                             "O PDF (capa, frota, grade e mapas) chega em seguida.",
                         )
                         registrar_retorno_chatbot(
@@ -1869,7 +1869,7 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         print(f"Se o painel já abriu, use http://{usado_host}:{usada}")
         print(exc, flush=True)
         return
-    print(f"Sala tecnica em http://{usado_host}:{usada}", flush=True)
+    print(f"SEGTRACK em http://{usado_host}:{usada}", flush=True)
     from .live_db import DISCO, no_render
 
     if no_render() and DISCO.is_dir():

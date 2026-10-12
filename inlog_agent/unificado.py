@@ -1,4 +1,4 @@
-"""Agente polígono-primeiro: cada setor oficial recebe o GPS da Segtrack."""
+"""Agente polígono-primeiro: cada setor oficial recebe o GPS da SEGTRACK."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from .traco_agente import montar_traco_continuo, recortar_trechos_ao_setor
 from .verificacao import VEREDICTOS_OK, _tortuosidade, analisar_execucao, rotulo_papel_relatorio
 
 FONTES = (
-    ("segtrack", "segtrack", "Segtrack"),
+    ("segtrack", "segtrack", "SEGTRACK"),
 )
 
 CLIP_MIN = 40
@@ -193,7 +193,7 @@ def _chaves_caminhao(cam: dict[str, Any]) -> set[str]:
 
 
 def _fundir_mesmo_caminhao(caminhoes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Um caminhão = um GPS da Segtrack. Quem não andou hoje não entra até ligar e sair."""
+    """Um caminhão = um GPS da SEGTRACK. Quem não andou hoje não entra até ligar e sair."""
     grupos: list[list[dict[str, Any]]] = []
     for cam in caminhoes:
         chaves = _chaves_caminhao(cam)
@@ -229,7 +229,7 @@ def _fundir_mesmo_caminhao(caminhoes: list[dict[str, Any]]) -> list[dict[str, An
             pontos.sort(key=lambda p: str(p.get("timestamp") or ""))
             base["pontos"] = pontos
             base["fonte"] = "segtrack"
-            base["fonte_nome"] = "Segtrack"
+            base["fonte_nome"] = "SEGTRACK"
             for item in grupo:
                 if item.get("inlog"):
                     base["inlog"] = item["inlog"]
@@ -253,7 +253,7 @@ def _fundir_mesmo_caminhao(caminhoes: list[dict[str, Any]]) -> list[dict[str, An
         vistos_fonte = set()
         for item in grupo:
             pontos.extend(item.get("pontos") or [])
-            nome = "Segtrack"
+            nome = "SEGTRACK"
             if nome and nome not in vistos_fonte:
                 vistos_fonte.add(nome)
                 fontes_nome.append(nome)
@@ -1112,7 +1112,7 @@ def inspecionar_rota(
     caminhoes, fontes = carregar_caminhoes(output_dir, dia, hora_inicio, hora_fim, data_fim)
     if not caminhoes:
         raise ValueError(
-            "Não há GPS da Segtrack neste ciclo. Use Gerar relatório (ou Buscar GPS Segtrack) e tente de novo."
+            "Não há GPS da SEGTRACK neste ciclo. Use Gerar relatório (ou Buscar GPS SEGTRACK) e tente de novo."
         )
     for cam in caminhoes:
         cam["_pares"] = preparar_pontos(cam.get("pontos") or [])
@@ -1178,7 +1178,7 @@ def inspecionar_rota(
 
 
 def incorporar_confirmados(setores: list[dict[str, Any]], output_dir: Path, dia: date) -> None:
-    """Não perde rota que a Segtrack já confirmou como coleta."""
+    """Não perde rota que a SEGTRACK já confirmou como coleta."""
     por_codigo = {str(s.get("codigo") or ""): s for s in setores}
     iso = dia.isoformat()
     for chave, pasta_rel, rotulo in FONTES:
@@ -1234,7 +1234,7 @@ def incorporar_confirmados(setores: list[dict[str, Any]], output_dir: Path, dia:
 def caminhoes_de_rotas(
     rotas: list[dict[str, Any]],
     fonte: str = "segtrack",
-    fonte_nome: str = "Segtrack",
+    fonte_nome: str = "SEGTRACK",
 ) -> list[dict[str, Any]]:
     saida = []
     for item in rotas or []:
@@ -1361,7 +1361,7 @@ def gerar_relatorio_setores(
         "recuperadas": [_linha(s) for s in recuperadas],
         "frota": [
             {
-                "Empresa": "Segtrack",
+                "Empresa": "SEGTRACK",
                 "Veículo": cam.get("veiculo") or "—",
                 "Placa": cam.get("placa") or "—",
                 "Pontos GPS": len(cam.get("pontos") or []),
@@ -1425,7 +1425,7 @@ def gerar_relatorio_unificado(
 
     pedido = (turno or "").strip().lower()
     nome = {"diurno": "diurna", "noturno": "noturna"}.get(pedido, "")
-    progress("5/7 — Lendo o GPS da Segtrack...")
+    progress("5/7 — Lendo o GPS da SEGTRACK...")
     caminhoes, fontes = carregar_caminhoes(output_dir, dia, hora_inicio, hora_fim, data_fim)
     progress(
         f"{len(caminhoes)} caminhões com GPS · "
@@ -1472,7 +1472,7 @@ def atualizar_gps_ciclo(
     on_progress: Callable[[str], None] | None = None,
     forcar: bool = False,
 ) -> dict[str, Any]:
-    """Nova consulta de pulsos na Segtrack (API, sem PDF)."""
+    """Nova consulta de pulsos na SEGTRACK (API, sem PDF)."""
     import time
 
     from .segtrack_rotas import executar_segtrack
@@ -1500,7 +1500,7 @@ def atualizar_gps_ciclo(
     progress(
         f"Consultando pulsos do ciclo {rotulo_periodo(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)}..."
     )
-    progress("Segtrack: histórico Fulltrack por placa...")
+    progress("SEGTRACK: histórico Fulltrack por placa...")
     try:
         rel = executar_segtrack(settings, headed=headed, on_progress=on_progress, gerar_pdf=False, so_gps=True)
         extraidos["segtrack"] = {
@@ -1508,12 +1508,12 @@ def atualizar_gps_ciclo(
             "pontos": (rel or {}).get("total_pontos"),
         }
         progress(
-            f"Segtrack ok: {(rel or {}).get('total_veiculos') or 0} caminhões, "
+            f"SEGTRACK ok: {(rel or {}).get('total_veiculos') or 0} caminhões, "
             f"{(rel or {}).get('total_pontos') or 0} pontos GPS."
         )
     except Exception as exc:
         falhas["segtrack"] = str(exc)
-        progress(f"Segtrack falhou: {exc}")
+        progress(f"SEGTRACK falhou: {exc}")
     _ultimo_gps[chave] = time.time()
     return {"extraidos": extraidos, "falhas": falhas, "reaproveitado": False}
 
@@ -1526,7 +1526,7 @@ def executar_coleta_do_dia(
     on_progress: Callable[[str], None] | None = None,
     turno: str | None = None,
 ) -> dict[str, Any]:
-    """Consulta a Segtrack, puxa a trajetória e monta mapa + relatório de conclusão."""
+    """Consulta a SEGTRACK, puxa a trajetória e monta mapa + relatório de conclusão."""
     dia = settings.data_rota
 
     def progress(msg: str) -> None:
@@ -1554,7 +1554,7 @@ def executar_coleta_do_dia(
                 f"2/7 — Ciclo {rotulo_periodo(dia, settings.hora_inicio, settings.hora_fim, settings.data_fim)}: "
                 "06:00 de um dia até 05:59 do outro."
             )
-        progress("3/7 — Buscando o GPS da frota na Segtrack (placa a placa).")
+        progress("3/7 — Buscando o GPS da frota na SEGTRACK (placa a placa).")
         gps = atualizar_gps_ciclo(settings, headed=headed, on_progress=on_progress, forcar=False)
         extraidos = gps.get("extraidos") or {}
         falhas = gps.get("falhas") or {}
@@ -1668,7 +1668,7 @@ def _cards_conclusao(rotas: list[dict[str, Any]], vazia: str = "") -> str:
             f"<div><dt>Conclusão</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
             f"<div><dt>Caminhão</dt><dd>{_esc(cam.get('veiculo') or '—')}</dd></div>"
             f"<div><dt>Placa</dt><dd>{_esc(cam.get('placa') or '—')}</dd></div>"
-            f"<div><dt>Empresa GPS</dt><dd>Segtrack</dd></div>"
+            f"<div><dt>Empresa GPS</dt><dd>SEGTRACK</dd></div>"
             f"<div><dt>Km no polígono</dt><dd>{_esc(_fmt_num(cam.get('km_coleta'), ' km'))}</dd></div>"
             f"<div><dt>Km oficial</dt><dd>{_esc(_fmt_num(setor.get('km_oficial'), ' km'))}</dd></div>"
             f"<div><dt>Pontos GPS</dt><dd>{pts if pts not in (None, '') else '—'}</dd></div>"
@@ -1720,7 +1720,7 @@ def _linha(setor: dict[str, Any]) -> dict[str, str]:
         "Veículo": cam.get("veiculo") or "—",
         "Placa": cam.get("placa") or "—",
         "Caminhões na rota": _txt_caminhoes(setor) or (cam.get("placa") or "—"),
-        "Empresa": "Segtrack",
+        "Empresa": "SEGTRACK",
         "Km Coleta": _fmt_num(cam.get("km_coleta"), " km"),
         "Km Total": _fmt_num(setor.get("km_oficial"), " km"),
         "Pontos GPS": str(int(cam["pontos_no_setor"])) if cam.get("pontos_no_setor") not in (None, "", "—") else "—",
@@ -1865,7 +1865,7 @@ def _html(
     periodo = rotulo_dia_periodo(dia, hora_inicio, hora_fim, data_fim)
     pedido = (turno or "").strip().lower()
     if (fonte or "").lower() == "segtrack":
-        titulo = f"Coleta Segtrack — {periodo}"
+        titulo = f"Coleta SEGTRACK — {periodo}"
         intro = "Grade do mapa oficial. Só rota e % — mapas e trajetórias no PDF."
     elif pedido == "noturno":
         titulo = f"Coleta noturna — {periodo}"
@@ -1875,7 +1875,7 @@ def _html(
         intro = "Polígonos diurnos do dia, das 06:00 às 18:59. A trajetória do GPS fica dentro de cada polígono."
     else:
         titulo = f"Coleta do dia — {periodo}"
-        intro = "GPS da Segtrack. Só rota e % — mapas e trajetórias no PDF."
+        intro = "GPS da SEGTRACK. Só rota e % — mapas e trajetórias no PDF."
     avisos = []
     _ = caminhoes
     if aviso_ontem:

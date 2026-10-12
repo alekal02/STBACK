@@ -82,7 +82,7 @@ def _erro_whatsapp(texto: str) -> str:
     if "no session" in t or "not logged" in t or "not connected" in t:
         return "O WhatsApp desconectou. Clique em Conectar WhatsApp e escaneie o QR de novo."
     if "file too" in t or "too large" in t or "max file" in t or "document too" in t:
-        return "O PDF ficou grande demais para o WhatsApp. O relatório foi gerado na Sala técnica; baixe pelo painel."
+        return "O PDF ficou grande demais para o WhatsApp. O relatório foi gerado no SEGTRACK; baixe pelo painel."
     return bruto
 
 
@@ -558,7 +558,7 @@ def _pdf_do_dia(dia: str) -> Path | None:
 
 
 def garantir_pdf_relatorio(dia: str, *, forcar: bool = False) -> Path:
-    """Gera o mesmo PDF da Sala técnica (capa, frota, grade e mapas)."""
+    """Gera o mesmo PDF do SEGTRACK (capa, frota, grade e mapas)."""
     from .config import load_settings
     from .pdf import gerar_pdf_dia
 
@@ -567,7 +567,7 @@ def garantir_pdf_relatorio(dia: str, *, forcar: bool = False) -> Path:
     mapa = pasta / "mapa.html"
     if not diario.is_file() or not mapa.is_file():
         raise RuntimeError(
-            "Gere o relatório do dia na Sala técnica (Gerar relatório) antes de enviar o PDF."
+            "Gere o relatório do dia no SEGTRACK (Gerar relatório) antes de enviar o PDF."
         )
     alvo = pasta / "relatorio-rotas.pdf"
     fontes = [diario, mapa, pasta / "rotas.json"]
@@ -603,7 +603,7 @@ def _legenda(dia: str) -> str:
     return (
         f"📍 Relatório GPS · {rotulo}\n"
         f"Concluídas: {feitas} · Parciais: {parciais} · Apoios: {apoios} · Não feitas: {nao}\n"
-        "Cobertura do GPS da Segtrack. Não é prova de coleta."
+        "Cobertura do GPS da SEGTRACK. Não é prova de coleta."
     )
 
 
@@ -670,7 +670,7 @@ def enviar_pdf_dia(dia: str | None, *, grupo_jid: str | None = None, forcar_pdf:
         raise RuntimeError("O destino salvo não é um grupo do WhatsApp. Escolha o grupo de novo na lista.")
     garantir_token()
     _enviar_documento(destino, pdf, data)
-    return {"ok": True, "msg": "PDF do relatório (o mesmo da Sala técnica) enviado no grupo.", "enviados": 1}
+    return {"ok": True, "msg": "PDF do relatório (o mesmo do SEGTRACK) enviado no grupo.", "enviados": 1}
 
 
 def publico_config() -> dict[str, Any]:

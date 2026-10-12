@@ -223,7 +223,7 @@ def _frota(doc: Document, frota: list[dict[str, Any]]) -> None:
     for item in frota:
         celulas = tabela.add_row().cells
         valores = [
-            "Segtrack",
+            "SEGTRACK",
             str(item.get("Veículo") or item.get("Veiculo") or "—"),
             str(item.get("Placa") or "—"),
             str(item.get("Pontos GPS") or item.get("pontos") or "—"),

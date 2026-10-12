@@ -337,7 +337,7 @@ def gerar_gpkg_segtrack(pasta: Path) -> Path:
     arquivo = pasta / "segtrack-rotas.gpkg"
     rotas_json = pasta / "rotas.json"
     if not rotas_json.is_file():
-        raise FileNotFoundError(f"Não achei o percurso Segtrack em {rotas_json}")
+        raise FileNotFoundError(f"Não achei o percurso SEGTRACK em {rotas_json}")
     dados = json.loads(rotas_json.read_text(encoding="utf-8"))
     dia = date.fromisoformat(str(dados.get("data") or pasta.name))
     rotas = list(dados.get("rotas") or [])

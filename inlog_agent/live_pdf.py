@@ -52,7 +52,7 @@ def gerar_operacao(data: str | None, turno: str | None) -> tuple[bytes, str]:
         raise TimeoutError("Já existe um relatório em geração.")
     try:
         pacote = ler_pacote(dia.isoformat(), pedido)
-        nome = f"SAGTrack_Relatorio_Operacao_{dia.isoformat()}_{pedido.capitalize()}.pdf"
+        nome = f"SEGTRACK_Relatorio_Operacao_{dia.isoformat()}_{pedido.capitalize()}.pdf"
         return renderizar(pacote), nome
     finally:
         _PDF.release()
@@ -262,15 +262,15 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
                 self.__dict__.update(estado_pagina)
                 self.setFillColorRGB(0.35, 0.42, 0.46)
                 self.setFont(fonte, 8)
-                self.drawString(14 * mm, 8 * mm, f"SAGTrack  ·  {_data_br(estado.get('data'))}  ·  {str(estado.get('turno') or '').capitalize()}")
+                self.drawString(14 * mm, 8 * mm, f"SEGTRACK  ·  {_data_br(estado.get('data'))}  ·  {str(estado.get('turno') or '').capitalize()}")
                 self.drawCentredString(largura / 2, 8 * mm, f"Gerado em {pacote.get('gerado_em')}")
                 self.drawRightString(largura - 14 * mm, 8 * mm, f"Página {self._pageNumber} de {total}")
                 canvas.Canvas.showPage(self)
             canvas.Canvas.save(self)
 
     pdf = _Folha(buf, pagesize=A4)
-    pdf.setTitle("SAGTrack — Relatório Operacional de Conclusão de Rotas")
-    pdf.setAuthor("SAGTrack")
+    pdf.setTitle("SEGTRACK — Relatório Operacional de Conclusão de Rotas")
+    pdf.setAuthor("SEGTRACK")
     pdf.setSubject(f"{_data_br(estado.get('data'))} · {str(estado.get('turno') or '').capitalize()}")
     largura, altura = A4
     _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm)
@@ -368,7 +368,7 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
     pdf.rect(0, altura - 32 * mm, largura, 32 * mm, fill=1, stroke=0)
     pdf.setFillColorRGB(1, 1, 1)
     pdf.setFont(forte, 9)
-    pdf.drawString(14 * mm, altura - 10 * mm, "SAGTrack")
+    pdf.drawString(14 * mm, altura - 10 * mm, "SEGTRACK")
     pdf.setFont(forte, 16)
     pdf.drawString(14 * mm, altura - 18 * mm, "RELATÓRIO OPERACIONAL")
     pdf.setFont(fonte, 10)

@@ -111,7 +111,7 @@ def _html_relatorio(
     hora_fim: str = "23:59",
     data_fim: date | None = None,
 ) -> Path:
-    titulo = f"Relatório diário Segtrack — {rotulo_dia_periodo(dia, hora_inicio, hora_fim, data_fim)}"
+    titulo = f"Relatório diário SEGTRACK — {rotulo_dia_periodo(dia, hora_inicio, hora_fim, data_fim)}"
     linhas = _linhas_diario(dia, veiculos)
     corpo = []
     for row in linhas:
@@ -144,12 +144,12 @@ def _html_relatorio(
 </head>
 <body>
   <header>
-    <div class="marca">Sala técnica</div>
+    <div class="marca">SEGTRACK</div>
     <h1>{_esc(titulo)}</h1>
     <p>Setor oficial do mapa de coleta (GPKG). % = km do GPS dentro do setor / km oficial do setor. Linha no mapa = trajeto do caminhão.</p>
   </header>
   <div class="wrap">
-    <p class="resumo"><b>{len(linhas)}</b> compactadores Segtrack · média concluída <b>{str(media).replace('.', ',')}%</b></p>
+    <p class="resumo"><b>{len(linhas)}</b> compactadores SEGTRACK · média concluída <b>{str(media).replace('.', ',')}%</b></p>
     <table>
       <thead>
         <tr>
@@ -169,7 +169,7 @@ def _html_relatorio(
         </tr>
       </thead>
       <tbody>
-        {''.join(corpo) or '<tr><td colspan="13">Nenhum compactador Segtrack encontrado em Aparecida.</td></tr>'}
+        {''.join(corpo) or '<tr><td colspan="13">Nenhum compactador SEGTRACK encontrado em Aparecida.</td></tr>'}
       </tbody>
     </table>
     {html_secao_mapas_caminhao(veiculos)}
@@ -214,12 +214,12 @@ def gerar_saidas_segtrack(
         pasta,
         dia,
         caminhoes,
-        {"segtrack": "Segtrack"},
+        {"segtrack": "SEGTRACK"},
         hora_inicio,
         hora_fim,
         data_fim,
         fonte="segtrack",
-        titulo_mapa=f"Segtrack Aparecida — {rotulo_periodo(dia, hora_inicio, hora_fim, data_fim)}",
+        titulo_mapa=f"SEGTRACK Aparecida — {rotulo_periodo(dia, hora_inicio, hora_fim, data_fim)}",
         output_dir=pasta.parent.parent,
         incorporar=False,
     )
@@ -272,10 +272,10 @@ def executar_segtrack(
             rotas = coletar_percursos(settings, dia, on_progress=progress)
             sessao = {"fonte": "fulltrack-api", "url": settings.fulltrack_base_url}
             if not any((item.get("total_pontos") or 0) for item in rotas):
-                progress("API Fulltrack sem pontos no período. Tentando o site Segtrack...")
+                progress("API Fulltrack sem pontos no período. Tentando o site SEGTRACK...")
                 rotas = []
         except Exception as exc:
-            progress(f"API Fulltrack falhou ({exc}). Tentando o site Segtrack...")
+            progress(f"API Fulltrack falhou ({exc}). Tentando o site SEGTRACK...")
             rotas = []
     if not rotas and usa_site:
         from .segtrack_web import extrair_frota_e_percursos, fazer_login, open_segtrack_session
@@ -283,7 +283,7 @@ def executar_segtrack(
         with open_segtrack_session(settings, headed=headed) as session:
             page = session.page
             assert page is not None
-            progress("Entrando na Segtrack / Fulltrack...")
+            progress("Entrando na SEGTRACK / Fulltrack...")
             sessao = fazer_login(page, settings)
             progress(f"Login ok. Tela: {sessao.get('titulo') or sessao.get('url')}")
             rotas, menus, meta = extrair_frota_e_percursos(page, settings, dia, on_progress=progress)
@@ -304,7 +304,7 @@ def executar_segtrack(
             write_json(pasta / "menus.json", menus)
             write_json(pasta / "tentativas.json", meta)
     elif not rotas:
-        raise SystemExit("Sem GPS da Fulltrack e sem login do site Segtrack.")
+        raise SystemExit("Sem GPS da Fulltrack e sem login do site SEGTRACK.")
 
     saidas = gerar_saidas_segtrack(
         pasta, dia, rotas, settings.hora_inicio, settings.hora_fim, settings.data_fim, so_gps=so_gps
@@ -322,10 +322,10 @@ def executar_segtrack(
         try:
             from .pdf import gerar_pdf_dia
 
-            progress("Gerando PDF Segtrack com mapa e a rota de cada circuito...")
+            progress("Gerando PDF SEGTRACK com mapa e a rota de cada circuito...")
             saidas["pdf"] = gerar_pdf_dia(pasta)
         except Exception as exc:
-            progress(f"PDF Segtrack não gerado: {exc}")
+            progress(f"PDF SEGTRACK não gerado: {exc}")
     html = saidas.get("relatorio")
     mapa = saidas.get("mapa")
     payload = {}
@@ -341,7 +341,7 @@ def executar_segtrack(
         "data": data_iso,
         "fonte": "segtrack",
         "login": settings.segtrack_user,
-        "obra": "Aparecida — Segtrack",
+        "obra": "Aparecida — SEGTRACK",
         "total_veiculos": len(rotas),
         "total_pontos": sum(item.get("total_pontos") or 0 for item in rotas),
         "arquivos": {
@@ -351,7 +351,7 @@ def executar_segtrack(
     }
     write_json(pasta / "relatorio.json", relatorio)
     progress(
-        f"Pronto. {relatorio['total_veiculos']} compactadores Segtrack, "
+        f"Pronto. {relatorio['total_veiculos']} compactadores SEGTRACK, "
         f"{relatorio['total_pontos']} pontos GPS cruzados com a grade do mapa oficial."
     )
     return relatorio

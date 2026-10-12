@@ -230,7 +230,7 @@ def _html_relatorio(
 </head>
 <body>
   <header>
-    <div class="marca">Sala técnica</div>
+    <div class="marca">SEGTRACK</div>
     <h1>{_esc(titulo)}</h1>
     <p>Setor oficial do mapa de coleta (GPKG). % = km do GPS dentro do setor / km oficial do setor. Linha no mapa = trajeto do caminhão.</p>
   </header>

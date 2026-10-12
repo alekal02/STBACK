@@ -58,11 +58,11 @@ def cmd_segtrack_rotas(
 
     settings = aplicar_periodo(load_settings(), data=data, hora_inicio=hora_inicio, hora_fim=hora_fim, data_fim=data_fim)
     print(
-        f"Extraindo Segtrack de {rotulo_periodo(settings.data_rota, settings.hora_inicio, settings.hora_fim, settings.data_fim)}...",
+        f"Extraindo SEGTRACK de {rotulo_periodo(settings.data_rota, settings.hora_inicio, settings.hora_fim, settings.data_fim)}...",
         flush=True,
     )
     relatorio = executar_segtrack(settings, headed=headed)
-    print("Coleta Segtrack concluída.", flush=True)
+    print("Coleta SEGTRACK concluída.", flush=True)
     print(f"Obra: {relatorio.get('obra')}", flush=True)
     print(f"Veículos: {relatorio.get('total_veiculos')}", flush=True)
     print(f"Pontos GPS: {relatorio.get('total_pontos')}", flush=True)
@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     pdf = sub.add_parser("pdf", help="Gera PDF do dia com rotas feitas e mapa desenhado")
     pdf.add_argument("--data", required=True, help="Data no formato YYYY-MM-DD")
     pdf.add_argument("--argos", action="store_true", help="Gera o PDF do relatório Argos")
-    pdf.add_argument("--segtrack", action="store_true", help="Gera o PDF do relatório Segtrack")
+    pdf.add_argument("--segtrack", action="store_true", help="Gera o PDF do relatório SEGTRACK")
     pdf.add_argument("--unificado", action="store_true", help="Gera o PDF da frota e rotas do dia (3 empresas)")
     pdf.add_argument("--turno", choices=["diurno", "noturno"], default=None)
 
@@ -143,10 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
     gpkg.add_argument("--data", required=True, help="Data no formato YYYY-MM-DD")
     gpkg_inlog = sub.add_parser("gpkg", help="Exporta as rotas Inlog do dia em GeoPackage")
     gpkg_inlog.add_argument("--data", required=True, help="Data no formato YYYY-MM-DD")
-    seg = sub.add_parser("segtrack-rotas", help="Extrai compactadores Segtrack em Aparecida")
+    seg = sub.add_parser("segtrack-rotas", help="Extrai compactadores SEGTRACK em Aparecida")
     seg.add_argument("--data", help="Data no formato YYYY-MM-DD (padrão: hoje)")
     add_periodo(seg)
-    gpkg_seg = sub.add_parser("segtrack-gpkg", help="Exporta o percurso Segtrack do dia em GeoPackage")
+    gpkg_seg = sub.add_parser("segtrack-gpkg", help="Exporta o percurso SEGTRACK do dia em GeoPackage")
     gpkg_seg.add_argument("--data", required=True, help="Data no formato YYYY-MM-DD")
     uni = sub.add_parser("unificado", help="Coleta do dia: login nas 3 empresas, mapa e relatório")
     uni.add_argument("--data", help="Data no formato YYYY-MM-DD (padrão: hoje)")

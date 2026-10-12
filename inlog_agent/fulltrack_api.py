@@ -287,7 +287,7 @@ def coletar_percursos(
             achadas = {_norm_placa(str(item.get("ras_vei_placa") or "")) for item in alvos}
             faltando = [placa for placa in sorted(placas_frota) if placa not in achadas]
             if faltando:
-                on_progress("Placas da frota sem cadastro Segtrack: " + ", ".join(faltando))
+                on_progress("Placas da frota sem cadastro SEGTRACK: " + ", ".join(faltando))
 
     def um(item: dict[str, Any]) -> dict[str, Any]:
         placa = _fmt_placa(str(item.get("ras_vei_placa") or ""))

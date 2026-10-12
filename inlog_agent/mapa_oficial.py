@@ -345,6 +345,19 @@ def carregar_setores(dia: date | None = None) -> list[dict[str, Any]]:
     return setores
 
 
+def _id_area(nome: str, aneis: list[list[list[float]]], usados: set[str]) -> str:
+    """Identidade estável do polígono. Os dois Chácara São Pedro não se misturam."""
+    lat, lon = aneis[0][0]
+    base = f"{nome}|{float(lat):.5f}|{float(lon):.5f}"
+    ident = base
+    extra = 2
+    while ident in usados:
+        ident = f"{base}#{extra}"
+        extra += 1
+    usados.add(ident)
+    return ident
+
+
 def carregar_areas_dificil() -> list[dict[str, Any]]:
     """Os 11 polígonos oficiais. Não anexa vias e não alimenta a cobertura."""
     arquivo = _sincronizar_gpkg()
@@ -364,6 +377,7 @@ def carregar_areas_dificil() -> list[dict[str, Any]]:
         campos = [geom_col, col_codigo, col_nome, col_freq, col_completo]
         select = ", ".join(_quote(c) if c else "NULL" for c in campos)
         areas: list[dict[str, Any]] = []
+        usados: set[str] = set()
         for blob, codigo, nome, freq, completo in con.execute(f"SELECT {select} FROM {_quote(tabela)}"):
             codigo = str(codigo or "").strip()
             if not eh_area_dificil(codigo) or not blob:
@@ -375,6 +389,7 @@ def carregar_areas_dificil() -> list[dict[str, Any]]:
             bairro = str(nome or "").strip()
             areas.append(
                 {
+                    "id": _id_area(bairro or codigo, aneis, usados),
                     "codigo": codigo,
                     "nome": bairro,
                     "frequencia": str(freq or "").strip(),

@@ -386,7 +386,14 @@ def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
 
 def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
-    from .dificil_acesso import BASCULANTES, codigo_da_frota, montar_trajetoria
+    from .dificil_acesso import (
+        BASCULANTES,
+        codigo_da_frota,
+        eventos_nas_areas,
+        montar_trajetoria,
+        preparar_areas,
+        rotulo_operacional,
+    )
 
     dia, pedido = _dia_turno(data, turno)
     inicio = time.perf_counter()
@@ -424,22 +431,49 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         return codigo_que_contem(lat, lon, setores) is not None
 
     areas = areas_dificil()
+    from .live_sync import agora_brt
+    from .live_turno import situacao_pelo_relogio
+
+    momento = agora_brt()
+    vivo = situacao_pelo_relogio(dia, pedido, momento) in {"ABERTO", "FINALIZANDO"}
+    prontos = preparar_areas(areas)
     veiculos = []
+    eventos: list[dict[str, Any]] = []
     pulsos = fora = 0
     trechos_dificil = trechos_desloc = trechos_rota = 0
     for item in BASCULANTES:
         serie = bruto.get(item["codigo"]) or []
         desenho = montar_trajetoria(serie, contem)
+        presenca = eventos_nas_areas(
+            serie,
+            prontos,
+            codigo=item["codigo"],
+            placa=item["placa"],
+            data=dia.isoformat(),
+            turno=pedido,
+        )
+        texto = rotulo_operacional(
+            desenho["pulsos"],
+            desenho["ultimo_gps"],
+            desenho["situacao"],
+            presenca["area"],
+            vivo=vivo,
+            momento=momento,
+        )
         pulsos += desenho["pulsos"]
         fora += desenho["pontos_fora"]
         trechos_rota += len(desenho["na_rota"])
         trechos_desloc += len(desenho["deslocamento"])
         trechos_dificil += len(desenho["dificil"])
+        eventos.extend(presenca["eventos"])
         veiculos.append(
             {
                 "codigo": item["codigo"],
                 "placa": item["placa"],
                 "situacao": desenho["situacao"],
+                "rotulo": texto["rotulo"],
+                "sinal": texto["sinal"],
+                "aviso": texto["aviso"],
                 "ultimo_gps": desenho["ultimo_gps"],
                 "lat": desenho["lat"],
                 "lon": desenho["lon"],
@@ -451,6 +485,11 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "dificil": desenho["dificil"],
                 "isolados": desenho["isolados"],
                 "poligonos": desenho["poligonos"],
+                "area": presenca["area"],
+                "area_id": presenca["area_id"],
+                "dentro": bool(presenca["area_id"]),
+                "eventos": presenca["eventos"],
+                "permanencias": presenca["permanencias"],
             }
         )
     return {
@@ -460,6 +499,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         "camada": "Áreas de difícil acesso",
         "areas": areas,
         "veiculos": veiculos,
+        "eventos": eventos,
         "resumo": {
             "pulsos": pulsos,
             "pontos_fora": fora,
@@ -467,6 +507,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
             "trechos_deslocamento": trechos_desloc,
             "trechos_dificil": trechos_dificil,
             "areas": len(areas),
+            "eventos": len(eventos),
             "ms": round((time.perf_counter() - inicio) * 1000, 1),
         },
     }

@@ -29,10 +29,12 @@ def test_gpkg_entrega_onze_poligonos_com_bairro():
         assert area["nome"]
         assert len(area["poligonos"]) == 1
         anel = area["poligonos"][0]
+        assert area["id"]
         assert len(anel) >= 4
         lat, lon = anel[0]
         assert -17.2 < lat < -16.4
         assert -49.6 < lon < -48.9
+    assert len({area["id"] for area in areas}) == 11
     rotas = listar_rotas_oficiais(None)
     assert rotas
     assert not any(eh_area_dificil(rota["codigo"]) for rota in rotas)

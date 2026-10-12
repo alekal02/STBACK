@@ -1,7 +1,9 @@
 """Trajetoria dos basculantes de dificil acesso.
 
 Usa so os pontos ja gravados no turno. Nao consulta a Segtrack e nao
-calcula cobertura, percentual nem status.
+calcula cobertura, percentual nem status. Entrada, saida e permanencia
+sao lidas desses pontos contra os poligonos oficiais. Nada disso e gravado
+de novo e nenhum evento e inventado entre dois GPS.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ BASCULANTES = (
 )
 
 SEM_RASTREAMENTO = "Sem rastreamento"
+SINAL_DESATUALIZADO = "Sinal desatualizado"
 DESLOCAMENTO = "Deslocamento"
 DIFICIL = "Dif\u00edcil acesso"
 NA_ROTA = "Na rota"
@@ -252,3 +255,206 @@ def _pontos(coords: list[tuple[float, float]]) -> list[list[float]]:
         if not saida or ponto != saida[-1]:
             saida.append(ponto)
     return saida
+
+
+def preparar_areas(areas: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Polígonos prontos para o ponto. O anel continua sendo o do mapa."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+
+    prontos: list[dict[str, Any]] = []
+    for area in areas or []:
+        polys = []
+        for anel in area.get("poligonos") or []:
+            coords = []
+            for par in anel:
+                if not isinstance(par, (list, tuple)) or len(par) < 2:
+                    continue
+                try:
+                    lat = float(par[0])
+                    lon = float(par[1])
+                except (TypeError, ValueError):
+                    continue
+                coords.append((lon, lat))
+            if len(coords) < 4:
+                continue
+            poly = Polygon(coords)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            polys.append(poly)
+        if not polys:
+            continue
+        geom = unary_union(polys) if len(polys) > 1 else polys[0]
+        if geom.is_empty:
+            continue
+        prontos.append(
+            {
+                "id": str(area.get("id") or area.get("nome") or ""),
+                "nome": str(area.get("nome") or ""),
+                "prep": prep(geom),
+                "tamanho": float(geom.area),
+            }
+        )
+    return prontos
+
+
+def _area_em(lat: float, lon: float, prontos: list[dict[str, Any]]) -> dict[str, Any] | None:
+    from shapely.geometry import Point
+
+    ponto = Point(float(lon), float(lat))
+    melhor = None
+    tamanho = None
+    for area in prontos:
+        if not area["prep"].covers(ponto):
+            continue
+        if tamanho is None or area["tamanho"] < tamanho:
+            tamanho = area["tamanho"]
+            melhor = area
+    return melhor
+
+
+def eventos_nas_areas(
+    pontos: list[tuple[str, float, float]],
+    prontos: list[dict[str, Any]],
+    *,
+    codigo: str,
+    placa: str,
+    data: str,
+    turno: str,
+) -> dict[str, Any]:
+    """Entrada, saída e permanência só quando um GPS real muda de polígono.
+
+    Um gap encerra a permanência no último ponto visto. Não cria saída,
+    porque ninguém observou o veículo do lado de fora.
+    """
+    ordenados = sorted(set(pontos), key=lambda item: (item[0], item[1], item[2]))
+    eventos: list[dict[str, Any]] = []
+    permanencias: list[dict[str, Any]] = []
+    aberta: dict[str, Any] | None = None
+    anterior: tuple[str, float, float] | None = None
+    atual: dict[str, Any] | None = None
+
+    def emitir(tipo: str, area: dict[str, Any], ponto: tuple[str, float, float]) -> None:
+        ts, lat, lon = ponto
+        eventos.append(
+            {
+                "tipo": tipo,
+                "veiculo": codigo,
+                "placa": placa,
+                "area_id": area["id"],
+                "area": area["nome"],
+                "data": data,
+                "turno": turno,
+                "ts": ts,
+                "lat": round(lat, 5),
+                "lon": round(lon, 5),
+            }
+        )
+
+    def encerrar(saida: tuple[str, float, float] | None, motivo: str) -> None:
+        nonlocal aberta
+        if aberta is None:
+            return
+        fim = aberta["ponto"]
+        saida_ts = ""
+        if motivo == "saida" and saida is not None:
+            saida_ts = saida[0]
+            emitir("saida", aberta["area"], saida)
+        permanencias.append(
+            {
+                "veiculo": codigo,
+                "placa": placa,
+                "area_id": aberta["area"]["id"],
+                "area": aberta["area"]["nome"],
+                "data": data,
+                "turno": turno,
+                "entrada": aberta["entrada"],
+                "fim": fim[0],
+                "saida": saida_ts,
+                "aberta": False,
+                "segundos": int(round(_segundos(aberta["entrada"], fim[0]))),
+            }
+        )
+        aberta = None
+
+    def abrir(area: dict[str, Any], ponto: tuple[str, float, float]) -> None:
+        nonlocal aberta
+        emitir("entrada", area, ponto)
+        aberta = {"area": area, "entrada": ponto[0], "ponto": ponto}
+
+    for ponto in ordenados:
+        if anterior is not None and _gap(anterior, ponto):
+            encerrar(None, "gap")
+            atual = None
+        area = _area_em(ponto[1], ponto[2], prontos)
+        novo = area["id"] if area else ""
+        velho = atual["id"] if atual else ""
+        if novo != velho:
+            if atual is not None:
+                encerrar(ponto, "saida")
+            atual = area
+            if area is not None:
+                abrir(area, ponto)
+        elif aberta is not None:
+            aberta["ponto"] = ponto
+        anterior = ponto
+    area_atual = ""
+    area_id = ""
+    if aberta is not None:
+        fim = aberta["ponto"]
+        permanencias.append(
+            {
+                "veiculo": codigo,
+                "placa": placa,
+                "area_id": aberta["area"]["id"],
+                "area": aberta["area"]["nome"],
+                "data": data,
+                "turno": turno,
+                "entrada": aberta["entrada"],
+                "fim": fim[0],
+                "saida": "",
+                "aberta": True,
+                "segundos": int(round(_segundos(aberta["entrada"], fim[0]))),
+            }
+        )
+        area_atual = aberta["area"]["nome"]
+        area_id = aberta["area"]["id"]
+    return {
+        "eventos": eventos,
+        "permanencias": permanencias,
+        "area": area_atual,
+        "area_id": area_id,
+    }
+
+
+def rotulo_operacional(
+    pulsos: int,
+    ultimo_gps: str,
+    situacao: str,
+    area: str,
+    *,
+    vivo: bool,
+    momento: datetime,
+) -> dict[str, str]:
+    """Sem GPS e sinal velho só no turno que ainda está aberto."""
+    if pulsos <= 0:
+        return {"sinal": "sem_rastreamento", "aviso": SEM_RASTREAMENTO, "rotulo": SEM_RASTREAMENTO}
+    from .live_sync import classificar_telemetria
+
+    if vivo and classificar_telemetria(ultimo_gps, momento) != "atualizado":
+        rotulo = SINAL_DESATUALIZADO if not area else f"{SINAL_DESATUALIZADO} · {area}"
+        return {"sinal": "desatualizado", "aviso": SINAL_DESATUALIZADO, "rotulo": rotulo}
+    if area:
+        return {
+            "sinal": "atualizado" if vivo else "historico",
+            "aviso": "",
+            "rotulo": f"Permanência em {area}",
+        }
+    return {
+        "sinal": "atualizado" if vivo else "historico",
+        "aviso": "",
+        "rotulo": situacao,
+    }

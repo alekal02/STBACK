@@ -330,6 +330,100 @@ def _linhas_visuais(brutos: list[tuple[str, float, float]]) -> list[list[list[fl
     return [_simplificar(grupo) for grupo in grupos if len(grupo) >= 2]
 
 
+def _poligonos_oficiais(areas: list[dict[str, Any]]) -> list[tuple[Any, Any]]:
+    """Anel oficial, com o mesmo reparo de preparar_areas. Sem buffer de aproximação."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+
+    saida: list[tuple[Any, Any]] = []
+    for area in areas or []:
+        polys = []
+        for anel in area.get("poligonos") or []:
+            coords = []
+            for par in anel:
+                if not isinstance(par, (list, tuple)) or len(par) < 2:
+                    continue
+                try:
+                    lat = float(par[0])
+                    lon = float(par[1])
+                except (TypeError, ValueError):
+                    continue
+                coords.append((lon, lat))
+            if len(coords) < 4:
+                continue
+            poly = Polygon(coords)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if not poly.is_empty:
+                polys.append(poly)
+        if not polys:
+            continue
+        geom = unary_union(polys) if len(polys) > 1 else polys[0]
+        if geom.is_empty:
+            continue
+        saida.append((geom, prep(geom)))
+    return saida
+
+
+def _iter_linhas(geom) -> list[Any]:
+    if geom is None or geom.is_empty:
+        return []
+    tipo = geom.geom_type
+    if tipo == "LineString":
+        return [geom] if len(geom.coords) >= 2 else []
+    if tipo == "MultiLineString":
+        return [parte for parte in geom.geoms if len(parte.coords) >= 2]
+    if tipo == "GeometryCollection":
+        linhas: list[Any] = []
+        for parte in geom.geoms:
+            linhas.extend(_iter_linhas(parte))
+        return linhas
+    return []
+
+
+def _coord_visual(lat: float, lon: float) -> list[float]:
+    return [round(float(lat), 6), round(float(lon), 6)]
+
+
+def trechos_internos_dificil(
+    pontos: list[tuple[str, float, float]],
+    areas: list[dict[str, Any]],
+) -> list[list[list[float]]]:
+    """Trechos só para desenho, dentro dos polígonos já escolhidos.
+
+    A quebra de 10 min ou 480 m é a de _linhas_visuais. Cada área é
+    intersectada à parte, e o vértice externo que a divisão por covers
+    manteria é cortado na borda. Não grava ponto e não liga áreas distintas.
+    """
+    from shapely.geometry import LineString
+
+    geoms = _poligonos_oficiais(areas)
+    if not geoms:
+        return []
+    saida: list[list[list[float]]] = []
+    for linha in _linhas_visuais(pontos):
+        coords = [(float(par[0]), float(par[1])) for par in linha if len(par) >= 2]
+        if len(coords) < 2:
+            continue
+        trilha = LineString([(lon, lat) for lat, lon in coords])
+        if trilha.is_empty:
+            continue
+        for geom, pronto in geoms:
+            for parte in _iter_linhas(trilha.intersection(geom)):
+                meio = parte.interpolate(0.5, normalized=True)
+                if not pronto.covers(meio):
+                    continue
+                desenho: list[list[float]] = []
+                for lon, lat in parte.coords:
+                    par = _coord_visual(lat, lon)
+                    if not desenho or par != desenho[-1]:
+                        desenho.append(par)
+                if len(desenho) >= 2:
+                    saida.append(desenho)
+    return saida
+
+
 def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
     dia, pedido = _dia_turno(data, turno)
     con = conectar()
@@ -432,6 +526,8 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         return codigo_que_contem(lat, lon, setores) is not None
 
     areas = areas_dificil()
+    areas_marcadas = anotar_programacao(areas, dia, pedido)
+    programadas = [area for area in areas_marcadas if area.get("programada")]
     from .live_sync import agora_brt
     from .live_turno import situacao_pelo_relogio
 
@@ -481,6 +577,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "pulsos": desenho["pulsos"],
                 "pontos_fora": desenho["pontos_fora"],
                 "trajeto": desenho["trajeto"],
+                "trechos_internos": trechos_internos_dificil(serie, programadas),
                 "na_rota": desenho["na_rota"],
                 "deslocamento": desenho["deslocamento"],
                 "dificil": desenho["dificil"],
@@ -498,7 +595,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         "turno": pedido,
         "fonte": "live_sync",
         "camada": "Áreas de difícil acesso",
-        "areas": anotar_programacao(areas, dia, pedido),
+        "areas": areas_marcadas,
         "veiculos": veiculos,
         "eventos": eventos,
         "resumo": {

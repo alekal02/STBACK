@@ -112,6 +112,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
         linhas_visuais = _linhas_visuais(serie)
         if linhas_visuais:
             veiculos.append({"placa": placa, "linhas": linhas_visuais})
+    _aplicar_recorte_basculante(veiculos, pontos, dia, pedido)
     detalhes = {}
     for row in linhas:
         codigo = str(row["codigo"] or "")
@@ -208,6 +209,35 @@ def _ordem_codigo(rota: dict[str, Any]) -> tuple[int, str]:
     return (int(achado.group(1)), achado.group(2))
 
 
+def _aplicar_recorte_basculante(
+    veiculos: list[dict[str, Any]],
+    pontos: dict[str, list[tuple[str, float, float]]],
+    dia: date,
+    turno: str,
+) -> None:
+    """No mapa geral, o basculante só leva o trecho interno. A linha da rota não muda."""
+    from .dificil_acesso import anotar_programacao, eh_basculante
+    from .live_mapa import areas_dificil, trechos_internos_dificil
+
+    programadas = [area for area in anotar_programacao(areas_dificil(), dia, turno) if area.get("programada")]
+    for item in veiculos:
+        placa = str(item.get("placa") or "")
+        if not eh_basculante(placa):
+            continue
+        item["trechos_internos"] = trechos_internos_dificil(pontos.get(placa) or [], programadas)
+
+
+def linhas_do_mapa_geral(veiculos: list[dict[str, Any]] | None) -> list:
+    """Basculante usa o recorte. As demais placas continuam com a trilha já montada."""
+    saida: list = []
+    for item in veiculos or []:
+        if "trechos_internos" in item:
+            saida.extend(item.get("trechos_internos") or [])
+        else:
+            saida.extend(item.get("linhas") or [])
+    return saida
+
+
 def bytes_do_pacote(pacote: dict[str, Any]) -> bytes:
     """Uma geração por vez. Não usa a trava do sincronizador de GPS."""
     if not _PDF.acquire(timeout=90):
@@ -278,7 +308,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
     feitos_geral, faltando_geral = _trechos_do_pacote(pacote)
     geral, itens_geral = _mapa(
         poligonos,
-        [linha for linhas in trilhas.values() for linha in linhas],
+        linhas_do_mapa_geral((pacote.get("trilhas") or {}).get("veiculos") or []),
         rotas,
         largura=1500,
         altura_px=1280,

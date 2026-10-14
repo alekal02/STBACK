@@ -1195,10 +1195,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_header("Access-Control-Allow-Origin", origem.rstrip("/"))
         self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token, If-None-Match",
+            "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token, If-None-Match, X-CSRF-Token",
         )
         self.send_header("Access-Control-Expose-Headers", "ETag, Content-Disposition")
 
@@ -1281,6 +1282,249 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             return
 
+    def _no_store(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        saida = {"Cache-Control": "no-store"}
+        saida.update(extra or {})
+        return saida
+
+    def _origem_do_pedido(self) -> str:
+        origem = (self.headers.get("Origin") or "").strip()
+        if origem:
+            return origem
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site != "cross-site":
+            return ""
+        ref = (self.headers.get("Referer") or "").strip()
+        if not ref:
+            return "cross-site"
+        partes = urlparse(ref)
+        if not partes.scheme or not partes.netloc:
+            return "cross-site"
+        return f"{partes.scheme}://{partes.netloc}"
+
+    def _origem_aceita(self) -> bool:
+        origem = self._origem_do_pedido()
+        if not origem:
+            return True
+        if origem == "cross-site":
+            return False
+        if _origem_permitida(origem):
+            return True
+        host = (self.headers.get("Host") or "").split(",")[0].strip().lower()
+        return bool(host) and urlparse(origem).netloc.lower() == host
+
+    def _cookie_acesso(self) -> str:
+        from .acesso import cookie_sessao
+
+        return cookie_sessao(self.headers.get("Cookie") or "")
+
+    def _ip_acesso(self) -> str:
+        from .acesso import ip_cliente
+
+        return ip_cliente(self.headers, self.client_address[0] if self.client_address else "")
+
+    def _cabecalho_cookie(self, token: str, max_age: int) -> str:
+        from .acesso import cabecalho_sessao, cookie_primeira_parte, pedido_seguro
+
+        return cabecalho_sessao(
+            token,
+            seguro=pedido_seguro(self.headers),
+            max_age=max_age,
+            primeira_parte=cookie_primeira_parte(self.headers),
+        )
+
+    def _gravar_cookie(self, token: str) -> dict[str, str]:
+        from .acesso import ABSOLUTE
+
+        return self._no_store(
+            {"Set-Cookie": self._cabecalho_cookie(token, int(ABSOLUTE.total_seconds()))}
+        )
+
+    def _apagar_cookie(self) -> dict[str, str]:
+        return self._no_store({"Set-Cookie": self._cabecalho_cookie("", 0)})
+
+    def _erro_acesso(self, exc: Exception) -> None:
+        from .acesso import ErroAcesso
+
+        if isinstance(exc, ErroAcesso):
+            self._json(exc.status, {"ok": False, "erro": exc.mensagem}, self._no_store())
+            return
+        self._json(500, {"ok": False, "erro": "Não foi possível concluir o acesso."}, self._no_store())
+
+    def _exigir(self, method: str, *, admin: bool = False) -> bool:
+        from .acesso import ErroAcesso, auth_exigida, csrf_confere, mensagem_sessao, negar, resolver, tocar
+
+        try:
+            if not admin and not auth_exigida():
+                return True
+        except Exception as exc:
+            print(f"Acesso: {exc}", flush=True)
+            self._json(503, {"ok": False, "erro": "Não foi possível verificar o acesso."}, self._no_store())
+            return False
+        if not self._origem_aceita():
+            self._json(403, {"ok": False, "erro": "Origem não permitida."}, self._no_store())
+            return False
+        try:
+            usuario, codigo = resolver(self._cookie_acesso(), ip=self._ip_acesso())
+        except Exception as exc:
+            print(f"Acesso: {exc}", flush=True)
+            self._json(503, {"ok": False, "erro": "Não foi possível verificar o acesso."}, self._no_store())
+            return False
+        if not usuario:
+            extra = self._apagar_cookie() if codigo in {"expirada", "revogada", "bloqueado"} else self._no_store()
+            self._json(401, {"ok": False, "erro": mensagem_sessao(codigo)}, extra)
+            return False
+        if method == "POST" and not csrf_confere(str(usuario.get("csrf") or ""), self.headers.get("X-CSRF-Token") or ""):
+            self._json(
+                403,
+                {"ok": False, "erro": "Não foi possível confirmar o envio. Atualize a página e tente de novo."},
+                self._no_store(),
+            )
+            return False
+        if admin and usuario.get("perfil") != "admin":
+            try:
+                negar(usuario, ip=self._ip_acesso())
+            except ErroAcesso:
+                pass
+            self._json(
+                403,
+                {"ok": False, "erro": "Somente administradores podem gerenciar usuários."},
+                self._no_store(),
+            )
+            return False
+        try:
+            tocar(int(usuario["sessao_id"]), int(usuario["id"]))
+        except Exception:
+            pass
+        return True
+
+    def _responder_sessao(self) -> None:
+        from .acesso import auth_exigida, mensagem_sessao, resolver
+
+        try:
+            exigida = auth_exigida()
+            usuario, codigo = resolver(self._cookie_acesso(), ip=self._ip_acesso())
+        except Exception as exc:
+            print(f"Acesso: {exc}", flush=True)
+            self._json(503, {"ok": False, "erro": "Não foi possível verificar o acesso."}, self._no_store())
+            return
+        if usuario:
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "exigida": exigida,
+                    "usuario": {
+                        "id": usuario["id"],
+                        "nome": usuario["nome"],
+                        "login": usuario["login"],
+                        "perfil": usuario["perfil"],
+                        "perfil_rotulo": "Administrador" if usuario["perfil"] == "admin" else "Operador",
+                    },
+                    "csrf": usuario["csrf"],
+                },
+                self._no_store(),
+            )
+            return
+        if not exigida and codigo == "ausente":
+            self._json(200, {"ok": True, "exigida": False, "usuario": None}, self._no_store())
+            return
+        extra = self._apagar_cookie() if codigo in {"expirada", "revogada", "bloqueado"} else self._no_store()
+        self._json(401, {"ok": False, "exigida": exigida, "erro": mensagem_sessao(codigo)}, extra)
+
+    def _responder_login(self, payload: Any) -> None:
+        from .acesso import entrar
+
+        if not self._origem_aceita():
+            self._json(403, {"ok": False, "erro": "Origem não permitida."}, self._no_store())
+            return
+        corpo = payload if isinstance(payload, dict) else {}
+        try:
+            resultado = entrar(
+                str(corpo.get("login") or corpo.get("usuario") or corpo.get("email") or ""),
+                str(corpo.get("senha") or ""),
+                ip=self._ip_acesso(),
+                user_agent=self.headers.get("User-Agent") or "",
+            )
+        except Exception as exc:
+            self._erro_acesso(exc)
+            return
+        self._json(
+            200,
+            {"ok": True, "usuario": resultado["usuario"], "csrf": resultado["csrf"]},
+            self._gravar_cookie(str(resultado["token"])),
+        )
+
+    def _responder_logout(self) -> None:
+        from .acesso import csrf_confere, encerrar, resolver
+
+        token = self._cookie_acesso()
+        try:
+            usuario, _codigo = resolver(token, ip=self._ip_acesso())
+        except Exception as exc:
+            print(f"Acesso: {exc}", flush=True)
+            usuario = None
+        if usuario and not csrf_confere(str(usuario.get("csrf") or ""), self.headers.get("X-CSRF-Token") or ""):
+            self._json(
+                403,
+                {"ok": False, "erro": "Não foi possível confirmar o envio. Atualize a página e tente de novo."},
+                self._no_store(),
+            )
+            return
+        try:
+            encerrar(token, ip=self._ip_acesso())
+        except Exception as exc:
+            self._erro_acesso(exc)
+            return
+        self._json(200, {"ok": True}, self._apagar_cookie())
+
+    def _responder_admin_get(self, path: str) -> None:
+        from .acesso import listar_auditoria, listar_usuarios
+
+        try:
+            if path == "/api/auth/auditoria":
+                self._json(200, {"ok": True, "eventos": listar_auditoria()}, self._no_store())
+                return
+            self._json(200, {"ok": True, "usuarios": listar_usuarios()}, self._no_store())
+        except Exception as exc:
+            self._erro_acesso(exc)
+
+    def _responder_admin_post(self, path: str, payload: Any) -> None:
+        from .acesso import ErroAcesso, criar_usuario, definir_bloqueio, editar_usuario, resolver
+
+        corpo = payload if isinstance(payload, dict) else {}
+        try:
+            usuario, _codigo = resolver(self._cookie_acesso(), ip=self._ip_acesso())
+            autor = int(usuario["id"]) if usuario else 0
+            if path == "/api/auth/usuarios":
+                self._json(200, {"ok": True, "usuario": criar_usuario(corpo)}, self._no_store())
+                return
+            if path == "/api/auth/usuarios/editar":
+                self._json(200, {"ok": True, "usuario": editar_usuario(corpo, autor_id=autor)}, self._no_store())
+                return
+            if path in {"/api/auth/usuarios/bloquear", "/api/auth/usuarios/ativar"}:
+                try:
+                    usuario_id = int(corpo.get("id"))
+                except (TypeError, ValueError) as exc:
+                    raise ErroAcesso(400, "Usuário inválido.") from exc
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "usuario": definir_bloqueio(
+                            usuario_id,
+                            path.endswith("/bloquear"),
+                            autor_id=autor,
+                        ),
+                    },
+                    self._no_store(),
+                )
+                return
+        except Exception as exc:
+            self._erro_acesso(exc)
+            return
+        self._json(404, {"ok": False, "erro": "Rota não encontrada."}, self._no_store())
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self._cors()
@@ -1290,6 +1534,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
+
+        if path == "/api/auth/sessao":
+            self._responder_sessao()
+            return
+        if path in {"/api/auth/usuarios", "/api/auth/auditoria"}:
+            if not self._exigir("GET", admin=True):
+                return
+            self._responder_admin_get(path)
+            return
+        if path not in {"/api/health", "/config.js", "/", "/index.html"}:
+            if not self._exigir("GET"):
+                return
 
         if path == "/api/health":
             self._json(200, {"ok": True})
@@ -1595,6 +1851,21 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(400, {"erro": "JSON inválido."})
             return
+
+        if path == "/api/auth/login":
+            self._responder_login(payload)
+            return
+        if path == "/api/auth/logout":
+            self._responder_logout()
+            return
+        if path.startswith("/api/auth/"):
+            if not self._exigir("POST", admin=True):
+                return
+            self._responder_admin_post(path, payload if isinstance(payload, dict) else {})
+            return
+        if path != "/api/chatbot/gerar":
+            if not self._exigir("POST"):
+                return
 
         acao = path.removeprefix("/api/")
         if acao == "parar":

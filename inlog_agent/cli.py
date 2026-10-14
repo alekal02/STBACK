@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
+import sys
 
 from .config import aplicar_periodo, load_settings, rotulo_periodo
 from .server import servir
@@ -100,6 +103,41 @@ def cmd_argos_rotas(
         print(f"Mapa: {arquivos['mapa']}")
 
 
+def cmd_criar_admin() -> None:
+    """Cria só o primeiro administrador. A senha não entra na linha de comando nem no código."""
+    from .acesso import ErroAcesso, criar_primeiro_admin
+
+    login = (os.getenv("AUTH_ADMIN_USUARIO") or "").strip()
+    senha = os.getenv("AUTH_ADMIN_SENHA") or ""
+    nome = (os.getenv("AUTH_ADMIN_NOME") or "").strip()
+    if not login:
+        if not sys.stdin.isatty():
+            print(
+                "Defina AUTH_ADMIN_USUARIO e AUTH_ADMIN_SENHA no ambiente e rode de novo. "
+                "Não passe a senha como argumento.",
+                flush=True,
+            )
+            raise SystemExit(1)
+        login = input("Usuário ou e-mail do administrador: ").strip()
+    if not senha:
+        if not sys.stdin.isatty():
+            print("Defina AUTH_ADMIN_SENHA no ambiente. Não passe a senha como argumento.", flush=True)
+            raise SystemExit(1)
+        senha = getpass.getpass("Senha do administrador: ")
+        confirma = getpass.getpass("Repita a senha: ")
+        if senha != confirma:
+            print("As senhas não conferem.", flush=True)
+            raise SystemExit(1)
+    try:
+        criado = criar_primeiro_admin(login, senha, nome)
+    except ErroAcesso as exc:
+        print(exc.mensagem, flush=True)
+        raise SystemExit(1) from exc
+    print(f"Administrador {criado['login']} criado.", flush=True)
+    print("A senha não foi gravada em arquivo nem impressa.", flush=True)
+    print("O login passa a ser exigido porque já existe um administrador ativo.", flush=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="inlog_agent",
@@ -158,6 +196,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["diurno", "noturno"],
         help="Diurno 06:00–18:59 ou noturno a partir das 19:00, só com os polígonos desse turno",
     )
+    sub.add_parser(
+        "criar-admin",
+        help="Cria o primeiro administrador. A senha vem de AUTH_ADMIN_SENHA ou é digitada, nunca de um argumento.",
+    )
     return parser
 
 
@@ -178,6 +220,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.comando == "servir":
         servir(porta=args.porta, host=args.host)
+        return
+    if args.comando == "criar-admin":
+        cmd_criar_admin()
         return
     if args.comando == "pdf":
         from .pdf import gerar_pdf_dia

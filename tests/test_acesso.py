@@ -16,9 +16,13 @@ import pytest
 from inlog_agent.acesso import (
     IDLE,
     RECENTE,
+    ErroAcesso,
     cabecalho_sessao,
     criar_primeiro_admin,
+    criar_usuario,
+    definir_bloqueio,
     entrar,
+    hash_senha,
 )
 from inlog_agent.server import Handler, SalaHTTPServer
 
@@ -482,3 +486,109 @@ def test_cli_cria_so_o_primeiro(ambiente, monkeypatch, capsys):
     usuario = autenticar("chefe@rota", SENHA_ADMIN)
     assert usuario["usuario"]["perfil"] == "admin"
     assert usuario["token"] not in saida
+
+
+def test_login_aceita_nome_ou_email(ambiente):
+    criar_primeiro_admin("admin@rota", SENHA_ADMIN, "Administrador")
+    gestor = criar_usuario(
+        {
+            "nome": "Gestor",
+            "login": "gestor@rota.example",
+            "senha": SENHA_OP,
+            "perfil": "operador",
+        }
+    )
+    con = sqlite3.connect(ambiente["auth"])
+    hash_antes = con.execute(
+        "SELECT senha_hash FROM usuario WHERE id = ?",
+        (gestor["id"],),
+    ).fetchone()[0]
+    con.close()
+
+    for identificador in (
+        "gestor",
+        "Gestor",
+        "  GESTOR  ",
+        "gestor@rota.example",
+        "GESTOR@Rota.Example",
+    ):
+        sessao = entrar(identificador, SENHA_OP)
+        assert sessao["usuario"]["id"] == gestor["id"]
+        assert sessao["usuario"]["login"] == "gestor@rota.example"
+        assert sessao["usuario"]["perfil"] == "operador"
+        assert "senha_hash" not in sessao["usuario"]
+
+    with pytest.raises(ErroAcesso) as recusa:
+        entrar("gestor", "senha-errada-1")
+    assert recusa.value.status == 401
+
+    admin = entrar("Administrador", SENHA_ADMIN)
+    assert admin["usuario"]["perfil"] == "admin"
+    assert entrar("admin@rota", SENHA_ADMIN)["usuario"]["id"] == admin["usuario"]["id"]
+
+    with pytest.raises(ErroAcesso) as conflito_login:
+        criar_usuario(
+            {
+                "nome": "Outro",
+                "login": "gestor",
+                "senha": SENHA_OP,
+                "perfil": "operador",
+            }
+        )
+    assert conflito_login.value.status == 409
+    with pytest.raises(ErroAcesso) as conflito_nome:
+        criar_usuario(
+            {
+                "nome": "gestor@rota.example",
+                "login": "outro@rota.example",
+                "senha": SENHA_OP,
+                "perfil": "operador",
+            }
+        )
+    assert conflito_nome.value.status == 409
+
+    con = sqlite3.connect(ambiente["auth"])
+    agora = "2026-10-14T00:00:00+00:00"
+    con.execute(
+        """
+        INSERT INTO usuario (
+            nome, login, senha_hash, perfil, ativo, criado_em, atualizado_em,
+            ultimo_login_em, ultimo_acesso_em
+        ) VALUES ('Fiscal', 'gestor', ?, 'operador', 1, ?, ?, '', '')
+        """,
+        (hash_senha("Outra-Senha-Fiscal-9"), agora, agora),
+    )
+    con.commit()
+    hash_meio = con.execute(
+        "SELECT senha_hash FROM usuario WHERE id = ?",
+        (gestor["id"],),
+    ).fetchone()[0]
+    con.close()
+    assert hash_meio == hash_antes
+
+    with pytest.raises(ErroAcesso) as ambiguo:
+        entrar("gestor", SENHA_OP)
+    assert ambiguo.value.status == 401
+    email = entrar("gestor@rota.example", SENHA_OP)
+    assert email["usuario"]["id"] == gestor["id"]
+
+    con = sqlite3.connect(ambiente["auth"])
+    con.execute("DELETE FROM usuario WHERE login = 'gestor'")
+    con.commit()
+    con.close()
+
+    definir_bloqueio(gestor["id"], True, autor_id=admin["usuario"]["id"])
+    with pytest.raises(ErroAcesso) as bloqueio_nome:
+        entrar("gestor", SENHA_OP)
+    assert bloqueio_nome.value.status == 403
+    with pytest.raises(ErroAcesso) as bloqueio_email:
+        entrar("gestor@rota.example", SENHA_OP)
+    assert bloqueio_email.value.status == 403
+
+    bruto = ambiente["auth"].read_bytes()
+    assert SENHA_OP.encode() not in bruto
+    assert SENHA_ADMIN.encode() not in bruto
+    assert hash_antes == sqlite3.connect(ambiente["auth"]).execute(
+        "SELECT senha_hash FROM usuario WHERE id = ?",
+        (gestor["id"],),
+    ).fetchone()[0]

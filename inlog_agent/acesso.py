@@ -298,14 +298,16 @@ def normalizar_login(valor: str) -> str:
     return " ".join((valor or "").split()).strip().lower()
 
 
-def validar_senha(senha: str, login: str) -> None:
+def validar_senha(senha: str, login: str, nome: str = "") -> None:
     if not isinstance(senha, str) or not senha or senha.strip() != senha:
         raise ErroAcesso(400, "Informe uma senha sem espaços no começo ou no fim.")
     if len(senha) < SENHA_MIN:
         raise ErroAcesso(400, "A senha precisa ter pelo menos 10 caracteres.")
     if len(senha) > SENHA_MAX:
         raise ErroAcesso(400, "A senha é longa demais.")
-    if senha.casefold() == normalizar_login(login):
+    proibidos = {normalizar_login(login), normalizar_login(nome)}
+    proibidos.discard("")
+    if senha.casefold() in proibidos:
         raise ErroAcesso(400, "A senha não pode ser igual ao usuário.")
 
 
@@ -400,9 +402,55 @@ def _falhas(con: sqlite3.Connection, *, login: str = "", ip: str = "") -> int:
     return int(row[0] if row else 0)
 
 
-def _limite(con: sqlite3.Connection, login: str, ip: str) -> None:
-    if login and _falhas(con, login=login) >= TENTATIVAS_LOGIN:
-        raise ErroAcesso(429, "Muitas tentativas. Aguarde 15 minutos e tente de novo.")
+def _chaves_conta(row: sqlite3.Row | dict[str, Any]) -> set[str]:
+    chaves = set()
+    for campo in ("login", "nome"):
+        chave = normalizar_login(str(row[campo] or ""))
+        if chave:
+            chaves.add(chave)
+    return chaves
+
+
+def _localizar(con: sqlite3.Connection, chave: str) -> list[sqlite3.Row]:
+    return [
+        row
+        for row in con.execute("SELECT * FROM usuario")
+        if chave in _chaves_conta(row)
+    ]
+
+
+def _recusar_conflito(
+    con: sqlite3.Connection,
+    login: str,
+    nome: str,
+    *,
+    exceto: int | None = None,
+) -> None:
+    novos = {normalizar_login(login), normalizar_login(nome)}
+    novos.discard("")
+    for row in con.execute("SELECT id, login, nome FROM usuario"):
+        if exceto is not None and int(row["id"]) == exceto:
+            continue
+        if novos & _chaves_conta(row):
+            raise ErroAcesso(409, "Já existe um usuário com esse acesso.")
+
+
+def _limite_chaves(con: sqlite3.Connection, chaves: set[str], ip: str) -> None:
+    marcas = tuple(sorted(chave for chave in chaves if chave))
+    if marcas:
+        desde = _iso(_agora() - JANELA_TENTATIVA)
+        pontos = ",".join("?" * len(marcas))
+        row = con.execute(
+            f"""
+            SELECT COUNT(*) FROM acesso_evento
+            WHERE tipo IN ('login_falha', 'login_bloqueado')
+              AND quando >= ?
+              AND login IN ({pontos})
+            """,
+            (desde, *marcas),
+        ).fetchone()
+        if int(row[0] if row else 0) >= TENTATIVAS_LOGIN:
+            raise ErroAcesso(429, "Muitas tentativas. Aguarde 15 minutos e tente de novo.")
     if ip and _falhas(con, ip=ip) >= TENTATIVAS_IP:
         raise ErroAcesso(429, "Muitas tentativas. Aguarde 15 minutos e tente de novo.")
 
@@ -439,13 +487,17 @@ def entrar(login_bruto: str, senha: str, *, ip: str = "", user_agent: str = "") 
     if len(senha) > SENHA_MAX:
         raise ErroAcesso(400, "Usuário ou senha incorretos.")
     with banco() as con:
-        _limite(con, login, ip)
-        row = con.execute("SELECT * FROM usuario WHERE login = ?", (login,)).fetchone()
+        achados = _localizar(con, login)
+        row = _foto(achados[0]) if len(achados) == 1 else None
+        chaves = {login}
+        if row is not None:
+            chaves |= _chaves_conta(row)
+        _limite_chaves(con, chaves, ip)
     armazenada = str(row["senha_hash"]) if row else _dummy()
     confere = verificar_senha(senha, armazenada)
     if row is None or not confere:
         with banco() as con:
-            _limite(con, login, ip)
+            _limite_chaves(con, chaves, ip)
             _evento(con, "login_falha", login=login, ip=ip, detalhe="credencial recusada")
         raise ErroAcesso(401, "Usuário ou senha incorretos.")
     if not int(row["ativo"]):
@@ -463,7 +515,7 @@ def entrar(login_bruto: str, senha: str, *, ip: str = "", user_agent: str = "") 
     csrf = secrets.token_urlsafe(32)
     agora = _agora()
     with banco() as con:
-        _limite(con, login, ip)
+        _limite_chaves(con, chaves, ip)
         con.execute(
             """
             INSERT INTO sessao (
@@ -658,7 +710,8 @@ def criar_primeiro_admin(login_bruto: str, senha: str, nome: str = "") -> dict[s
     login = normalizar_login(login_bruto)
     if not login or len(login) > 120 or any(c.isspace() for c in login):
         raise ErroAcesso(400, "Informe o usuário ou e-mail do administrador.")
-    validar_senha(senha, login)
+    nome_salvo = _limpar_texto(nome, 80) or login
+    validar_senha(senha, login, nome_salvo)
     senha_hash = hash_senha(senha)
     with banco() as con:
         if _admins_ativos(con):
@@ -666,8 +719,7 @@ def criar_primeiro_admin(login_bruto: str, senha: str, nome: str = "") -> dict[s
                 409,
                 "Já existe um administrador. Novos usuários entram pelo painel.",
             )
-        if con.execute("SELECT 1 FROM usuario WHERE login = ?", (login,)).fetchone():
-            raise ErroAcesso(409, "Já existe um usuário com esse acesso.")
+        _recusar_conflito(con, login, nome_salvo)
         agora = _iso()
         con.execute(
             """
@@ -676,7 +728,7 @@ def criar_primeiro_admin(login_bruto: str, senha: str, nome: str = "") -> dict[s
                 ultimo_login_em, ultimo_acesso_em
             ) VALUES (?, ?, ?, 'admin', 1, ?, ?, '', '')
             """,
-            (_limpar_texto(nome, 80) or login, login, senha_hash, agora, agora),
+            (nome_salvo, login, senha_hash, agora, agora),
         )
         row = con.execute("SELECT * FROM usuario WHERE login = ?", (login,)).fetchone()
         foto = _foto(row)
@@ -699,11 +751,10 @@ def criar_usuario(dados: dict[str, Any]) -> dict[str, Any]:
         raise ErroAcesso(400, "Informe o usuário ou e-mail.")
     perfil = _perfil(str(dados.get("perfil") or "operador"))
     senha = str(dados.get("senha") or "")
-    validar_senha(senha, login)
+    validar_senha(senha, login, nome)
     senha_hash = hash_senha(senha)
     with banco() as con:
-        if con.execute("SELECT 1 FROM usuario WHERE login = ?", (login,)).fetchone():
-            raise ErroAcesso(409, "Já existe um usuário com esse acesso.")
+        _recusar_conflito(con, login, nome)
         agora = _iso()
         con.execute(
             """
@@ -792,19 +843,14 @@ def editar_usuario(dados: dict[str, Any], *, autor_id: int) -> dict[str, Any]:
     if not login or len(login) > 120:
         raise ErroAcesso(400, "Informe o usuário ou e-mail.")
     if senha:
-        validar_senha(senha, login)
+        validar_senha(senha, login, nome)
     senha_hash = hash_senha(senha) if senha else ""
     with banco() as con:
         atual = con.execute("SELECT * FROM usuario WHERE id = ?", (usuario_id,)).fetchone()
         if atual is None:
             raise ErroAcesso(404, "Usuário não encontrado.")
         perfil_anterior = str(atual["perfil"])
-        outro = con.execute(
-            "SELECT 1 FROM usuario WHERE login = ? AND id != ?",
-            (login, usuario_id),
-        ).fetchone()
-        if outro:
-            raise ErroAcesso(409, "Já existe um usuário com esse acesso.")
+        _recusar_conflito(con, login, nome, exceto=usuario_id)
         era_admin = str(atual["perfil"]) == "admin" and int(atual["ativo"]) == 1
         continua_admin = perfil == "admin" and int(atual["ativo"]) == 1
         if era_admin and not continua_admin and _admins_ativos(con, exceto=usuario_id) == 0:

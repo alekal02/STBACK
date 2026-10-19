@@ -1,4 +1,4 @@
-"""Um único sincronizador do turno. O painel só lê o estado já gravado.
+"""Um único sincronizador do turno. O painel lê o estado gravado.
 
 Posição da frota: consulta leve, sem recalcular rota.
 GPS incremental: só o intervalo depois do último ponto, com folga.
@@ -318,6 +318,11 @@ def ler_painel(
     cab = view["turno"]
     rotas = view["rotas"]
     situacao = str(cab["situacao"] or "") if "situacao" in cab.keys() else ""
+    if situacao == "ENCERRADO":
+        try:
+            rotas = _exibir_cobertura_oficial(output_dir, dia, pedido, rotas)
+        except Exception as exc:
+            print(f"Cobertura oficial não exibida em {dia.isoformat()} {pedido}: {exc}", flush=True)
     if not situacao:
         situacao = "ENCERRADO" if not cab["aberto"] else "ABERTO"
     from .live_turno import resumo_guardado
@@ -1425,6 +1430,83 @@ def _recalcular_oficial(
     return rotas
 
 
+_EXIBICAO_OFICIAL: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}
+_EXIBICAO_LOCK = threading.Lock()
+
+
+def _rota_em_branco(rota: dict[str, Any]) -> bool:
+    if not rota.get("na_grade") or str(rota.get("grupo") or "") == "apoio":
+        return False
+    try:
+        percentual = float(rota.get("percentual") or 0)
+    except (TypeError, ValueError):
+        percentual = 0.0
+    placa = str(rota.get("placa") or "").strip()
+    return percentual <= 0 and placa in {"", "—"}
+
+
+def _exibir_cobertura_oficial(output_dir: Path, dia: date, turno: str, rotas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mostra a via oficial já calculável. Não grava turno, rota nem ponto."""
+    codigos = [str(rota.get("codigo") or "").upper() for rota in rotas if _rota_em_branco(rota) and str(rota.get("codigo") or "").strip()]
+    if not codigos:
+        return rotas
+    con = conectar()
+    try:
+        pontos = int(
+            con.execute(
+                "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ?",
+                (dia.isoformat(), turno),
+            ).fetchone()[0]
+        )
+        if pontos < 8:
+            return rotas
+        chave = (dia.isoformat(), turno, tuple(codigos), pontos)
+        agora = time.time()
+        with _EXIBICAO_LOCK:
+            guardado = _EXIBICAO_OFICIAL.get(chave)
+            if guardado and agora - guardado[0] < 120:
+                prontas = guardado[1]
+            else:
+                prontas = None
+        if prontas is None:
+            calculadas = {
+                str(item.get("codigo") or "").upper(): item
+                for item in _recalcular_oficial(con, output_dir, dia, turno, codigos)
+                if _via_percorrida(item)
+            }
+            with _EXIBICAO_LOCK:
+                _EXIBICAO_OFICIAL[chave] = (agora, calculadas)
+                prontas = calculadas
+    finally:
+        con.close()
+    if not prontas:
+        return rotas
+    saida = []
+    for rota in rotas:
+        codigo = str(rota.get("codigo") or "").upper()
+        nova = prontas.get(codigo) if _rota_em_branco(rota) else None
+        if not nova:
+            saida.append(rota)
+            continue
+        item = dict(rota)
+        for campo in (
+            "percentual",
+            "placa",
+            "veiculo",
+            "status",
+            "grupo",
+            "km_coleta",
+            "km_oficial",
+            "inicio",
+            "ultimo_gps",
+            "tempo_em_rota",
+        ):
+            if nova.get(campo) not in (None, ""):
+                item[campo] = nova.get(campo)
+        saida.append(item)
+    return saida
+
+
 def _via_percorrida(rota: dict[str, Any]) -> bool:
     """Cobertura de via oficial. Entrar no polígono, sem metro de rua, não executa."""
     bruto = rota.get("trechos_feitos") or "[]"
@@ -1756,8 +1838,14 @@ def _anexar_geometria_visual(
     from .live_report import _faixa_percentual
     from .verificacao import VEREDICTOS_OK
 
+    from .unificado import _norm
+
     por_codigo = {str(item.get("codigo") or "").upper(): item for item in setores}
-    pontos_placa = {str(item.get("placa") or ""): item.get("pontos") or [] for item in caminhoes}
+    pontos_placa: dict[str, list] = {}
+    for item in caminhoes:
+        chave = _norm(str(item.get("placa") or "")) or str(item.get("placa") or "")
+        if chave:
+            pontos_placa[chave] = item.get("pontos") or []
     for rota in rotas:
         codigo = str(rota.get("codigo") or "").upper()
         setor = por_codigo.get(codigo) or {}
@@ -1784,7 +1872,8 @@ def _anexar_geometria_visual(
             continue
         feitos: list[Any] = []
         faltando: list[Any] = []
-        pontos = pontos_placa.get(str(cam.get("placa") or "")) or []
+        chave_placa = _norm(str(cam.get("placa") or "")) or str(cam.get("placa") or "")
+        pontos = pontos_placa.get(chave_placa) or []
         ruas = setor.get("_ruas") or []
         if pontos and ruas:
             try:

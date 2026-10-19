@@ -317,3 +317,27 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     assert intacta["placa"] in {"", "—", None}
     assert intacta["status"] == "Não iniciada"
     assert copias == 1
+
+    from inlog_agent.live_report import ler_estado
+
+    painel = ler_estado(tmp_path, "2026-10-18", "diurno")
+    tela = next(rota for rota in painel["rotas"] if rota["codigo"] == "POLO INDUSTRIAL")
+    assert painel["situacao"] == "ENCERRADO"
+    assert painel["historico"] is True
+    assert tela["placa"] == "SDJ-6C47"
+    assert tela["status"] == "Parcial"
+    assert 80 <= tela["percentual"] < 95
+
+    con = conectar()
+    depois = con.execute(
+        """
+        SELECT t.situacao, r.percentual, r.placa, r.status
+        FROM turno t JOIN rota r ON r.data = t.data AND r.turno = t.turno
+        WHERE t.data = '2026-10-18' AND t.turno = 'diurno' AND r.codigo = 'POLO INDUSTRIAL'
+        """
+    ).fetchone()
+    con.close()
+    assert depois["situacao"] == "ENCERRADO"
+    assert depois["percentual"] == 0
+    assert depois["placa"] in {"", "—", None}
+    assert depois["status"] == "Não iniciada"

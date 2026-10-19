@@ -1308,11 +1308,14 @@ def gerar_relatorio_setores(
     linhas = [_linha(s) for s in na_grade] + [_linha(s) for s in apoios] + [_linha(s) for s in faltando] + [
         _linha(s) for s in feitos if not s.get("grade_do_dia")
     ]
-    vistos_linha = {
-        achado.group(1).upper()
-        for row in linhas
-        if (achado := re.search(r"\b(\d{2}[A-Z]{2,4})\b", str(row.get("Setor") or ""), re.I))
-    }
+    vistos_linha: set[str] = set()
+    for row in linhas:
+        codigo_linha = str(row.get("Codigo") or "").strip().upper()
+        if codigo_linha:
+            vistos_linha.add(codigo_linha)
+        achado = re.search(r"\b(\d{2}[A-Z]{2,4})\b", str(row.get("Setor") or ""), re.I)
+        if achado:
+            vistos_linha.add(achado.group(1).upper())
     for setor in recuperadas:
         codigo = str(setor.get("codigo") or "").upper()
         if codigo and codigo not in vistos_linha:
@@ -1713,6 +1716,7 @@ def _linha(setor: dict[str, Any]) -> dict[str, str]:
     status = setor.get("status") or ""
     rotulo, _cls = _rotulo_pct(pct, status)
     return {
+        "Codigo": str(setor.get("codigo") or "").strip().upper(),
         "Setor": setor.get("setor") or "",
         "Rota": setor.get("frequencia") or "",
         "Status": rotulo,

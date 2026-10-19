@@ -160,15 +160,28 @@ def _mapa_url(output_dir: Path, pasta: Path | None) -> str:
         return ""
 
 
+def _codigo_da_linha(linha: dict[str, Any]) -> str:
+    """Código oficial. POLO INDUSTRIAL não cabe em 00XX e não pode virar vazio."""
+    explicito = str(linha.get("Codigo") or linha.get("codigo") or "").strip()
+    if explicito:
+        return explicito.upper()
+    setor = str(linha.get("Setor") or "").strip()
+    achado = _CODIGO.search(setor)
+    if achado:
+        return achado.group(1).upper()
+    if setor and " - " not in setor:
+        return setor.upper()
+    return ""
+
+
 def _rota(linha: dict[str, Any]) -> dict[str, Any]:
     setor = str(linha.get("Setor") or "")
-    achado = _CODIGO.search(setor)
     status = str(linha.get("Status") or "Não iniciada")
     grupo = _GRUPOS.get(status, "outro")
     inicio = str(linha.get("Início") or "")
     fim = str(linha.get("Fim") or "")
     return {
-        "codigo": achado.group(1).upper() if achado else "",
+        "codigo": _codigo_da_linha(linha),
         "rota": setor,
         "frequencia": str(linha.get("Rota") or ""),
         "veiculo": str(linha.get("Veículo") or "—"),

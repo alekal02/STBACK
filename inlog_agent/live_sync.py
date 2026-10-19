@@ -1401,9 +1401,286 @@ def _recalcular_oficial(con, output_dir: Path, dia: date, turno: str, codigos: l
     if not caminhoes:
         return []
     setores = analisar_codigos(dia, caminhoes, set(codigos), turno)
-    rotas = [_rota(_linha(setor)) for setor in setores]
+    rotas = []
+    for setor in setores:
+        rota = _rota(_linha(setor))
+        codigo = str(setor.get("codigo") or rota.get("codigo") or "").strip().upper()
+        if codigo:
+            rota["codigo"] = codigo
+        rotas.append(rota)
     _anexar_geometria_visual(setores, caminhoes, rotas)
     return rotas
+
+
+def _via_percorrida(rota: dict[str, Any]) -> bool:
+    """Cobertura de via oficial. Entrar no polígono, sem metro de rua, não executa."""
+    bruto = rota.get("trechos_feitos") or "[]"
+    if isinstance(bruto, str):
+        try:
+            feitos = json.loads(bruto)
+        except json.JSONDecodeError:
+            feitos = []
+    else:
+        feitos = bruto
+    if not isinstance(feitos, list) or not feitos:
+        return False
+    try:
+        return float(rota.get("percentual") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _historico_da_placa(placa: str, inicio: datetime, fim: datetime) -> list[dict[str, Any]]:
+    """GPS de uma placa. As credenciais ficam no processo e não entram no retorno."""
+    from .config import load_settings
+    from .dificil_acesso import norm_placa
+    from .fulltrack_api import _norm_placa, _ponto, historico_veiculo, listar_veiculos, login
+
+    settings = load_settings()
+    token = login(settings)
+    alvo = norm_placa(placa)
+    veiculo_id = ""
+    nome = placa
+    for item in listar_veiculos(settings, token):
+        if _norm_placa(str(item.get("ras_vei_placa") or "")) == alvo:
+            veiculo_id = str(item.get("ras_vei_id") or "")
+            nome = str(item.get("ras_vei_veiculo") or placa)
+            break
+    if not veiculo_id:
+        raise RuntimeError(f"Placa {placa} não está no cadastro Fulltrack.")
+    pontos = []
+    for evento in historico_veiculo(settings, veiculo_id, inicio, fim, token=token):
+        ponto = _ponto(evento, nome)
+        if ponto:
+            pontos.append(ponto)
+    return pontos
+
+
+def _metros_da_rota(rota: dict[str, Any]) -> float:
+    bruto = rota.get("trechos_feitos") or "[]"
+    if isinstance(bruto, str):
+        try:
+            feitos = json.loads(bruto)
+        except json.JSONDecodeError:
+            feitos = []
+    else:
+        feitos = bruto
+    if not isinstance(feitos, list):
+        return 0.0
+    return round(_metros_trechos(feitos), 1)
+
+
+def reprocessar_rotas_historicas(
+    output_dir: Path,
+    data: str | None,
+    turno: str | None,
+    codigos: list[str],
+    *,
+    buscar_historico: Callable[..., list[dict[str, Any]]] | None = None,
+    placas: list[str] | None = None,
+    aplicar: bool = False,
+    usar_fulltrack: bool = False,
+) -> dict[str, Any]:
+    """Prévia por padrão. Só grava com aplicar=True, e apenas os códigos pedidos.
+
+    Não reabre o turno, não apaga ponto nem rota e não grava outra rota.
+    Ponto repetido entra com INSERT OR IGNORE. Sem metro de via oficial, a rota fica como estava.
+    """
+    from .config import parse_data
+    from .live_db import (
+        conectar,
+        gravar_rotas,
+        inserir_pontos,
+        marcar_placa,
+    )
+    from .live_turno import _auditar, ponto_pertence
+
+    dia = parse_data(data)
+    pedido = (turno or "").strip().lower()
+    pedidos = [str(codigo or "").strip().upper() for codigo in codigos if str(codigo or "").strip()]
+    if dia is None or pedido not in {"diurno", "noturno"} or not pedidos:
+        return {"ok": False, "aplicado": False, "erro": "Data, turno ou rota inválidos."}
+    con = conectar()
+    try:
+        cab = con.execute(
+            "SELECT situacao, aberto, fechado_em, resumo_json FROM turno WHERE data = ? AND turno = ?",
+            (dia.isoformat(), pedido),
+        ).fetchone()
+        if cab is None:
+            return {"ok": False, "aplicado": False, "erro": "Turno não encontrado."}
+        antes_turno = {
+            "situacao": str(cab["situacao"] or ""),
+            "aberto": int(cab["aberto"] or 0),
+            "fechado_em": str(cab["fechado_em"] or ""),
+            "resumo_json": str(cab["resumo_json"] or ""),
+        }
+        outras = {
+            str(row["codigo"]): (row["percentual"], row["placa"], row["status"])
+            for row in con.execute(
+                "SELECT codigo, percentual, placa, status FROM rota WHERE data = ? AND turno = ? AND codigo NOT IN ({})".format(
+                    ",".join("?" * len(pedidos))
+                ),
+                (dia.isoformat(), pedido, *pedidos),
+            )
+        }
+        anteriores = {
+            str(row["codigo"]): {
+                "percentual": row["percentual"],
+                "placa": row["placa"],
+                "status": row["status"],
+            }
+            for row in con.execute(
+                "SELECT codigo, percentual, placa, status FROM rota WHERE data = ? AND turno = ? AND codigo IN ({})".format(
+                    ",".join("?" * len(pedidos))
+                ),
+                (dia.isoformat(), pedido, *pedidos),
+            )
+        }
+        pontos_antes = int(
+            con.execute(
+                "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ?",
+                (dia.isoformat(), pedido),
+            ).fetchone()[0]
+        )
+        novos = 0
+        if usar_fulltrack and buscar_historico is None:
+            if not placas:
+                return {"ok": False, "aplicado": False, "previa": not aplicar, "erro": "Informe a placa. A consulta não varre a frota."}
+            buscar_historico = lambda placa, _vid, inicio, fim: _historico_da_placa(placa, inicio, fim)
+        if buscar_historico is not None and placas:
+            from .live_turno import fim_operacional, inicio_operacional
+
+            inicio = inicio_operacional(dia, pedido)
+            fim = fim_operacional(dia, pedido)
+            for placa in placas:
+                chave = str(placa or "").strip().upper()
+                if not chave:
+                    continue
+                try:
+                    eventos = buscar_historico(chave, "", inicio, fim) or []
+                except Exception as exc:
+                    return {"ok": False, "aplicado": False, "erro": str(exc), "preservado": True}
+                recebidos = []
+                for item in eventos:
+                    if not isinstance(item, dict):
+                        continue
+                    quando = str(item.get("timestamp") or item.get("ts") or "")
+                    if not ponto_pertence(quando, dia, pedido):
+                        continue
+                    recebidos.append(item)
+                if not recebidos:
+                    continue
+                novos += inserir_pontos(con, dia.isoformat(), pedido, chave, recebidos)
+                marcar_placa(con, dia.isoformat(), pedido, chave, veiculo=chave)
+        pontos_gps = int(
+            con.execute(
+                "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ?",
+                (dia.isoformat(), pedido),
+            ).fetchone()[0]
+        )
+        calculadas = _recalcular_oficial(con, output_dir, dia, pedido, pedidos)
+        por_codigo = {str(item.get("codigo") or "").upper(): item for item in calculadas}
+        confirmadas = [por_codigo[codigo] for codigo in pedidos if codigo in por_codigo and _via_percorrida(por_codigo[codigo])]
+        if aplicar and confirmadas:
+            gravar_rotas(con, dia.isoformat(), pedido, confirmadas)
+        for codigo, foto in outras.items():
+            agora = con.execute(
+                "SELECT percentual, placa, status FROM rota WHERE data = ? AND turno = ? AND codigo = ?",
+                (dia.isoformat(), pedido, codigo),
+            ).fetchone()
+            if agora is None or (agora["percentual"], agora["placa"], agora["status"]) != foto:
+                con.rollback()
+                return {"ok": False, "aplicado": False, "erro": "Outra rota seria alterada. Nada foi gravado."}
+        con.execute(
+            """
+            UPDATE turno SET situacao = ?, aberto = ?, fechado_em = ?, resumo_json = ?
+            WHERE data = ? AND turno = ?
+            """,
+            (
+                antes_turno["situacao"],
+                antes_turno["aberto"],
+                antes_turno["fechado_em"],
+                antes_turno["resumo_json"],
+                dia.isoformat(),
+                pedido,
+            ),
+        )
+        def _contagem(placa: str) -> int:
+            chave = str(placa or "").strip().upper()
+            if not chave:
+                return 0
+            return int(
+                con.execute(
+                    "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ? AND placa = ?",
+                    (dia.isoformat(), pedido, chave),
+                ).fetchone()[0]
+            )
+
+        fichas = {}
+        for codigo in pedidos:
+            rota = por_codigo.get(codigo) or {}
+            placa = str(rota.get("placa") or "")
+            fichas[codigo] = {
+                "percentual_anterior": (anteriores.get(codigo) or {}).get("percentual", 0),
+                "percentual": float(rota.get("percentual") or 0) if _via_percorrida(rota) else 0.0,
+                "placa": placa if _via_percorrida(rota) else "",
+                "status": str(rota.get("status") or "") if _via_percorrida(rota) else str((anteriores.get(codigo) or {}).get("status") or ""),
+                "metros_cobertos": _metros_da_rota(rota) if _via_percorrida(rota) else 0.0,
+                "pontos_placa": _contagem(placa) if placa else 0,
+            }
+        if not aplicar:
+            con.rollback()
+            return {
+                "ok": True,
+                "aplicado": False,
+                "previa": True,
+                "preservado": True,
+                "situacao": antes_turno["situacao"],
+                "pontos_gps": pontos_gps,
+                "pontos_antes": pontos_antes,
+                "pontos_novos": novos,
+                "codigos": pedidos,
+                "atualizadas": [],
+                "rotas": fichas,
+            }
+        quando = datetime.now().isoformat(timespec="seconds")
+        for rota in confirmadas:
+            codigo = str(rota.get("codigo") or "").upper()
+            _auditar(
+                con,
+                dia,
+                pedido,
+                "REPROCESSAMENTO_GPS",
+                "historico",
+                json.dumps(anteriores.get(codigo) or {}, ensure_ascii=False, default=str),
+                json.dumps(
+                    {
+                        "percentual": rota.get("percentual"),
+                        "placa": rota.get("placa"),
+                        "status": rota.get("status"),
+                        "metros_cobertos": fichas.get(codigo, {}).get("metros_cobertos", 0),
+                    },
+                    ensure_ascii=False,
+                ),
+                quando,
+                None,
+            )
+        con.commit()
+        return {
+            "ok": True,
+            "aplicado": bool(confirmadas),
+            "previa": False,
+            "preservado": True,
+            "situacao": antes_turno["situacao"],
+            "pontos_gps": pontos_gps,
+            "pontos_antes": pontos_antes,
+            "pontos_novos": novos,
+            "codigos": pedidos,
+            "atualizadas": [str(item.get("codigo") or "").upper() for item in confirmadas],
+            "rotas": fichas,
+        }
+    finally:
+        con.close()
 
 
 def _par_latlon(ponto: Any) -> tuple[float | None, float | None]:
@@ -1484,11 +1761,18 @@ def _anexar_geometria_visual(
                 )
                 feitos = compactar_trechos(cob.get("trechos_feitos"))
                 faltando = compactar_trechos(cob.get("trechos_faltando"))
+                metros_feitos = _metros_trechos(feitos)
                 rota["percentual"] = percentual_das_vias(
-                    _metros_trechos(feitos),
+                    metros_feitos,
                     _metros_trechos(faltando),
                 )
-                if str(rota.get("grupo") or "") != "apoio":
+                if metros_feitos <= 0:
+                    rota["placa"] = ""
+                    rota["veiculo"] = ""
+                    rota["percentual"] = 0.0
+                    if str(rota.get("grupo") or "") != "apoio":
+                        rota["grupo"], rota["status"] = _faixa_percentual(0)
+                elif str(rota.get("grupo") or "") != "apoio":
                     rota["grupo"], rota["status"] = _faixa_percentual(rota["percentual"])
             except Exception as exc:
                 print(f"mapa visual: trechos de {codigo} não gravados ({exc})", flush=True)

@@ -286,6 +286,13 @@ def _gps_desatualizado(telemetria: str, instante: str) -> bool:
     return classificar_telemetria(instante) != "atualizado"
 
 
+def _media_execucao(previstas: list[dict[str, Any]]) -> int:
+    """Média inteira das rotas da grade, já sem apoio. A mesma conta dos cards e da faixa."""
+    if not previstas:
+        return 0
+    return round(sum(float(r.get("percentual") or 0) for r in previstas) / len(previstas))
+
+
 def _faixa_percentual(valor: Any) -> tuple[str, str]:
     """0% não iniciada, acima de 0 e abaixo de 100 parcial, 100 concluída."""
     try:
@@ -324,6 +331,7 @@ def _exibir_classificacao(estado: dict[str, Any]) -> dict[str, Any]:
     resumo["inicio"] = 0
     resumo["passagem"] = 0
     resumo["apoios"] = sum(1 for r in rotas if isinstance(r, dict) and r.get("grupo") == "apoio")
+    resumo["percentual_geral"] = _media_execucao(previstas)
     estado["rotas"] = rotas
     estado["resumo"] = resumo
     return estado
@@ -334,7 +342,7 @@ def _resumo(rotas: list[dict[str, Any]]) -> dict[str, Any]:
     def n(grupo: str, base: list[dict[str, Any]] | None = None) -> int:
         fonte = previstas if base is None else base
         return sum(1 for r in fonte if r["grupo"] == grupo)
-    media = round(sum(r["percentual"] for r in previstas) / len(previstas)) if previstas else 0
+    media = _media_execucao(previstas)
     return {
         "previstas": len(previstas),
         "concluidas": n("concluida"),

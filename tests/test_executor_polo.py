@@ -327,6 +327,9 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     assert tela["placa"] == "SDJ-6C47"
     assert tela["status"] == "Parcial"
     assert 80 <= tela["percentual"] < 95
+    assert painel["resumo"]["percentual_geral"] == round(tela["percentual"])
+    assert painel["resumo"]["parciais"] == 1
+    assert painel["resumo"]["nao_iniciadas"] == 0
 
     con = conectar()
     depois = con.execute(
@@ -341,3 +344,29 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     assert depois["percentual"] == 0
     assert depois["placa"] in {"", "—", None}
     assert depois["status"] == "Não iniciada"
+
+
+def test_execucao_geral_segue_as_rotas_exibidas():
+    from inlog_agent.live_report import _exibir_classificacao
+
+    estado = _exibir_classificacao(
+        {
+            "resumo": {"percentual_geral": 0, "nao_iniciadas": 3, "previstas": 3},
+            "rotas": [
+                {"codigo": "POLO INDUSTRIAL", "na_grade": True, "grupo": "nao", "percentual": 89, "status": "Não iniciada"},
+                {"codigo": "01AD", "na_grade": True, "grupo": "nao", "percentual": 0, "status": "Não iniciada"},
+                {"codigo": "02AD", "na_grade": True, "grupo": "apoio", "percentual": 30, "status": "Apoio"},
+                {"codigo": "EXTRA", "na_grade": False, "grupo": "parcial", "percentual": 100, "status": "Parcial"},
+            ],
+        }
+    )
+    resumo = estado["resumo"]
+    assert resumo["percentual_geral"] == round((89 + 0) / 2)
+    assert resumo["parciais"] == 1
+    assert resumo["nao_iniciadas"] == 1
+    assert resumo["apoios"] == 1
+    assert resumo["previstas"] == 2
+    polo = next(rota for rota in estado["rotas"] if rota["codigo"] == "POLO INDUSTRIAL")
+    assert polo["grupo"] == "parcial"
+    assert polo["status"] == "Parcial"
+    assert polo["percentual"] == 89

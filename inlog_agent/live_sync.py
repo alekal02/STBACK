@@ -1373,7 +1373,14 @@ def _limites(dia: date, turno: str) -> list[dict[str, Any]]:
     return saida
 
 
-def _recalcular_oficial(con, output_dir: Path, dia: date, turno: str, codigos: list[str]) -> list[dict[str, Any]]:
+def _recalcular_oficial(
+    con,
+    output_dir: Path,
+    dia: date,
+    turno: str,
+    codigos: list[str],
+    placas_executoras: set[str] | None = None,
+) -> list[dict[str, Any]]:
     from .live_report import _rota
     from .unificado import _linha, analisar_codigos
 
@@ -1400,7 +1407,13 @@ def _recalcular_oficial(con, output_dir: Path, dia: date, turno: str, codigos: l
         )
     if not caminhoes:
         return []
-    setores = analisar_codigos(dia, caminhoes, set(codigos), turno)
+    setores = analisar_codigos(
+        dia,
+        caminhoes,
+        set(codigos),
+        turno,
+        placas_executoras=placas_executoras,
+    )
     rotas = []
     for setor in setores:
         rota = _rota(_linha(setor))
@@ -1578,7 +1591,17 @@ def reprocessar_rotas_historicas(
                 (dia.isoformat(), pedido),
             ).fetchone()[0]
         )
-        calculadas = _recalcular_oficial(con, output_dir, dia, pedido, pedidos)
+        from .unificado import _norm
+
+        autorizadas = {_norm(str(placa)) for placa in (placas or []) if _norm(str(placa))}
+        calculadas = _recalcular_oficial(
+            con,
+            output_dir,
+            dia,
+            pedido,
+            pedidos,
+            placas_executoras=autorizadas or None,
+        )
         por_codigo = {str(item.get("codigo") or "").upper(): item for item in calculadas}
         confirmadas = [por_codigo[codigo] for codigo in pedidos if codigo in por_codigo and _via_percorrida(por_codigo[codigo])]
         if aplicar and confirmadas:
@@ -1731,6 +1754,7 @@ def _anexar_geometria_visual(
     from .cobertura import avaliar_cobertura, percentual_das_vias
     from .live_mapa import compactar_trechos
     from .live_report import _faixa_percentual
+    from .verificacao import VEREDICTOS_OK
 
     por_codigo = {str(item.get("codigo") or "").upper(): item for item in setores}
     pontos_placa = {str(item.get("placa") or ""): item.get("pontos") or [] for item in caminhoes}
@@ -1747,6 +1771,17 @@ def _anexar_geometria_visual(
         rota["saida_lat"] = saida_lat
         rota["saida_lon"] = saida_lon
         rota["saida_hora"] = str(cam.get("hora_fim") or "")
+        status_setor = str(setor.get("status") or "")
+        if status_setor == "APOIO" or str(rota.get("grupo") or "") == "apoio":
+            pass
+        elif status_setor not in VEREDICTOS_OK:
+            rota["placa"] = ""
+            rota["veiculo"] = ""
+            rota["percentual"] = 0.0
+            rota["trechos_feitos"] = "[]"
+            rota["trechos_faltando"] = "[]"
+            rota["grupo"], rota["status"] = _faixa_percentual(0)
+            continue
         feitos: list[Any] = []
         faltando: list[Any] = []
         pontos = pontos_placa.get(str(cam.get("placa") or "")) or []

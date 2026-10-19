@@ -14,10 +14,13 @@ from typing import Any
 from .cobertura import (
     BORDA_M,
     DENTRO_M,
+    FEITA_MIN,
     _xy,
+    avaliar_cobertura,
     cobertura_espacial,
     km_gps,
     passagens_na_rota,
+    percentual_das_vias,
     preparar_pontos,
     recortar_pontos,
     separar_dentro_borda,
@@ -380,6 +383,8 @@ def analisar_codigos(
     caminhoes: list[dict[str, Any]],
     codigos: set[str],
     turno: str | None = None,
+    *,
+    placas_executoras: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """O mesmo cálculo de analisar_setores, só nos códigos que receberam GPS novo."""
     pedidos = {str(codigo or "").upper() for codigo in codigos if str(codigo or "").strip()}
@@ -404,7 +409,7 @@ def analisar_codigos(
         return []
 
     def _uma(setor: dict[str, Any]) -> dict[str, Any]:
-        row = _analisar_setor(setor, caminhoes, dia)
+        row = _analisar_setor(setor, caminhoes, dia, placas_executoras=placas_executoras)
         row["grade_do_dia"] = _freq_do_dia(str(setor.get("frequencia") or ""), dia)
         return row
 
@@ -494,7 +499,13 @@ def _txt_caminhoes(setor: dict[str, Any]) -> str:
     return " · ".join(partes)
 
 
-def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia: date) -> dict[str, Any]:
+def _analisar_setor(
+    setor: dict[str, Any],
+    caminhoes: list[dict[str, Any]],
+    dia: date,
+    *,
+    placas_executoras: set[str] | None = None,
+) -> dict[str, Any]:
     codigo = str(setor.get("codigo") or "")
     geom = setor.get("geom")
     if "_zona" in setor:
@@ -583,6 +594,22 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
             melhor_pts=melhor_pts,
             melhor_km=melhor_km,
         )
+        oficial = _cobertura_vias_oficiais(cam.get("pontos") or uso, setor)
+        if oficial is not None:
+            execucao = _execucao_das_vias(oficial["percentual"], oficial["metros"])
+            if execucao == "PASSAGEM":
+                motivo = (
+                    "passagem: GPS no polígono sem cobertura única das vias oficiais"
+                    if float(oficial["metros"]) <= 0
+                    else "passagem: presença nas vias oficiais sem assumir a execução da rota"
+                )
+            elif execucao == "FEITA":
+                motivo = "cobertura das vias oficiais confirma a coleta neste setor"
+            else:
+                motivo = "cobertura parcial das vias oficiais, com permanência na rota"
+        else:
+            execucao = analise["execucao"]
+            motivo = analise["motivo"]
         visitas = passagens_na_rota(cam.get("pontos") or [], setor.get("geom"), dia)
         if visitas:
             trechos = [v["trecho"] for v in visitas if len(v.get("trecho") or []) >= 2]
@@ -611,12 +638,14 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
             "pontos_no_setor": len(uso),
             "pontos_dentro": len(dentro),
             "km_coleta": round(float(cob.get("km_coleta") or km_rua), 3),
-            "percentual": float(cob.get("percentual") or 0),
+            "percentual": float(oficial["percentual"] if oficial is not None else cob.get("percentual") or 0),
+            "percentual_vias": None if oficial is None else oficial["percentual"],
+            "metros_vias": None if oficial is None else oficial["metros"],
             "area_pct": cob.get("area_pct"),
             "veredicto_gps": cob.get("veredicto"),
             "confianca": cob.get("confianca"),
-            "execucao": analise["execucao"],
-            "motivo": analise["motivo"],
+            "execucao": execucao,
+            "motivo": motivo,
             "horario": horario,
             "hora_inicio": pulso.get("hora_inicio") or "",
             "hora_fim": pulso.get("hora_fim") or "",
@@ -630,7 +659,12 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
         }
         candidatos.append(row)
 
-    coletaram = [c for c in candidatos if c["execucao"] in VEREDICTOS_OK]
+    melhor_metros = _melhor_metros_oficiais(candidatos)
+    coletaram = [
+        c
+        for c in candidatos
+        if _pode_executar(c, melhor_metros, placas_executoras)
+    ]
     base["candidatos"] = [
         {k: v for k, v in c.items() if k not in {"clip", "trechos", "lacunas"}}
         for c in sorted(candidatos, key=lambda r: r["percentual"], reverse=True)
@@ -642,37 +676,26 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
             for c in sorted(candidatos, key=lambda r: r["percentual"], reverse=True)
         )
         base["status"] = "PASSAGEM"
-        base["percentual"] = melhor["percentual"]
+        base["percentual"] = _percentual_de_passagem(melhor)
         base["confianca"] = melhor.get("confianca") or "baixa"
         base["motivo"] = (
             f"passagem (não coleta) de {placas}: "
-            f"{melhor['pontos_no_setor']} pts, {melhor['percentual']:.0f}% — {melhor['motivo']}"
+            f"{melhor['pontos_no_setor']} pts, {base['percentual']:.0f}% — {melhor['motivo']}"
         )
-        base["caminhao"] = {
-            "id": melhor["id"],
-            "veiculo": melhor["veiculo"],
-            "placa": melhor["placa"],
-            "inlog": melhor.get("inlog"),
-            "fonte": melhor["fonte"],
-            "fonte_nome": melhor["fonte_nome"],
-            "pontos_no_setor": melhor["pontos_no_setor"],
-            "pontos_dentro": melhor.get("pontos_dentro"),
-            "km_coleta": melhor["km_coleta"],
-            "horario": melhor.get("horario") or "",
-            "hora_inicio": melhor.get("hora_inicio") or "",
-            "hora_fim": melhor.get("hora_fim") or "",
-            "ponto_inicio": melhor.get("ponto_inicio") or [],
-            "ponto_fim": melhor.get("ponto_fim") or [],
-            "passagens": melhor.get("passagens") or [],
-            "trechos": melhor.get("trechos") or [],
-            "lacunas": melhor.get("lacunas") or [],
-            "evidencias": "passagem, não coleta",
-            "tortuosidade": melhor.get("tortuosidade"),
-        }
+        base["caminhao"] = _ficha_caminhao(melhor, "passagem, não coleta")
         base["caminhoes"] = _montar_caminhoes(candidatos, "PASSAGEM", melhor)
         return base
 
     vencedor, evidencias = _escolher_vencedor(coletaram)
+    if str(vencedor.get("execucao") or "").upper() not in VEREDICTOS_OK:
+        melhor = max(candidatos, key=lambda r: (float(r.get("percentual") or 0), r.get("pontos_no_setor") or 0))
+        base["status"] = "PASSAGEM"
+        base["percentual"] = _percentual_de_passagem(melhor)
+        base["caminhao"] = _ficha_caminhao(melhor, "passagem, não coleta")
+        base["motivo"] = f"passagem, não coleta — {melhor.get('placa') or melhor.get('veiculo')}"
+        base["caminhoes"] = _montar_caminhoes(candidatos, "PASSAGEM", melhor)
+        return base
+    _rebaixar_passagens(candidatos, vencedor)
     base.update(
         {
             "status": vencedor["execucao"],
@@ -720,33 +743,195 @@ def _analisar_setor(setor: dict[str, Any], caminhoes: list[dict[str, Any]], dia:
     return base
 
 
+def _percentual_de_passagem(row: dict[str, Any]) -> float:
+    """Faixa do apoio (15–45%) continua no polígono. A via oficial decide a execução."""
+    if float(row.get("metros_vias") or 0) <= 0 and row.get("area_pct") not in (None, ""):
+        try:
+            return float(row.get("area_pct") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(row.get("percentual") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _ficha_caminhao(row: dict[str, Any], evidencias: str) -> dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "veiculo": row.get("veiculo"),
+        "placa": row.get("placa"),
+        "inlog": row.get("inlog"),
+        "fonte": row.get("fonte"),
+        "fonte_nome": row.get("fonte_nome"),
+        "pontos_no_setor": row.get("pontos_no_setor"),
+        "pontos_dentro": row.get("pontos_dentro"),
+        "km_coleta": row.get("km_coleta"),
+        "horario": row.get("horario") or "",
+        "hora_inicio": row.get("hora_inicio") or "",
+        "hora_fim": row.get("hora_fim") or "",
+        "ponto_inicio": row.get("ponto_inicio") or [],
+        "ponto_fim": row.get("ponto_fim") or [],
+        "passagens": row.get("passagens") or [],
+        "trechos": row.get("trechos") or [],
+        "lacunas": row.get("lacunas") or [],
+        "evidencias": evidencias,
+        "tortuosidade": row.get("tortuosidade"),
+    }
+
+
+def _cobertura_vias_oficiais(pontos: list[dict[str, Any]], setor: dict[str, Any]) -> dict[str, float] | None:
+    """Metros únicos das vias oficiais. Não usa o km de GPS solto no polígono."""
+    ruas = setor.get("ruas") or []
+    if not ruas or not pontos:
+        return None
+    cob = avaliar_cobertura([], pontos, geom_setor=setor.get("geom"), ruas=ruas)
+    metros = float(cob.get("km_coleta") or 0) * 1000.0
+    faltando = float(cob.get("km_faltando") or 0) * 1000.0
+    return {
+        "percentual": float(percentual_das_vias(metros, faltando)),
+        "metros": round(metros, 1),
+    }
+
+
+def _execucao_das_vias(percentual: float, metros: float) -> str:
+    if metros <= 0 or percentual <= 0:
+        return "PASSAGEM"
+    if percentual >= FEITA_MIN:
+        return "FEITA"
+    return "PARCIAL"
+
+
+def _cobertura_unica(row: dict[str, Any]) -> tuple[float, float]:
+    if row.get("percentual_vias") is not None:
+        try:
+            pct = float(row.get("percentual_vias") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+    else:
+        try:
+            pct = float(row.get("percentual") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+    if row.get("metros_vias") is None:
+        return pct, 0.0
+    try:
+        metros = float(row.get("metros_vias") or 0)
+    except (TypeError, ValueError):
+        metros = 0.0
+    return pct, metros
+
+
+def _melhor_metros_oficiais(candidatos: list[dict[str, Any]]) -> float | None:
+    medidos = [c for c in candidatos if c.get("metros_vias") is not None]
+    if not medidos:
+        return None
+    return max(float(c.get("metros_vias") or 0) for c in medidos)
+
+
+def _executor_autorizado(row: dict[str, Any], autorizadas: set[str] | None) -> bool:
+    if not autorizadas:
+        return True
+    chaves = set()
+    for campo in ("id", "placa", "veiculo", "inlog"):
+        chave = _norm(str(row.get(campo) or ""))
+        if chave:
+            chaves.add(chave)
+    return bool(chaves & autorizadas)
+
+
+def _pode_executar(
+    row: dict[str, Any],
+    melhor_metros: float | None,
+    autorizadas: set[str] | None,
+) -> bool:
+    """PASSAGEM não executa. Placa fora do filtro também não."""
+    if str(row.get("execucao") or "").upper() not in VEREDICTOS_OK:
+        return False
+    if not _executor_autorizado(row, autorizadas):
+        return False
+    if melhor_metros is None:
+        return True
+    _pct, metros = _cobertura_unica(row)
+    if melhor_metros <= 0:
+        return False
+    return metros >= melhor_metros or metros >= 0.6 * melhor_metros
+
+
+def _chave_executor(row: dict[str, Any]) -> tuple[float, ...]:
+    """Cobertura única das vias e permanência. Quilômetro de GPS não desempata."""
+    pct, metros = _cobertura_unica(row)
+    rank = 2.0 if str(row.get("execucao") or "").upper() == "FEITA" else 1.0
+    if str(row.get("execucao") or "").upper() not in VEREDICTOS_OK:
+        rank = 0.0
+    return (
+        rank,
+        pct,
+        metros,
+        _minutos_no_setor(row),
+        float(len(row.get("passagens") or [])),
+        float(row.get("tortuosidade") or 0),
+    )
+
+
+def _rebaixar_passagens(candidatos: list[dict[str, Any]], vencedor: dict[str, Any]) -> None:
+    """Quem não sustentou a via oficial continua passagem ou apoio, sem a execução."""
+    if vencedor.get("metros_vias") is None:
+        return
+    limite = 0.6 * float(vencedor.get("metros_vias") or 0)
+    for cand in candidatos:
+        if _mesmo_caminhao(cand, vencedor):
+            continue
+        if cand.get("metros_vias") is None:
+            continue
+        if str(cand.get("execucao") or "").upper() == "APOIO":
+            continue
+        if limite > 0 and float(cand.get("metros_vias") or 0) >= limite:
+            continue
+        cand["execucao"] = "PASSAGEM"
+        cand["motivo"] = (
+            "passagem: não assume a execução; a cobertura das vias oficiais ficou com o caminhão da rota"
+        )
+
+
 def _escolher_vencedor(coletaram: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    validos = [row for row in coletaram if str(row.get("execucao") or "").upper() in VEREDICTOS_OK]
+    if not validos:
+        recusado = coletaram[0] if coletaram else {}
+        return recusado, "passagem, não coleta"
     por_id: dict[str, list[dict[str, Any]]] = {}
-    for row in coletaram:
+    for row in validos:
         por_id.setdefault(row["id"], []).append(row)
     escolhidos = []
     notas = []
     for _id, grupo in por_id.items():
-        grupo.sort(key=lambda r: (r["pontos_no_setor"], r["percentual"]), reverse=True)
+        grupo.sort(key=_chave_executor, reverse=True)
         melhor = grupo[0]
         escolhidos.append(melhor)
         if len(grupo) > 1:
             outros = ", ".join(
-                f"{g['fonte_nome']} {g['percentual']:.0f}%/{g['pontos_no_setor']} pts" for g in grupo[1:]
+                f"{g['fonte_nome']} {_cobertura_unica(g)[0]:.0f}%/{_cobertura_unica(g)[1]:.0f} m" for g in grupo[1:]
             )
-            delta = abs(melhor["percentual"] - grupo[1]["percentual"])
+            delta = abs(_cobertura_unica(melhor)[0] - _cobertura_unica(grupo[1])[0])
             extra = f"mesmo caminhão também em {outros}"
             if delta >= 20:
-                extra += f" — divergência de {delta:.0f} pp; usei a fonte com mais GPS ({melhor['fonte_nome']})"
+                extra += (
+                    f" — divergência de {delta:.0f} pp nas vias oficiais; "
+                    f"usei a fonte com maior cobertura ({melhor['fonte_nome']})"
+                )
             notas.append(extra)
-    escolhidos.sort(key=lambda r: (r["km_coleta"], r["percentual"], r["pontos_no_setor"]), reverse=True)
+    escolhidos.sort(key=_chave_executor, reverse=True)
     vencedor = escolhidos[0]
-    if len(escolhidos) > 1 and escolhidos[1]["km_coleta"] >= 0.6 * max(vencedor["km_coleta"], 0.1):
+    if len(escolhidos) > 1:
         segundo = escolhidos[1]
-        notas.append(
-            f"também coletou {segundo['veiculo']} ({segundo['fonte_nome']}) "
-            f"{segundo['percentual']:.0f}% / {segundo['km_coleta']:.1f} km — setor possivelmente dividido"
-        )
+        medida_v = _cobertura_unica(vencedor)[1] or _cobertura_unica(vencedor)[0]
+        medida_s = _cobertura_unica(segundo)[1] or _cobertura_unica(segundo)[0]
+        if medida_s >= 0.6 * max(medida_v, 0.1):
+            pct_s, metros_s = _cobertura_unica(segundo)
+            notas.append(
+                f"também coletou {segundo['veiculo']} ({segundo['fonte_nome']}) "
+                f"{pct_s:.0f}% / {metros_s:.0f} m nas vias oficiais — setor possivelmente dividido"
+            )
     return vencedor, "; ".join(notas)
 
 

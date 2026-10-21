@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from datetime import datetime
 from typing import Any, Iterable
 
 from pyproj import Transformer
@@ -609,3 +611,685 @@ def passagens_na_rota(
     if aberta:
         _fechar(aberta.get("hora_ultimo"))
     return saida
+
+
+SEM_APOIO = "Sem apoio identificado"
+
+
+def _instante(ponto: dict[str, Any]) -> datetime | None:
+    texto = str(ponto.get("timestamp") or ponto.get("ts") or "").strip().replace("Z", "")
+    if not texto:
+        return None
+    try:
+        return datetime.fromisoformat(texto[:19])
+    except ValueError:
+        return None
+
+
+def _pontos_com_xy(pontos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [ponto for ponto in pontos or [] if _xy(ponto)]
+
+
+def _amostras_velocidade(pontos: list[dict[str, Any]]) -> list[float]:
+    marcas: list[tuple[datetime, tuple[float, float]]] = []
+    for ponto in pontos or []:
+        par = _xy(ponto)
+        momento = _instante(ponto)
+        if par and momento is not None:
+            marcas.append((momento, par))
+    marcas.sort(key=lambda item: item[0])
+    velocidades: list[float] = []
+    for (t0, p0), (t1, p1) in zip(marcas, marcas[1:]):
+        segundos = (t1 - t0).total_seconds()
+        if segundos < 1 or segundos > 180:
+            continue
+        dist = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        if dist <= 0 or dist > SALTO_GPS_M:
+            continue
+        velocidades.append(dist / segundos * 3.6)
+    return velocidades
+
+
+def _velocidade_mediana(pontos: list[dict[str, Any]]) -> float | None:
+    velocidades = _amostras_velocidade(pontos)
+    if not velocidades:
+        return None
+    velocidades.sort()
+    meio = len(velocidades) // 2
+    if len(velocidades) % 2:
+        return velocidades[meio]
+    return (velocidades[meio - 1] + velocidades[meio]) / 2.0
+
+
+def _fracao_lenta(pontos: list[dict[str, Any]], teto_kmh: float) -> float:
+    velocidades = _amostras_velocidade(pontos)
+    if len(velocidades) < 3:
+        return 0.0
+    return sum(1 for vel in velocidades if vel <= teto_kmh) / len(velocidades)
+
+
+def _alinhado_as_vias(
+    pontos: list[dict[str, Any]],
+    segmentos: list[LineString],
+    indices: set[int],
+) -> bool | None:
+    """True quando o GPS segue a via. False quando só a cruza. None sem passos comparáveis."""
+    from shapely.ops import nearest_points
+
+    escolhidos = [segmentos[i] for i in indices if 0 <= i < len(segmentos)]
+    if not escolhidos:
+        return None
+    malha = unary_union(escolhidos)
+    if malha.is_empty or malha.length < 8:
+        return None
+    xy = [par for ponto in pontos or [] if (par := _xy(ponto))]
+    concordam = 0
+    total = 0
+    for a, b in zip(xy, xy[1:]):
+        dist = math.hypot(b[0] - a[0], b[1] - a[1])
+        if dist < 8 or dist > SALTO_GPS_M:
+            continue
+        meio = Point(((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0))
+        perto = nearest_points(malha, meio)[0]
+        proj = float(malha.project(perto))
+        antes = malha.interpolate(max(0.0, proj - 8.0))
+        depois = malha.interpolate(min(malha.length, proj + 8.0))
+        dx = depois.x - antes.x
+        dy = depois.y - antes.y
+        if math.hypot(dx, dy) < 1:
+            continue
+        delta = abs(math.atan2(b[1] - a[1], b[0] - a[0]) - math.atan2(dy, dx)) % math.pi
+        if delta > math.pi / 2:
+            delta = math.pi - delta
+        total += 1
+        if delta <= math.pi / 4:
+            concordam += 1
+    if total == 0:
+        return None
+    return concordam / total >= 0.5
+
+
+def _indices_com_progressao(
+    pontos: list[dict[str, Any]],
+    segmentos: list[LineString],
+    indices: set[int],
+) -> set[int]:
+    """Trechos em que o GPS anda ao longo da via, na velocidade já homologada.
+
+    Um pulso no limite do raio ou um salto transversal credita a via na união,
+    mas não conta como contribuição exclusiva de coleta. O corte é o passo já
+    usado para ler a direção (8 m) e o teto de 28 km/h, não um mínimo de rua.
+    """
+    from shapely.ops import nearest_points
+
+    from .verificacao import VEL_COLETA_MAX
+
+    if not indices:
+        return set()
+    escolhidos = [(i, segmentos[i]) for i in indices if 0 <= i < len(segmentos)]
+    marcas: list[tuple[datetime, tuple[float, float]]] = []
+    for ponto in pontos or []:
+        par = _xy(ponto)
+        instante = _instante(ponto)
+        if par and instante is not None:
+            marcas.append((instante, par))
+    marcas.sort(key=lambda item: item[0])
+    comprovados: set[int] = set()
+    for (t0, p0), (t1, p1) in zip(marcas, marcas[1:]):
+        segundos = (t1 - t0).total_seconds()
+        if segundos < 1 or segundos > 180:
+            continue
+        dist = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        if dist < 8 or dist > SALTO_GPS_M:
+            continue
+        if dist / segundos * 3.6 > VEL_COLETA_MAX:
+            continue
+        rumo = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+        meio = Point(((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0))
+        for indice, segmento in escolhidos:
+            if (
+                segmento.distance(meio) > RAIO_M
+                and segmento.distance(Point(p0)) > RAIO_M
+                and segmento.distance(Point(p1)) > RAIO_M
+            ):
+                continue
+            proj = float(segmento.project(nearest_points(segmento, meio)[0]))
+            antes = segmento.interpolate(max(0.0, proj - 8.0))
+            depois = segmento.interpolate(min(segmento.length, proj + 8.0))
+            dx = depois.x - antes.x
+            dy = depois.y - antes.y
+            if math.hypot(dx, dy) < 1:
+                continue
+            delta = abs(rumo - math.atan2(dy, dx)) % math.pi
+            if delta > math.pi / 2:
+                delta = math.pi - delta
+            if delta > math.pi / 4:
+                continue
+            along = abs(segmento.project(Point(p1)) - segmento.project(Point(p0)))
+            if along < 8 or along < dist * 0.5:
+                continue
+            comprovados.add(indice)
+    return comprovados
+
+
+def _classe_presenca(
+    pontos: list[dict[str, Any]],
+    segmentos: list[LineString],
+    indices: set[int],
+    execucao: str,
+) -> tuple[str, str]:
+    """Executor, passagem ou não confirmado. Reusa o raio, o salto e a velocidade já homologados.
+
+    FEITA e PARCIAL entram com os trechos oficiais que o GPS alcança. Os demais
+    só entram com progressão ao longo da via e velocidade de coleta. Atalho,
+    cruzamento e pulso isolado ficam de fora da união.
+    """
+    from .verificacao import VEL_COLETA_MAX
+
+    if str(execucao or "").upper() in {"FEITA", "PARCIAL"}:
+        if indices:
+            return "executor", "coleta homologada com trecho oficial no raio de 45 m"
+        return "nao_confirmado", "coleta homologada sem trecho oficial associado"
+    if not indices:
+        return "ausente", "nenhum trecho oficial a 45 m do GPS"
+    if not _linhas_gps(pontos):
+        return (
+            "nao_confirmado",
+            "pulsos junto da via sem sequência contínua; salto acima de 160 m não comprova o intervalo",
+        )
+    alinhado = _alinhado_as_vias(pontos, segmentos, indices)
+    if alinhado is False:
+        return "passagem", "o GPS cruza as vias oficiais sem progredir ao longo delas"
+    vel = _velocidade_mediana(pontos)
+    if vel is not None and vel > VEL_COLETA_MAX and _fracao_lenta(pontos, VEL_COLETA_MAX) < 0.35:
+        return "passagem", "velocidade acima do limite homologado de coleta (28 km/h), sem permanência lenta"
+    if alinhado is None or vel is None:
+        return "nao_confirmado", "há GPS na via, sem direção ou velocidade suficientes para confirmar coleta"
+    return "executor", "progressão ao longo das vias oficiais em velocidade compatível com coleta"
+
+
+def _segmentos_oficiais(ruas: list[Any]) -> list[LineString]:
+    segmentos: list[LineString] = []
+    for rua in ruas or []:
+        if rua is None or getattr(rua, "is_empty", True):
+            continue
+        tipo = getattr(rua, "geom_type", "")
+        partes = list(rua.geoms) if tipo == "MultiLineString" else [rua]
+        for parte in partes:
+            if getattr(parte, "geom_type", "") != "LineString" or parte.length < 2:
+                continue
+            segmentos.extend(_cortar(parte, PASSO_M))
+    return segmentos
+
+
+def _perto_das_vias(pontos: list[dict[str, Any]], segmentos: list[LineString]) -> list[dict[str, Any]]:
+    """Só o GPS junto da via oficial. Trabalho em outra rota não vira serviço aqui."""
+    if not pontos or not segmentos:
+        return []
+    from shapely import dwithin
+    from shapely.geometry import Point
+
+    malha = unary_union(segmentos)
+    pares: list[dict[str, Any]] = []
+    geometrias: list[Point] = []
+    for ponto in pontos:
+        xy = _xy(ponto)
+        if not xy:
+            continue
+        pares.append(ponto)
+        geometrias.append(Point(xy))
+    if not pares:
+        return []
+    mask = dwithin(geometrias, malha, RAIO_M)
+    return [ponto for ponto, fica in zip(pares, mask) if bool(fica)]
+
+
+def _indices_cobertos(segmentos: list[LineString], pontos: list[dict[str, Any]]) -> set[int]:
+    """Mesma prova de avaliar_cobertura: linha do GPS ou, sem linha, o próprio pulso."""
+    if not segmentos:
+        return set()
+    linhas = _linhas_gps(pontos)
+    if linhas:
+        gps = unary_union(linhas)
+    else:
+        xy = [par for ponto in pontos or [] if (par := _xy(ponto))]
+        gps = unary_union([Point(par) for par in xy]) if xy else None
+    if gps is None or gps.is_empty:
+        return set()
+    from shapely import dwithin
+
+    mask = dwithin(gps, segmentos, RAIO_M)
+    return {i for i, fica in enumerate(mask) if bool(fica)}
+
+
+def _metros_indices(segmentos: list[LineString], indices: set[int]) -> float:
+    return sum(segmentos[i].length for i in indices if 0 <= i < len(segmentos))
+
+
+def _metros_wgs(linhas: list[Any]) -> float:
+    total = 0.0
+    for linha in linhas or []:
+        if not isinstance(linha, list):
+            continue
+        xy: list[tuple[float, float]] = []
+        for par in linha:
+            if not isinstance(par, (list, tuple)) or len(par) < 2:
+                continue
+            ponto = _xy((par[0], par[1]))
+            if not ponto:
+                continue
+            if xy and math.hypot(ponto[0] - xy[-1][0], ponto[1] - xy[-1][1]) < 0.4:
+                continue
+            xy.append(ponto)
+        if len(xy) >= 2:
+            total += LineString(xy).length
+    return total
+
+
+def _pct_parte(metros: float, total: float) -> float:
+    if total <= 0 or metros <= 0:
+        return 0.0
+    if metros >= total - 0.5:
+        return 100.0
+    pct = round(100.0 * metros / total, 1)
+    if pct >= 100.0:
+        return 99.9
+    if pct <= 0.0:
+        return 0.1
+    return pct
+
+
+def _janela_participacao(pontos: list[dict[str, Any]]) -> dict[str, Any]:
+    marcas = [(marca, ponto) for ponto in pontos or [] if (marca := _instante(ponto)) is not None]
+    if not marcas:
+        return {
+            "hora_inicio": "",
+            "hora_fim": "",
+            "inicio": "",
+            "fim": "",
+            "horario": "",
+            "ponto_inicio": [],
+            "ponto_fim": [],
+        }
+    marcas.sort(key=lambda item: item[0])
+    ini, ponto_ini = marcas[0]
+    fim, ponto_fim = marcas[-1]
+
+    def par(ponto: dict[str, Any]) -> list[float]:
+        try:
+            return [round(float(ponto["latitude"]), 6), round(float(ponto["longitude"]), 6)]
+        except (KeyError, TypeError, ValueError):
+            return []
+
+    hora_ini = ini.strftime("%H:%M")
+    hora_fim = fim.strftime("%H:%M")
+    return {
+        "hora_inicio": hora_ini,
+        "hora_fim": hora_fim,
+        "inicio": ini.strftime("%d/%m %H:%M"),
+        "fim": fim.strftime("%d/%m %H:%M"),
+        "horario": f"{hora_ini}–{hora_fim}",
+        "ponto_inicio": par(ponto_ini),
+        "ponto_fim": par(ponto_fim),
+    }
+
+
+def _trechos_gps(pontos: list[dict[str, Any]]) -> list[list[list[float]]]:
+    return [_wgs(list(linha.coords)) for linha in _linhas_gps(pontos)]
+
+
+def _cor_placa(placa: str) -> str:
+    from .pdf_mapa import cor_da_placa
+
+    return cor_da_placa(placa)
+
+
+def _texto_observados(passagens: list[str] | None, nao_confirmados: list[str] | None) -> str:
+    partes = []
+    if passagens:
+        partes.append("Passagem: " + ", ".join(passagens))
+    if nao_confirmados:
+        partes.append("Não confirmado: " + ", ".join(nao_confirmados))
+    return " · ".join(partes)
+
+
+def resumo_executores(
+    executores: list[dict[str, Any]] | None,
+    apoio: str = "",
+    percentual: float | None = None,
+    passagens: list[str] | None = None,
+    nao_confirmados: list[str] | None = None,
+) -> str:
+    """Texto único da rota: principal, apoios, percentuais e total."""
+    itens = [item for item in executores or [] if isinstance(item, dict) and str(item.get("placa") or "").strip()]
+    if not itens:
+        return apoio or ""
+    partes = []
+    for item in itens:
+        if str(item.get("papel") or "") == "sobreposta":
+            continue
+        papel = "Principal" if str(item.get("papel") or "") == "principal" else "Apoio efetivo"
+        horario = str(item.get("horario") or "").strip()
+        texto = (
+            f"{papel} {item.get('placa')} "
+            f"{float(item.get('percentual') or 0):.0f}% "
+            f"(exclusivo {float(item.get('contribuicao_exclusiva') or 0):.0f}%)"
+        )
+        if horario:
+            texto += f" {horario}"
+        partes.append(texto)
+    if percentual is not None:
+        partes.append(f"Total {float(percentual):.0f}%")
+    if apoio == SEM_APOIO:
+        partes.append(SEM_APOIO)
+    observado = _texto_observados(passagens, nao_confirmados)
+    if observado:
+        partes.append(observado)
+    return " · ".join(partes)
+
+
+def ler_executores_json(texto: str | None) -> dict[str, Any]:
+    """Lê o snapshot gravado. Não recalcula cobertura."""
+    vazio = {
+        "calculado": False,
+        "percentual": None,
+        "placa_principal": "",
+        "veiculo_principal": "",
+        "apoio": "",
+        "placas_apoio": [],
+        "sobrepostos": [],
+        "cobertura_sobreposta": "",
+        "executores": [],
+        "passagens": [],
+        "nao_confirmados": [],
+        "auditoria": [],
+        "diagnostico": {},
+        "resumo_veiculos": "",
+    }
+    bruto = str(texto or "").strip()
+    if not bruto:
+        return vazio
+    try:
+        dados = json.loads(bruto)
+    except json.JSONDecodeError:
+        return vazio
+    if not isinstance(dados, dict):
+        return vazio
+    executores = [item for item in dados.get("executores") or [] if isinstance(item, dict)]
+    apoios = [str(item.get("placa") or "") for item in executores if str(item.get("papel") or "") == "apoio" and item.get("placa")]
+    sobrepostos = [str(item.get("placa") or "") for item in executores if str(item.get("papel") or "") == "sobreposta" and item.get("placa")]
+    apoio = str(dados.get("apoio") or "")
+    percentual = dados.get("percentual")
+    passagens = [str(item) for item in dados.get("passagens") or [] if str(item or "").strip()]
+    nao_confirmados = [str(item) for item in dados.get("nao_confirmados") or [] if str(item or "").strip()]
+    return {
+        "calculado": bool(dados.get("calculado")),
+        "percentual": percentual,
+        "placa_principal": str(dados.get("placa_principal") or ""),
+        "veiculo_principal": str(dados.get("veiculo_principal") or ""),
+        "apoio": apoio,
+        "placas_apoio": apoios,
+        "sobrepostos": sobrepostos,
+        "cobertura_sobreposta": ", ".join(sobrepostos),
+        "executores": executores,
+        "passagens": passagens,
+        "nao_confirmados": nao_confirmados,
+        "auditoria": [item for item in dados.get("auditoria") or [] if isinstance(item, dict)],
+        "diagnostico": dados.get("diagnostico") if isinstance(dados.get("diagnostico"), dict) else {},
+        "resumo_veiculos": resumo_executores(
+            executores,
+            apoio,
+            percentual if percentual is not None else None,
+            passagens,
+            nao_confirmados,
+        ),
+    }
+
+
+def cobertura_compartilhada(
+    ruas: list[Any],
+    veiculos: list[dict[str, Any]],
+    geom_setor=None,
+) -> dict[str, Any]:
+    """União dos trechos oficiais executados por todos os veículos elegíveis.
+
+    O caminhão de maior cobertura individual é o principal. Apoio efetivo é quem
+    progrediu por um trecho oficial que nenhum outro cobriu. Cobertura só
+    repetida, ou exclusiva apenas por aproximação, fica no detalhe. A união
+    geográfica não depende da ordem e não descarta trecho já creditado.
+    """
+    segmentos = _segmentos_oficiais(ruas)
+    vazio_exec: list[dict[str, Any]] = []
+    if not segmentos:
+        return _pacote_cobertura(0.0, [], [], vazio_exec, [], 0.0)
+
+    avaliados: list[dict[str, Any]] = []
+    passagens: list[str] = []
+    nao_confirmados: list[str] = []
+    auditoria: list[dict[str, Any]] = []
+    for veiculo in veiculos or []:
+        placa = str(veiculo.get("placa") or "").strip()
+        if not placa:
+            continue
+        pontos = list(veiculo.get("pontos") or [])
+        if geom_setor is not None:
+            pontos = recortar_pontos(pontos, geom_setor, 90)
+        pontos = _perto_das_vias(pontos, segmentos)
+        if len(_pontos_com_xy(pontos)) < 2:
+            auditoria.append(
+                {
+                    "placa": placa,
+                    "classe": "ausente",
+                    "motivo": "menos de dois pulsos a 45 m das vias oficiais",
+                    "metros": 0.0,
+                    "cobertura_geografica_m": 0.0,
+                    "evidencia_operacional_m": 0.0,
+                    "entra_na_uniao": False,
+                }
+            )
+            continue
+        indices = _indices_cobertos(segmentos, pontos)
+        metros = _metros_indices(segmentos, indices)
+        classe, motivo = _classe_presenca(pontos, segmentos, indices, str(veiculo.get("execucao") or ""))
+        auditoria.append(
+            {
+                "placa": placa,
+                "classe": classe,
+                "motivo": motivo,
+                "metros": round(metros, 1),
+                "cobertura_geografica_m": round(metros, 1),
+                "evidencia_operacional_m": 0.0,
+                "entra_na_uniao": classe == "executor",
+            }
+        )
+        if classe == "passagem":
+            passagens.append(placa)
+            continue
+        if classe != "executor":
+            if classe == "nao_confirmado":
+                nao_confirmados.append(placa)
+            continue
+        avaliados.append(
+            {
+                "placa": placa,
+                "veiculo": str(veiculo.get("veiculo") or placa),
+                "pontos": pontos,
+                "indices": indices,
+                "metros": metros,
+                "n": len(_pontos_com_xy(pontos)),
+            }
+        )
+
+    if not avaliados:
+        faltando = _fundir(segmentos)
+        return _pacote_cobertura(
+            0.0, [], faltando, vazio_exec, passagens, 0.0, nao_confirmados, auditoria
+        )
+
+    uniao: set[int] = set()
+    for item in avaliados:
+        uniao |= item["indices"]
+    todos = set(range(len(segmentos)))
+    feitos_idx = sorted(uniao)
+    falta_idx = sorted(todos - uniao)
+    feitos = _fundir([segmentos[i] for i in feitos_idx])
+    faltando = _fundir([segmentos[i] for i in falta_idx])
+    metros_feitos = _metros_wgs(feitos)
+    metros_falta = _metros_wgs(faltando)
+    total = metros_feitos + metros_falta
+    percentual = percentual_das_vias(metros_feitos, metros_falta)
+
+    avaliados.sort(key=lambda item: (-item["metros"], -item["n"], item["placa"]))
+    principal_placa = avaliados[0]["placa"]
+    executores: list[dict[str, Any]] = []
+    for item in avaliados:
+        outros: set[int] = set()
+        for vizinho in avaliados:
+            if vizinho["placa"] != item["placa"]:
+                outros |= vizinho["indices"]
+        exclusivos = item["indices"] - outros
+        compartilhados = item["indices"] & outros
+        progrediu = exclusivos if item["placa"] == principal_placa else _indices_com_progressao(item["pontos"], segmentos, exclusivos)
+        sem_progressao = exclusivos - progrediu
+        metros_exclusivos = _metros_wgs(_fundir([segmentos[i] for i in sorted(progrediu)])) if progrediu else 0.0
+        metros_compartilhados = _metros_wgs(_fundir([segmentos[i] for i in sorted(compartilhados)])) if compartilhados else 0.0
+        item["metros_exclusivos"] = metros_exclusivos
+        item["metros_compartilhados"] = metros_compartilhados
+        item["metros_sem_progressao"] = _metros_wgs(_fundir([segmentos[i] for i in sorted(sem_progressao)])) if sem_progressao else 0.0
+        metros_proprios = _metros_wgs(_fundir([segmentos[i] for i in sorted(item["indices"])]))
+        janela = _janela_participacao(item["pontos"])
+        if item["placa"] == principal_placa:
+            papel, classificacao = "principal", "Principal"
+        elif progrediu:
+            papel, classificacao = "apoio", "Apoio efetivo"
+        else:
+            papel, classificacao = "sobreposta", "Cobertura sobreposta"
+        executores.append(
+            {
+                "placa": item["placa"],
+                "veiculo": item["veiculo"],
+                "papel": papel,
+                "classificacao": classificacao,
+                "percentual": _pct_parte(metros_proprios, total),
+                "contribuicao_exclusiva": _pct_parte(metros_exclusivos, total),
+                "contribuicao_compartilhada": _pct_parte(metros_compartilhados, total),
+                "cor": _cor_placa(item["placa"]),
+                "trechos": _trechos_gps(item["pontos"]),
+                **janela,
+            }
+        )
+    executores.sort(
+        key=lambda item: (
+            {"principal": 0, "apoio": 1, "sobreposta": 2}.get(str(item["papel"]), 3),
+            -float(item["contribuicao_exclusiva"]),
+            -float(item["percentual"]),
+            str(item["placa"]),
+        )
+    )
+    por_placa = {item["placa"]: item for item in auditoria}
+    for item in executores:
+        ficha = por_placa.get(item["placa"])
+        if not ficha:
+            continue
+        ficha["classe"] = item["papel"]
+        origem = next(row for row in avaliados if row["placa"] == item["placa"])
+        ficha["metros_exclusivos"] = round(float(origem.get("metros_exclusivos") or 0), 1)
+        ficha["metros_compartilhados"] = round(float(origem.get("metros_compartilhados") or 0), 1)
+        ficha["metros_sem_progressao"] = round(float(origem.get("metros_sem_progressao") or 0), 1)
+        ficha["cobertura_geografica_m"] = round(float(ficha.get("metros") or 0), 1)
+        ficha["evidencia_operacional_m"] = round(
+            max(0.0, ficha["cobertura_geografica_m"] - ficha["metros_sem_progressao"]),
+            1,
+        )
+        if item["papel"] == "apoio":
+            ficha["motivo"] = "progressão contínua em trechos oficiais que nenhum outro veículo cobriu"
+        elif item["papel"] == "sobreposta" and ficha["metros_sem_progressao"] > 0:
+            ficha["motivo"] = (
+                "coleta comprovada nas vias já cobertas por outro veículo; "
+                "o trecho exclusivo é aproximação ou cruzamento, sem progressão contínua"
+            )
+        elif item["papel"] == "sobreposta":
+            ficha["motivo"] = "coleta comprovada apenas em trechos já cobertos por outro veículo"
+    somente_geograficos = sum(float(item.get("metros_sem_progressao") or 0) for item in avaliados)
+    evidencia_m = max(0.0, metros_feitos - somente_geograficos)
+    diagnostico = {
+        "cobertura_geografica_m": round(metros_feitos, 1),
+        "cobertura_geografica_pct": percentual,
+        "metros_somente_geograficos": round(somente_geograficos, 1),
+        "evidencia_operacional_m": round(evidencia_m, 1),
+        "evidencia_operacional_pct": percentual_das_vias(evidencia_m, metros_falta + somente_geograficos),
+    }
+    return _pacote_cobertura(
+        percentual,
+        feitos,
+        faltando,
+        executores,
+        passagens,
+        round(metros_feitos / 1000.0, 3),
+        nao_confirmados,
+        auditoria,
+        diagnostico,
+    )
+
+
+def _pacote_cobertura(
+    percentual: float,
+    feitos: list[Any],
+    faltando: list[Any],
+    executores: list[dict[str, Any]],
+    passagens: list[str],
+    km_feito: float,
+    nao_confirmados: list[str] | None = None,
+    auditoria: list[dict[str, Any]] | None = None,
+    diagnostico: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    principal = next((item for item in executores if item.get("papel") == "principal"), None)
+    placas_apoio = [str(item.get("placa") or "") for item in executores if item.get("papel") == "apoio"]
+    sobrepostos = [str(item.get("placa") or "") for item in executores if item.get("papel") == "sobreposta"]
+    apoio = ", ".join(placa for placa in placas_apoio if placa) or SEM_APOIO
+    cobertura_sobreposta = ", ".join(placa for placa in sobrepostos if placa)
+    fora = list(nao_confirmados or [])
+    fichas = list(auditoria or [])
+    leitura = diagnostico or {
+        "cobertura_geografica_m": round(float(km_feito or 0) * 1000.0, 1),
+        "cobertura_geografica_pct": percentual,
+        "metros_somente_geograficos": 0.0,
+        "evidencia_operacional_m": round(float(km_feito or 0) * 1000.0, 1),
+        "evidencia_operacional_pct": percentual,
+    }
+    persistencia = {
+        "calculado": True,
+        "percentual": percentual,
+        "placa_principal": (principal or {}).get("placa") or "",
+        "veiculo_principal": (principal or {}).get("veiculo") or "",
+        "apoio": apoio,
+        "sobrepostos": sobrepostos,
+        "cobertura_sobreposta": cobertura_sobreposta,
+        "passagens": passagens,
+        "nao_confirmados": fora,
+        "auditoria": fichas,
+        "diagnostico": leitura,
+        "executores": [
+            {chave: valor for chave, valor in item.items() if chave != "trechos"}
+            for item in executores
+        ],
+    }
+    return {
+        "calculado": True,
+        "percentual": percentual,
+        "km_feito": km_feito,
+        "trechos_feitos": feitos,
+        "trechos_faltando": faltando,
+        "executores": executores,
+        "passagens": passagens,
+        "nao_confirmados": fora,
+        "auditoria": fichas,
+        "diagnostico": leitura,
+        "apoio": apoio,
+        "sobrepostos": sobrepostos,
+        "cobertura_sobreposta": cobertura_sobreposta,
+        "placa_principal": persistencia["placa_principal"],
+        "veiculo_principal": persistencia["veiculo_principal"],
+        "persistencia": persistencia,
+        "resumo_veiculos": resumo_executores(executores, apoio, percentual, passagens, fora),
+    }

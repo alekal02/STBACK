@@ -1824,28 +1824,50 @@ def _metros_trechos(linhas: list[Any]) -> float:
     return total
 
 
+def _cobertura_visual(setor: dict[str, Any], caminhoes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Uma conta por rota. Reusa o que _analisar_setor já calculou."""
+    pronta = setor.get("_cobertura")
+    if isinstance(pronta, dict) and pronta.get("calculado"):
+        return pronta
+    ruas = setor.get("_ruas") or setor.get("ruas") or []
+    if not ruas:
+        return None
+    from .cobertura import cobertura_compartilhada
+
+    veiculos = []
+    for cam in caminhoes:
+        placa = str(cam.get("placa") or "").strip()
+        pontos = cam.get("pontos") or []
+        if not placa or len(pontos) < 8:
+            continue
+        veiculos.append(
+            {
+                "placa": placa,
+                "veiculo": cam.get("veiculo") or placa,
+                "pontos": pontos,
+                "execucao": cam.get("execucao") or "",
+            }
+        )
+    if not veiculos:
+        return None
+    return cobertura_compartilhada(ruas, veiculos, setor.get("_geom") or setor.get("geom"))
+
+
 def _anexar_geometria_visual(
     setores: list[dict[str, Any]],
     caminhoes: list[dict[str, Any]],
     rotas: list[dict[str, Any]],
 ) -> None:
-    """Verde, vermelho e percentual saem da mesma classificação de vias, raio 45 m.
+    """Verde, vermelho e percentual saem da união das vias oficiais, raio 45 m.
 
     Não usa a área do polígono nem o km oficial. 100% só sem trecho faltante.
+    Principal e apoios vêm do mesmo cálculo.
     """
-    from .cobertura import avaliar_cobertura, percentual_das_vias
     from .live_mapa import compactar_trechos
-    from .live_report import _faixa_percentual
+    from .live_report import _faixa_percentual, _tempo
     from .verificacao import VEREDICTOS_OK
 
-    from .unificado import _norm
-
     por_codigo = {str(item.get("codigo") or "").upper(): item for item in setores}
-    pontos_placa: dict[str, list] = {}
-    for item in caminhoes:
-        chave = _norm(str(item.get("placa") or "")) or str(item.get("placa") or "")
-        if chave:
-            pontos_placa[chave] = item.get("pontos") or []
     for rota in rotas:
         codigo = str(rota.get("codigo") or "").upper()
         setor = por_codigo.get(codigo) or {}
@@ -1872,34 +1894,51 @@ def _anexar_geometria_visual(
             continue
         feitos: list[Any] = []
         faltando: list[Any] = []
-        chave_placa = _norm(str(cam.get("placa") or "")) or str(cam.get("placa") or "")
-        pontos = pontos_placa.get(chave_placa) or []
-        ruas = setor.get("_ruas") or []
-        if pontos and ruas:
-            try:
-                cob = avaliar_cobertura(
-                    [],
-                    pontos,
-                    geom_setor=setor.get("_geom"),
-                    ruas=ruas,
-                )
-                feitos = compactar_trechos(cob.get("trechos_feitos"))
-                faltando = compactar_trechos(cob.get("trechos_faltando"))
-                metros_feitos = _metros_trechos(feitos)
-                rota["percentual"] = percentual_das_vias(
-                    metros_feitos,
-                    _metros_trechos(faltando),
-                )
-                if metros_feitos <= 0:
-                    rota["placa"] = ""
-                    rota["veiculo"] = ""
-                    rota["percentual"] = 0.0
-                    if str(rota.get("grupo") or "") != "apoio":
-                        rota["grupo"], rota["status"] = _faixa_percentual(0)
-                elif str(rota.get("grupo") or "") != "apoio":
+        try:
+            cob = _cobertura_visual(setor, caminhoes)
+        except Exception as exc:
+            cob = None
+            print(f"mapa visual: trechos de {codigo} não gravados ({exc})", flush=True)
+        if cob is not None:
+            feitos = compactar_trechos(cob.get("trechos_feitos"))
+            faltando = compactar_trechos(cob.get("trechos_faltando"))
+            rota["percentual"] = float(cob.get("percentual") or 0)
+            rota["executores_json"] = json.dumps(
+                cob.get("persistencia") or {},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            principal = next(
+                (item for item in cob.get("executores") or [] if item.get("papel") == "principal"),
+                None,
+            )
+            if principal:
+                rota["placa"] = principal.get("placa") or rota.get("placa") or ""
+                rota["veiculo"] = principal.get("veiculo") or principal.get("placa") or rota.get("veiculo") or ""
+                if principal.get("inicio"):
+                    rota["inicio"] = principal.get("inicio") or ""
+                if principal.get("fim"):
+                    rota["ultimo_gps"] = principal.get("fim") or ""
+                rota["tempo_em_rota"] = _tempo(str(rota.get("inicio") or ""), str(rota.get("ultimo_gps") or ""))
+                entrada_lat, entrada_lon = _par_latlon(principal.get("ponto_inicio"))
+                saida_lat, saida_lon = _par_latlon(principal.get("ponto_fim"))
+                rota["entrada_lat"] = entrada_lat
+                rota["entrada_lon"] = entrada_lon
+                rota["entrada_hora"] = principal.get("hora_inicio") or ""
+                rota["saida_lat"] = saida_lat
+                rota["saida_lon"] = saida_lon
+                rota["saida_hora"] = principal.get("hora_fim") or ""
+            km = cob.get("km_feito")
+            if km:
+                rota["km_coleta"] = f"{float(km):.1f} km".replace(".", ",")
+            if str(rota.get("grupo") or "") != "apoio":
+                if cob.get("executores"):
                     rota["grupo"], rota["status"] = _faixa_percentual(rota["percentual"])
-            except Exception as exc:
-                print(f"mapa visual: trechos de {codigo} não gravados ({exc})", flush=True)
+                else:
+                    rota["percentual"] = 0.0
+                    if setor.get("candidatos") or setor.get("caminhoes"):
+                        rota["grupo"] = "passagem"
+                        rota["status"] = "Só passagem"
         rota["trechos_feitos"] = json.dumps(feitos, separators=(",", ":"))
         rota["trechos_faltando"] = json.dumps(faltando, separators=(",", ":"))
 
@@ -2290,3 +2329,91 @@ def _float(valor: Any) -> float | None:
         return float(valor)
     except (TypeError, ValueError):
         return None
+
+
+def auditar_turno_leitura(data: str, turno: str) -> dict[str, Any]:
+    """Compara o percentual gravado com o GPS já persistido. Não baixa rastreio e não grava."""
+    from .live_db import conectar, ler_placas, ler_pontos_placa
+
+    pedido = (turno or "").strip().lower()
+    con = conectar()
+    try:
+        gravado = {
+            str(row["codigo"]): float(row["percentual"] or 0)
+            for row in con.execute(
+                "SELECT codigo, percentual FROM rota WHERE data = ? AND turno = ?",
+                (data, pedido),
+            )
+        }
+        placas = [dict(row) for row in ler_placas(con, data, pedido)]
+        pontos = {
+            str(placa["placa"]): ler_pontos_placa(con, data, pedido, placa["placa"])
+            for placa in placas
+        }
+    finally:
+        con.close()
+    if not any(pontos.values()):
+        relatorio = {
+            "data": data,
+            "turno": pedido,
+            "intacto": True,
+            "limite": "não há GPS persistido nesta base para auditar",
+            "rotas": [
+                {"codigo": codigo, "gravado": pct, "auditado": None, "motivo": "sem GPS persistido"}
+                for codigo, pct in sorted(gravado.items())
+            ],
+        }
+    else:
+        from .unificado import analisar_codigos
+        from datetime import date as dia_tipo
+
+        dia = dia_tipo.fromisoformat(data)
+        caminhoes = [
+            {
+                "id": placa["placa"],
+                "fonte": "segtrack",
+                "fonte_nome": "SEGTRACK",
+                "veiculo": placa.get("veiculo") or placa["placa"],
+                "placa": placa["placa"],
+                "inlog": "",
+                "pontos": pontos.get(str(placa["placa"])) or [],
+            }
+            for placa in placas
+            if len(pontos.get(str(placa["placa"])) or []) >= 2
+        ]
+        setores = analisar_codigos(dia, caminhoes, set(gravado), pedido)
+        por_codigo = {str(setor.get("codigo") or ""): setor for setor in setores}
+        relatorio = {
+            "data": data,
+            "turno": pedido,
+            "intacto": True,
+            "rotas": [],
+        }
+        for codigo, pct in sorted(gravado.items()):
+            setor = por_codigo.get(codigo) or {}
+            cobertura = setor.get("_cobertura") or {}
+            relatorio["rotas"].append(
+                {
+                    "codigo": codigo,
+                    "gravado": pct,
+                    "auditado": cobertura.get("percentual") if cobertura.get("calculado") else None,
+                    "placa_principal": cobertura.get("placa_principal") or "",
+                    "apoio": cobertura.get("apoio") or "",
+                    "auditoria": cobertura.get("auditoria") or [],
+                    "diagnostico": cobertura.get("diagnostico") or {},
+                    "motivo": setor.get("motivo") or "",
+                }
+            )
+    con = conectar()
+    try:
+        conferido = {
+            str(row["codigo"]): float(row["percentual"] or 0)
+            for row in con.execute(
+                "SELECT codigo, percentual FROM rota WHERE data = ? AND turno = ?",
+                (data, pedido),
+            )
+        }
+    finally:
+        con.close()
+    relatorio["intacto"] = conferido == gravado
+    return relatorio

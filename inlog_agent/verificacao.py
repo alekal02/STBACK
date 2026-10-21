@@ -19,8 +19,12 @@ def rotulo_papel_relatorio(cam: dict[str, Any] | None) -> str:
         return "passagem"
     ex = str(cam.get("execucao") or "").upper()
     papel = str(cam.get("papel") or "").strip().lower()
+    if papel == "principal":
+        return "principal"
+    if papel == "sobreposta":
+        return "cobertura sobreposta"
     if papel == "apoio" or ex == "APOIO":
-        return "apoio"
+        return "apoio efetivo"
     if ex == "PARCIAL" or papel in {"coleta parcial", "coleta_parcial"}:
         return "coleta parcial"
     if ex == "FEITA" or papel == "coleta" or ex in VEREDICTOS_OK:

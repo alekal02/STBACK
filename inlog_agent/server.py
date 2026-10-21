@@ -1248,7 +1248,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path.endswith("/tracks"):
-                self._json(200, trilhas(data, turno), sem_cache)
+                self._json(
+                    200,
+                    trilhas(
+                        data,
+                        turno,
+                        (qs.get("placa") or [None])[0],
+                        (qs.get("rota") or [None])[0],
+                    ),
+                    sem_cache,
+                )
                 return
             if path.endswith("/dificil-acesso"):
                 self._json(200, dificil_acesso(data, turno), sem_cache)
@@ -1590,6 +1599,7 @@ class Handler(BaseHTTPRequestHandler):
                         (qs.get("turno") or ["diurno"])[0],
                         job_rodando=bool(job.get("rodando") and job.get("nome") == "unificado"),
                     ),
+                    self._no_store(),
                 )
             except ValueError as exc:
                 self._json(400, {"ok": False, "erro": str(exc), "falha": str(exc)})

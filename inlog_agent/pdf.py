@@ -810,6 +810,7 @@ def _paginas_detalhe(pasta: Path, rotas_mapa: list[dict[str, Any]]) -> list[dict
                         else ""
                     ),
                     "caminhoes": cob.get("caminhoes") or item.get("caminhoes") or [],
+                    "apoio": cob.get("apoio") or item.get("apoio") or "",
                     "ontem": bool(item.get("ontem")),
                 }
             )
@@ -1145,8 +1146,13 @@ def _legenda_placas(folha: dict[str, Any]) -> str:
         extra = f" {papel}"
         if pct > 0:
             extra += f" {pct:.0f}%"
+        if cam.get("contribuicao_exclusiva") not in (None, ""):
+            extra += f" exclusivo {float(cam.get('contribuicao_exclusiva') or 0):.0f}%"
         label = f"{placa}{extra} {janela}".strip()
         partes.append(label)
+    apoio = str(folha.get("apoio") or "").strip()
+    if apoio and apoio not in " · ".join(partes):
+        partes.append(apoio)
     if partes:
         return " · ".join(partes)
     placa = str(folha.get("placa") or "").strip()

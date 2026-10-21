@@ -285,8 +285,10 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
         placas=["SDE6B76"],
     )
     bloqueada = so_passagem["rotas"]["POLO INDUSTRIAL"]
-    assert bloqueada["placa"] in {"", "—"}
-    assert bloqueada["percentual"] == 0
+    assert bloqueada["placa"] == "SDE6B76"
+    assert bloqueada["placa"] != "SDJ-6C47"
+    assert 40 <= bloqueada["percentual"] < 80
+    assert bloqueada["metros_cobertos"] > 10000
 
     so_executor = reprocessar_rotas_historicas(
         tmp_path,

@@ -195,6 +195,9 @@ def _rota(linha: dict[str, Any]) -> dict[str, Any]:
         "km_coleta": str(linha.get("Km Coleta") or "—"),
         "km_oficial": str(linha.get("Km Total") or "—"),
         "na_grade": str(linha.get("Na grade") or "").strip().lower() == "sim",
+        "apoio": str(linha.get("Apoio") or ""),
+        "resumo_veiculos": str(linha.get("Resumo veículos") or ""),
+        "placa_principal": str(linha.get("Placa principal") or linha.get("Placa") or ""),
     }
 
 

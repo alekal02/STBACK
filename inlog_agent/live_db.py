@@ -384,6 +384,7 @@ def _schema(con: sqlite3.Connection) -> None:
         "saida_hora": "TEXT",
         "trechos_feitos": "TEXT",
         "trechos_faltando": "TEXT",
+        "executores_json": "TEXT NOT NULL DEFAULT ''",
     }
     for nome, tipo in extras_rota.items():
         if nome not in colunas_rota:
@@ -505,8 +506,8 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 percentual, inicio, ultimo_gps, tempo_em_rota, km_coleta, km_oficial,
                 na_grade, atualizado_em,
                 entrada_lat, entrada_lon, entrada_hora, saida_lat, saida_lon, saida_hora,
-                trechos_feitos, trechos_faltando
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trechos_feitos, trechos_faltando, executores_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(data, turno, codigo) DO UPDATE SET
                 rota = excluded.rota,
                 frequencia = excluded.frequencia,
@@ -529,7 +530,8 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 saida_lon = CASE WHEN ? = 1 THEN excluded.saida_lon ELSE rota.saida_lon END,
                 saida_hora = CASE WHEN ? = 1 THEN excluded.saida_hora ELSE rota.saida_hora END,
                 trechos_feitos = CASE WHEN ? = 1 THEN excluded.trechos_feitos ELSE rota.trechos_feitos END,
-                trechos_faltando = CASE WHEN ? = 1 THEN excluded.trechos_faltando ELSE rota.trechos_faltando END
+                trechos_faltando = CASE WHEN ? = 1 THEN excluded.trechos_faltando ELSE rota.trechos_faltando END,
+                executores_json = CASE WHEN ? = 1 THEN excluded.executores_json ELSE rota.executores_json END
             """,
             (
                 data,
@@ -557,6 +559,8 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 rota.get("saida_hora") or "",
                 rota.get("trechos_feitos") or "[]",
                 rota.get("trechos_faltando") or "[]",
+                rota.get("executores_json") or "",
+                tem_geo,
                 tem_geo,
                 tem_geo,
                 tem_geo,
@@ -734,34 +738,50 @@ def ler_view(
     ).fetchone()
     if cab is None:
         return None
-    rotas = [
-        {
-            "codigo": row["codigo"],
-            "rota": row["rota"],
-            "frequencia": row["frequencia"],
-            "veiculo": row["veiculo"],
-            "placa": row["placa"],
-            "status": row["status"],
-            "grupo": row["grupo"],
-            "percentual": row["percentual"],
-            "inicio": row["inicio"],
-            "ultimo_gps": row["ultimo_gps"],
-            "tempo_em_rota": row["tempo_em_rota"],
-            "km_coleta": row["km_coleta"],
-            "km_oficial": row["km_oficial"],
-            "na_grade": bool(row["na_grade"]),
-            "entrada_lat": row["entrada_lat"],
-            "entrada_lon": row["entrada_lon"],
-            "entrada_hora": row["entrada_hora"] or "",
-            "saida_lat": row["saida_lat"],
-            "saida_lon": row["saida_lon"],
-            "saida_hora": row["saida_hora"] or "",
-        }
-        for row in con.execute(
-            "SELECT * FROM rota WHERE data = ? AND turno = ? ORDER BY codigo",
-            (data, turno),
+    from .cobertura import ler_executores_json
+
+    rotas = []
+    for row in con.execute(
+        "SELECT * FROM rota WHERE data = ? AND turno = ? ORDER BY codigo",
+        (data, turno),
+    ):
+        bruto = row["executores_json"] if "executores_json" in row.keys() else ""
+        info = ler_executores_json(bruto)
+        placa = info["placa_principal"] or row["placa"]
+        rotas.append(
+            {
+                "codigo": row["codigo"],
+                "rota": row["rota"],
+                "frequencia": row["frequencia"],
+                "veiculo": info["veiculo_principal"] or row["veiculo"],
+                "placa": placa,
+                "placa_principal": info["placa_principal"] or (placa if info["calculado"] and info["executores"] else ""),
+                "placas_apoio": info["placas_apoio"],
+                "apoio": info["apoio"],
+                "sobrepostos": info["sobrepostos"],
+                "cobertura_sobreposta": info["cobertura_sobreposta"],
+                "executores": info["executores"],
+                "resumo_veiculos": info["resumo_veiculos"],
+                "passagens": info["passagens"],
+                "nao_confirmados": info["nao_confirmados"],
+                "auditoria": info["auditoria"],
+                "status": row["status"],
+                "grupo": row["grupo"],
+                "percentual": row["percentual"],
+                "inicio": row["inicio"],
+                "ultimo_gps": row["ultimo_gps"],
+                "tempo_em_rota": row["tempo_em_rota"],
+                "km_coleta": row["km_coleta"],
+                "km_oficial": row["km_oficial"],
+                "na_grade": bool(row["na_grade"]),
+                "entrada_lat": row["entrada_lat"],
+                "entrada_lon": row["entrada_lon"],
+                "entrada_hora": row["entrada_hora"] or "",
+                "saida_lat": row["saida_lat"],
+                "saida_lon": row["saida_lon"],
+                "saida_hora": row["saida_hora"] or "",
+            }
         )
-    ]
     posicoes = [
         {
             "placa": row["placa"],

@@ -183,12 +183,24 @@ def _leitura() -> sqlite3.Connection:
 
 
 def _rota_lida(row: sqlite3.Row) -> dict[str, Any]:
+    from .cobertura import ler_executores_json
+
+    info = ler_executores_json(row["executores_json"] if "executores_json" in row.keys() else "")
     return {
         "codigo": row["codigo"],
         "rota": row["rota"],
         "frequencia": row["frequencia"],
-        "veiculo": row["veiculo"],
-        "placa": row["placa"],
+        "veiculo": info["veiculo_principal"] or row["veiculo"],
+        "placa": info["placa_principal"] or row["placa"],
+        "placa_principal": info["placa_principal"],
+        "placas_apoio": info["placas_apoio"],
+        "apoio": info["apoio"],
+        "sobrepostos": info["sobrepostos"],
+        "cobertura_sobreposta": info["cobertura_sobreposta"],
+        "executores": info["executores"],
+        "passagens": info["passagens"],
+        "nao_confirmados": info["nao_confirmados"],
+        "resumo_veiculos": info["resumo_veiculos"],
         "status": row["status"],
         "grupo": row["grupo"],
         "percentual": row["percentual"],
@@ -322,7 +334,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
         codigo = str(rota.get("codigo") or "")
         aneis = poligonos.get(codigo) or []
         detalhe = (pacote.get("detalhes") or {}).get(codigo) or {}
-        figura, itens = _mapa_rota(rota, aneis, trilhas.get(str(rota.get("placa") or ""), []), detalhe)
+        figura, itens = _mapa_rota(rota, aneis, trilhas, detalhe)
         _pagina_rota(pdf, rota, detalhe, figura, itens, fonte, forte, largura, altura, mm)
         pdf.showPage()
     pdf.save()
@@ -485,6 +497,14 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
         pdf.setFillColorRGB(0.12, 0.16, 0.18)
         for xcol, texto in zip(colunas, valores):
             pdf.drawString(xcol * mm, y, texto)
+        apoio = _texto(rota.get("apoio") or rota.get("resumo_veiculos"))
+        if apoio:
+            y -= 3.6 * mm
+            pdf.setFillColorRGB(0.29, 0.36, 0.4)
+            pdf.setFont(fonte, 6.5)
+            pdf.drawString(29 * mm, y, apoio[:150])
+            pdf.setFont(fonte, 8)
+            pdf.setFillColorRGB(0.12, 0.16, 0.18)
 
 
 def _legenda_pdf(pdf, itens: list[tuple[str, str]], x: float, y: float, fonte: str, mm) -> None:
@@ -540,7 +560,9 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
         ("Status", _texto(rota.get("status"))),
         ("Execução", _pct(rota.get("percentual"))),
         ("Veículo", _texto(rota.get("veiculo"))),
-        ("Placa", _texto(rota.get("placa"))),
+        ("Placa principal", _texto(rota.get("placa_principal") or rota.get("placa"))),
+        ("Apoio efetivo", _texto(rota.get("apoio") or "—")),
+        ("Cobertura sobreposta", _texto(rota.get("cobertura_sobreposta") or "—")),
         ("Início", _texto(rota.get("inicio"))),
         ("Último GPS", _texto(rota.get("ultimo_gps"))),
         ("Entrada", _texto(entrada.get("hora")) if entrada else "—"),
@@ -552,8 +574,52 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
         pdf.setFont(forte, 9)
         pdf.drawString(14 * mm, y, nome)
         pdf.setFont(fonte, 9)
-        pdf.drawString(42 * mm, y, valor[:70])
+        pdf.drawString(48 * mm, y, valor[:68])
         y -= 5.4 * mm
+    for executor in rota.get("executores") or []:
+        if str(executor.get("papel") or "") == "sobreposta":
+            continue
+        if y < 78 * mm:
+            break
+        linha = (
+            f"{executor.get('classificacao') or executor.get('papel') or ''} "
+            f"{executor.get('placa') or ''} "
+            f"{float(executor.get('percentual') or 0):.0f}% "
+            f"exclusivo {float(executor.get('contribuicao_exclusiva') or 0):.0f}% "
+            f"{executor.get('horario') or ''}"
+        ).strip()
+        pdf.setFont(fonte, 8)
+        pdf.drawString(14 * mm, y, linha[:95])
+        y -= 4.2 * mm
+    sobrepostos = [item for item in rota.get("executores") or [] if str(item.get("papel") or "") == "sobreposta"]
+    if sobrepostos and y >= 78 * mm:
+        pdf.setFont(forte, 8)
+        pdf.drawString(14 * mm, y, "Cobertura sobreposta")
+        y -= 4.2 * mm
+    for executor in sobrepostos:
+        if y < 78 * mm:
+            break
+        linha = (
+            f"{executor.get('placa') or ''} "
+            f"individual {float(executor.get('percentual') or 0):.0f}% "
+            f"compartilhada {float(executor.get('contribuicao_compartilhada') or 0):.0f}% "
+            f"{executor.get('horario') or ''}"
+        ).strip()
+        pdf.setFont(fonte, 8)
+        pdf.drawString(14 * mm, y, linha[:95])
+        y -= 4.2 * mm
+    for placa in rota.get("passagens") or []:
+        if y < 78 * mm:
+            break
+        pdf.setFont(fonte, 8)
+        pdf.drawString(14 * mm, y, f"Passagem {placa} — não entra na cobertura"[:95])
+        y -= 4.2 * mm
+    for placa in rota.get("nao_confirmados") or []:
+        if y < 78 * mm:
+            break
+        pdf.setFont(fonte, 8)
+        pdf.drawString(14 * mm, y, f"Não confirmado {placa} — não entra na cobertura"[:95])
+        y -= 4.2 * mm
     if str(rota.get("grupo") or "") == "nao":
         pdf.setFont(fonte, 9)
         pdf.drawString(14 * mm, y - 1 * mm, "Área prevista sem execução registrada até o momento.")
@@ -690,7 +756,39 @@ def _texto_fora(fora: dict[str, Any]) -> str:
     return " · ".join(partes)
 
 
-def _mapa_rota(rota: dict[str, Any], aneis: list, linhas: list, detalhe: dict[str, Any]) -> tuple[bytes, list[tuple[str, str]]]:
+def _hex_rgb(cor: str) -> tuple[int, int, int]:
+    texto = str(cor or "").strip().lstrip("#")
+    if len(texto) != 6:
+        return (29, 78, 216)
+    try:
+        return int(texto[0:2], 16), int(texto[2:4], 16), int(texto[4:6], 16)
+    except ValueError:
+        return (29, 78, 216)
+
+
+def _trilhas_da_rota(rota: dict[str, Any], trilhas: Any) -> list:
+    if not isinstance(trilhas, dict):
+        return list(trilhas or [])
+    fontes = list(rota.get("executores") or [])
+    if not fontes and str(rota.get("placa") or "").strip():
+        fontes = [{"placa": rota.get("placa"), "papel": "principal", "cor": ""}]
+    desenhos = []
+    for item in fontes:
+        placa = str(item.get("placa") or "")
+        if not placa:
+            continue
+        desenhos.append(
+            {
+                "placa": placa,
+                "papel": item.get("classificacao") or item.get("papel") or "",
+                "cor": item.get("cor") or "",
+                "linhas": trilhas.get(placa) or [],
+            }
+        )
+    return desenhos
+
+
+def _mapa_rota(rota: dict[str, Any], aneis: list, trilhas: Any, detalhe: dict[str, Any]) -> tuple[bytes, list[tuple[str, str]]]:
     codigo = str(rota.get("codigo") or "")
     grupo = str(rota.get("grupo") or "nao")
     if grupo == "nao":
@@ -699,7 +797,7 @@ def _mapa_rota(rota: dict[str, Any], aneis: list, linhas: list, detalhe: dict[st
     faltando = _linhas_geo((detalhe or {}).get("trechos_faltando"))
     return _mapa(
         {codigo: aneis},
-        linhas,
+        _trilhas_da_rota(rota, trilhas),
         [rota],
         largura=1600,
         altura_px=1120,
@@ -801,7 +899,15 @@ def _mapa(
 ) -> tuple[bytes, list[tuple[str, str]]]:
     global mapas_tiles, mapas_fallback
     try:
-        desenhado = _mapa_tiles(poligonos, trilhas, largura, altura_px, individual)
+        desenhado = _mapa_tiles(
+            poligonos,
+            trilhas,
+            largura,
+            altura_px,
+            individual,
+            feitos=feitos,
+            faltando=faltando,
+        )
         if desenhado is not None:
             mapas_tiles += 1
             return desenhado, _legenda_de(rotas, trilhas, tiles=True, tem_area=bool(poligonos))
@@ -832,11 +938,42 @@ def _pontos_quadro(poligonos: dict[str, list], trilhas: list) -> list[tuple[floa
             pontos.extend(anel)
     if pontos:
         return pontos
-    for linha in trilhas or []:
-        for ponto in linha:
-            if isinstance(ponto, (list, tuple)) and len(ponto) >= 2:
-                pontos.append((float(ponto[1]), float(ponto[0])))
+    for item in trilhas or []:
+        linhas = item.get("linhas") if isinstance(item, dict) else [item]
+        for linha in linhas or []:
+            for ponto in linha:
+                if isinstance(ponto, (list, tuple)) and len(ponto) >= 2:
+                    pontos.append((float(ponto[1]), float(ponto[0])))
     return pontos
+
+
+def _iter_trilhas(trilhas: list):
+    for item in trilhas or []:
+        if isinstance(item, dict):
+            cor = _hex_rgb(str(item.get("cor") or ""))
+            for linha in item.get("linhas") or []:
+                yield linha, cor
+        else:
+            yield item, (29, 78, 216)
+
+
+def _desenhar_oficiais(desenho, xy, feitos: list | None, faltando: list | None) -> None:
+    def seq_de(linha) -> list:
+        seq = []
+        for par in linha or []:
+            if not isinstance(par, (list, tuple)) or len(par) < 2:
+                continue
+            seq.append(xy(float(par[0]), float(par[1])))
+        return seq
+
+    for linha in feitos or []:
+        seq = seq_de(linha)
+        if len(seq) >= 2:
+            desenho.line(seq, fill=(27, 138, 90, 230), width=5, joint="curve")
+    for linha in faltando or []:
+        seq = seq_de(linha)
+        if len(seq) >= 2:
+            desenho.line(seq, fill=(192, 57, 43, 210), width=3, joint="curve")
 
 
 def _mapa_tiles(
@@ -845,6 +982,8 @@ def _mapa_tiles(
     largura: int,
     altura_px: int,
     individual: bool,
+    feitos: list | None = None,
+    faltando: list | None = None,
 ) -> bytes | None:
     pontos = _pontos_quadro(poligonos, trilhas)
     vista = enquadrar(pontos, largura, altura_px)
@@ -869,14 +1008,15 @@ def _mapa_tiles(
                 continue
             desenho.polygon(seq, fill=(244, 168, 40, 78))
             desenho.line(seq + [seq[0]], fill=(234, 88, 12, 255), width=5 if individual else 3, joint="curve")
-    for linha in trilhas or []:
+    _desenhar_oficiais(desenho, xy, feitos, faltando)
+    for linha, cor in _iter_trilhas(trilhas):
         seq = []
         for ponto in linha:
             if not isinstance(ponto, (list, tuple)) or len(ponto) < 2:
                 continue
             seq.append(xy(float(ponto[1]), float(ponto[0])))
         if len(seq) >= 2:
-            desenho.line(seq, fill=(29, 78, 216, 235), width=4 if individual else 2, joint="curve")
+            desenho.line(seq, fill=cor + (235,), width=4 if individual else 2, joint="curve")
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     carimbar(img)
     buf = io.BytesIO()
@@ -940,14 +1080,15 @@ def _mapa_simples(
             desenho.polygon(seq, fill=cor + (150,))
             if len(seq) >= 2:
                 desenho.line(seq + [seq[0]], fill=cor + (255,), width=2)
-    for linha in trilhas or []:
+    _desenhar_oficiais(desenho, xy, feitos, faltando)
+    for linha, cor_linha in _iter_trilhas(trilhas):
         seq = []
         for ponto in linha:
             if not isinstance(ponto, (list, tuple)) or len(ponto) < 2:
                 continue
             seq.append(xy(float(ponto[1]), float(ponto[0])))
         if len(seq) >= 2:
-            desenho.line(seq, fill=(40, 55, 70, 230), width=3 if individual else 2)
+            desenho.line(seq, fill=cor_linha + (230,), width=3 if individual else 2)
     if entrada:
         desenho.ellipse(_bolha(xy(float(entrada["lon"]), float(entrada["lat"]))), fill=(27, 138, 90, 255))
     if saida:

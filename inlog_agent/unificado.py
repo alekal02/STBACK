@@ -483,7 +483,119 @@ def _montar_caminhoes(
     return saida
 
 
+def _cobertura_dos_candidatos(
+    setor: dict[str, Any],
+    candidatos: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    ruas = setor.get("ruas") or []
+    geom = setor.get("geom")
+    if not ruas or geom is None or not candidatos:
+        return None
+    from .cobertura import cobertura_compartilhada
+
+    veiculos = []
+    for row in candidatos:
+        placa = str(row.get("placa") or "").strip()
+        pontos = row.get("zona") or row.get("clip") or []
+        if not placa or len(pontos) < 2:
+            continue
+        veiculos.append(
+            {
+                "placa": placa,
+                "veiculo": row.get("veiculo") or placa,
+                "pontos": pontos,
+                "execucao": row.get("execucao") or "",
+            }
+        )
+    if not veiculos:
+        return None
+    return cobertura_compartilhada(ruas, veiculos, geom)
+
+
+def _caminhao_de_executor(item: dict[str, Any]) -> dict[str, Any]:
+    papel = str(item.get("papel") or "")
+    return {
+        "placa": item.get("placa") or "",
+        "veiculo": item.get("veiculo") or "",
+        "cor": item.get("cor") or "",
+        "papel": papel,
+        "classificacao": item.get("classificacao") or ("Principal" if papel == "principal" else "Apoio"),
+        "percentual": item.get("percentual") or 0,
+        "contribuicao_exclusiva": item.get("contribuicao_exclusiva") or 0,
+        "horario": item.get("horario") or "",
+        "hora_inicio": item.get("hora_inicio") or "",
+        "hora_fim": item.get("hora_fim") or "",
+        "ponto_inicio": item.get("ponto_inicio") or [],
+        "ponto_fim": item.get("ponto_fim") or [],
+        "inicio": item.get("inicio") or "",
+        "fim": item.get("fim") or "",
+        "trechos": item.get("trechos") or [],
+        "lacunas": [],
+        "passagens": [],
+        "execucao": "FEITA" if float(item.get("percentual") or 0) >= 80 else "PARCIAL",
+    }
+
+
+def _aplicar_cobertura_no_setor(base: dict[str, Any], cobertura: dict[str, Any] | None) -> None:
+    if not cobertura:
+        return
+    base["_cobertura"] = cobertura
+    base["trechos_feitos"] = cobertura.get("trechos_feitos") or []
+    base["trechos_faltando"] = cobertura.get("trechos_faltando") or []
+    base["executores"] = cobertura.get("executores") or []
+    base["apoio_rotulo"] = cobertura.get("apoio") or ""
+    base["resumo_veiculos"] = cobertura.get("resumo_veiculos") or ""
+    if not cobertura.get("executores"):
+        if str(base.get("status") or "") != "APOIO":
+            base["percentual"] = 0.0
+            if base.get("candidatos"):
+                base["status"] = "PASSAGEM"
+                base["motivo"] = (
+                    "GPS no setor sem serviço comprovado nas vias oficiais. "
+                    + str(base.get("motivo") or "")
+                ).strip()
+        return
+    principal = next(item for item in cobertura["executores"] if item.get("papel") == "principal")
+    base["percentual"] = float(cobertura.get("percentual") or 0)
+    base["caminhao"] = _caminhao_de_executor(principal)
+    base["caminhao"]["km_coleta"] = cobertura.get("km_feito")
+    base["caminhoes"] = [_caminhao_de_executor(item) for item in cobertura["executores"]]
+    if str(base.get("status") or "") != "APOIO":
+        pct = float(base["percentual"])
+        base["status"] = "FEITA" if pct >= 80 else "PARCIAL" if pct > 0 else "NÃO FEITA"
+    base["motivo"] = (
+        f"Cobertura consolidada {float(base['percentual']):.1f}% pela união dos trechos oficiais. "
+        f"{cobertura.get('resumo_veiculos') or ''}"
+    ).strip()
+
+
 def _txt_caminhoes(setor: dict[str, Any]) -> str:
+    from .cobertura import SEM_APOIO
+
+    executores = setor.get("executores") or []
+    if executores:
+        partes = []
+        for cam in executores:
+            placa = str(cam.get("placa") or "").strip()
+            if not placa:
+                continue
+            papel = {
+                "principal": "principal",
+                "apoio": "apoio efetivo",
+                "sobreposta": "cobertura sobreposta",
+            }.get(str(cam.get("papel") or ""), "apoio efetivo")
+            hora = str(cam.get("horario") or "").strip()
+            texto = (
+                f"{placa} ({papel} {float(cam.get('percentual') or 0):.0f}% "
+                f"exclusivo {float(cam.get('contribuicao_exclusiva') or 0):.0f}%"
+            )
+            if hora:
+                texto += f" {hora}"
+            texto += ")"
+            partes.append(texto)
+        if partes and not any(str(cam.get("papel") or "") == "apoio" for cam in executores):
+            partes.append(SEM_APOIO)
+        return " · ".join(partes)
     partes = []
     for cam in setor.get("caminhoes") or []:
         placa = str(cam.get("placa") or cam.get("veiculo") or "").strip()
@@ -655,10 +767,15 @@ def _analisar_setor(
             "trechos": trechos,
             "lacunas": [],
             "clip": uso,
+            "zona": zona,
             "tortuosidade": round(_tortuosidade(uso), 2),
         }
         candidatos.append(row)
 
+    cobertura = _cobertura_dos_candidatos(
+        setor,
+        [c for c in candidatos if _executor_autorizado(c, placas_executoras)],
+    )
     melhor_metros = _melhor_metros_oficiais(candidatos)
     coletaram = [
         c
@@ -666,7 +783,7 @@ def _analisar_setor(
         if _pode_executar(c, melhor_metros, placas_executoras)
     ]
     base["candidatos"] = [
-        {k: v for k, v in c.items() if k not in {"clip", "trechos", "lacunas"}}
+        {k: v for k, v in c.items() if k not in {"clip", "trechos", "lacunas", "zona"}}
         for c in sorted(candidatos, key=lambda r: r["percentual"], reverse=True)
     ]
     if not coletaram:
@@ -684,6 +801,7 @@ def _analisar_setor(
         )
         base["caminhao"] = _ficha_caminhao(melhor, "passagem, não coleta")
         base["caminhoes"] = _montar_caminhoes(candidatos, "PASSAGEM", melhor)
+        _aplicar_cobertura_no_setor(base, cobertura)
         return base
 
     vencedor, evidencias = _escolher_vencedor(coletaram)
@@ -740,6 +858,7 @@ def _analisar_setor(
         if extra_pass.strip() not in str(base.get("motivo") or ""):
             base["motivo"] = f"{base.get('motivo') or ''}{extra_pass}".strip()
     base["caminhoes"] = _montar_caminhoes(candidatos, str(base.get("status") or ""), vencedor)
+    _aplicar_cobertura_no_setor(base, cobertura)
     return base
 
 
@@ -1908,6 +2027,20 @@ def _linha(setor: dict[str, Any]) -> dict[str, str]:
         "% Concluída": f"{pct:.0f}%",
         "Veículo": cam.get("veiculo") or "—",
         "Placa": cam.get("placa") or "—",
+        "Placa principal": (
+            str(setor.get("placa_principal") or cam.get("placa") or "—")
+            if not setor.get("executores")
+            else next(
+                (
+                    str(item.get("placa") or "—")
+                    for item in setor.get("executores") or []
+                    if str(item.get("papel") or "") == "principal"
+                ),
+                cam.get("placa") or "—",
+            )
+        ),
+        "Apoio": setor.get("apoio_rotulo") or "",
+        "Resumo veículos": setor.get("resumo_veiculos") or "",
         "Caminhões na rota": _txt_caminhoes(setor) or (cam.get("placa") or "—"),
         "Empresa": "SEGTRACK",
         "Km Coleta": _fmt_num(cam.get("km_coleta"), " km"),
@@ -1991,6 +2124,10 @@ def _rotas_mapa(feitos: list[dict[str, Any]], *, clip_m: float = CLIP_MAPA_M) ->
             "ponto_fim": cam.get("ponto_fim") or [],
             "rota_principal": setor.get("rota_principal") or "",
             "caminhoes": caminhoes_mapa,
+            "trechos_feitos": setor.get("trechos_feitos") or [],
+            "trechos_faltando": setor.get("trechos_faltando") or [],
+            "apoio": setor.get("apoio_rotulo") or "",
+            "resumo_veiculos": setor.get("resumo_veiculos") or "",
         }
         pct = float(setor.get("percentual") or 0)
         rotulo, _cls = _rotulo_pct(pct, setor.get("status") or "")
@@ -2029,6 +2166,10 @@ def _rotas_mapa(feitos: list[dict[str, Any]], *, clip_m: float = CLIP_MAPA_M) ->
                 "ontem": bool(setor.get("recuperada_ontem")),
                 "fase_ontem": setor.get("fase_ontem") or "",
                 "caminhoes": caminhoes_mapa,
+                "trechos_feitos": setor.get("trechos_feitos") or [],
+                "trechos_faltando": setor.get("trechos_faltando") or [],
+                "apoio": setor.get("apoio_rotulo") or "",
+                "resumo_veiculos": setor.get("resumo_veiculos") or "",
                 "coberturas_inlog": [cob],
             }
         )
@@ -2101,8 +2242,10 @@ def _html(
             label = f"{codigo} — {nome}"
         else:
             label = codigo or nome or "Rota"
+        detalhe = str(setor.get("resumo_veiculos") or setor.get("apoio_rotulo") or "").strip()
+        extra = f"<small>{_esc(detalhe)}</small>" if detalhe else ""
         blocos.append(
-            f"<div class='barra'><span class='nome'>{_esc(label)}</span>"
+            f"<div class='barra'><span class='nome'>{_esc(label)}{extra}</span>"
             f"<b class='{classe}'>{pct:.0f}%</b></div>"
         )
     barras = "".join(blocos)

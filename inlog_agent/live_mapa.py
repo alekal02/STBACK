@@ -424,8 +424,15 @@ def trechos_internos_dificil(
     return saida
 
 
-def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
+def trilhas(
+    data: str | None,
+    turno: str | None,
+    placa: str | None = None,
+    rota: str | None = None,
+) -> dict[str, Any]:
     dia, pedido = _dia_turno(data, turno)
+    filtro_placa = str(placa or "").strip().upper()
+    filtro_rota = str(rota or "").strip().upper()
     con = conectar()
     try:
         rows = con.execute(
@@ -468,6 +475,12 @@ def trilhas(data: str | None, turno: str | None) -> dict[str, Any]:
         visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
         if linhas or fora:
             veiculos.append({"placa": placa, "linhas": linhas, "deslocamento": fora})
+    if filtro_placa:
+        veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() == filtro_placa]
+    if filtro_rota:
+        permitidas = _placas_executoras(dia.isoformat(), pedido, filtro_rota)
+        if permitidas is not None:
+            veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() in permitidas]
     return {
         "data": dia.isoformat(),
         "turno": pedido,
@@ -715,6 +728,72 @@ def _marco(lat: Any, lon: Any, hora: Any) -> dict[str, Any] | None:
         return None
 
 
+def _placas_executoras(data: str, turno: str, codigo: str) -> set[str] | None:
+    """None quando a rota não está gravada. Conjunto vazio não filtra por engano o mapa geral."""
+    from .cobertura import ler_executores_json
+
+    con = conectar()
+    try:
+        row = con.execute(
+            "SELECT placa, executores_json FROM rota WHERE data = ? AND turno = ? AND codigo = ?",
+            (data, turno, codigo),
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        return set()
+    bruto = row["executores_json"] if "executores_json" in row.keys() else ""
+    info = ler_executores_json(bruto)
+    placas = {str(item.get("placa") or "").upper() for item in info["executores"] if item.get("placa")}
+    if placas:
+        return placas
+    legado = str(row["placa"] or "").strip().upper()
+    return {legado} if legado else set()
+
+
+def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Traçado de exibição. A cobertura já está nos trechos oficiais gravados."""
+    placas = [str(item.get("placa") or "").strip() for item in executores if str(item.get("placa") or "").strip()]
+    if not placas:
+        return []
+    con = conectar()
+    try:
+        marcas = ",".join("?" for _ in placas)
+        rows = con.execute(
+            f"""
+            SELECT placa, ts, lat, lon FROM ponto
+            WHERE data = ? AND turno = ? AND placa IN ({marcas})
+            ORDER BY placa, ts
+            """,
+            [data, turno, *placas],
+        ).fetchall()
+    finally:
+        con.close()
+    por_placa: dict[str, list[tuple[str, float, float]]] = {}
+    for row in rows:
+        por_placa.setdefault(str(row["placa"] or ""), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
+    aneis = []
+    for setor in _poligonos():
+        if str(setor.get("codigo") or "").upper() == codigo:
+            aneis = setor.get("aneis") or []
+            break
+    referencia = [{"codigo": codigo, "aneis": aneis}] if aneis else []
+    saida = []
+    for item in executores:
+        placa = str(item.get("placa") or "")
+        brutos = por_placa.get(placa) or []
+        serie = brutos
+        if referencia:
+            serie = [ponto for ponto in brutos if codigo_que_contem(ponto[1], ponto[2], referencia)]
+        linhas = _linhas_visuais(serie) if serie else []
+        if not linhas:
+            linhas = _linhas_visuais(brutos)
+        copia = dict(item)
+        copia["linhas"] = linhas
+        saida.append(copia)
+    return saida
+
+
 def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[str, Any]:
     dia, pedido = _dia_turno(data, turno)
     codigo = str(rota or "").strip().upper()
@@ -724,8 +803,9 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     try:
         row = con.execute(
             """
-            SELECT codigo, entrada_lat, entrada_lon, entrada_hora,
-                   saida_lat, saida_lon, saida_hora, trechos_feitos, trechos_faltando
+            SELECT codigo, placa, percentual, entrada_lat, entrada_lon, entrada_hora,
+                   saida_lat, saida_lon, saida_hora, trechos_feitos, trechos_faltando,
+                   executores_json
             FROM rota
             WHERE data = ? AND turno = ? AND codigo = ?
             """,
@@ -733,22 +813,50 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
         ).fetchone()
     finally:
         con.close()
+    from .cobertura import ler_executores_json
+
+    vazio = {
+        "ok": False,
+        "data": dia.isoformat(),
+        "turno": pedido,
+        "rota": codigo,
+        "percentual": 0,
+        "placa_principal": "",
+        "apoio": "",
+        "cobertura_sobreposta": "",
+        "sobrepostos": [],
+        "resumo_veiculos": "",
+        "executores": [],
+        "passagens": [],
+        "nao_confirmados": [],
+        "veiculos": [],
+        "entrada": None,
+        "saida": None,
+        "trechos_feitos": {"type": "FeatureCollection", "features": []},
+        "trechos_faltando": {"type": "FeatureCollection", "features": []},
+    }
     if row is None:
-        return {
-            "ok": False,
-            "data": dia.isoformat(),
-            "turno": pedido,
-            "rota": codigo,
-            "entrada": None,
-            "saida": None,
-            "trechos_feitos": {"type": "FeatureCollection", "features": []},
-            "trechos_faltando": {"type": "FeatureCollection", "features": []},
-        }
+        return vazio
+    info = ler_executores_json(row["executores_json"] if "executores_json" in row.keys() else "")
+    veiculos = _trajetorias(dia.isoformat(), pedido, codigo, info["executores"])
     return {
         "ok": True,
         "data": dia.isoformat(),
         "turno": pedido,
         "rota": codigo,
+        "percentual": row["percentual"],
+        "placa": info["placa_principal"] or row["placa"],
+        "placa_principal": info["placa_principal"],
+        "placas_apoio": info["placas_apoio"],
+        "apoio": info["apoio"],
+        "sobrepostos": info["sobrepostos"],
+        "cobertura_sobreposta": info["cobertura_sobreposta"],
+        "resumo_veiculos": info["resumo_veiculos"],
+        "executores": info["executores"],
+        "passagens": info["passagens"],
+        "nao_confirmados": info["nao_confirmados"],
+        "auditoria": info["auditoria"],
+        "veiculos": veiculos,
         "entrada": _marco(row["entrada_lat"], row["entrada_lon"], row["entrada_hora"]),
         "saida": _marco(row["saida_lat"], row["saida_lon"], row["saida_hora"]),
         "trechos_feitos": _linhas_geojson(str(row["trechos_feitos"] or ""), "feitos"),

@@ -333,7 +333,7 @@ def write_mapa_html(
       const sit = rotuloSit(rota, pct);
       const c = cor(pct, rota);
       const horas = [rota.horario_apoio || rota.horario, (rota.horario_rota && rota.rota_principal) ? ("rota " + rota.rota_principal + ": " + rota.horario_rota) : ""].filter(Boolean).join(" · ");
-      const layer = {{ exe: [], plan: [], feitos: [], falta: [], setor: [], marks: [], bounds: rota.bounds || null }};
+      const layer = {{ exe: [], plan: [], feitos: [], falta: [], setor: [], marks: [], porPlaca: {{}}, bounds: rota.bounds || null }};
       (rota.poligonos || []).forEach((pts) => {{
         if (!pts || pts.length < 4) return;
         const corBorda = rota.ontem ? "#1a4e86" : "#6b5210";
@@ -361,7 +361,12 @@ def write_mapa_html(
             lineJoin: "round",
             lineCap: "round"
           }}).addTo(mapa);
-          exe.bindPopup(`<b>${{cam.placa || cam.veiculo || ""}}</b><br>${{papel}} · ${{Number(cam.percentual || 0).toFixed(0)}}%<br>${{cam.horario || ""}}<br>${{rota.setor || ""}}`);
+          const exclusivo = cam.contribuicao_exclusiva == null ? "" : `<br>exclusivo ${{Number(cam.contribuicao_exclusiva).toFixed(0)}}%`;
+          const classe = cam.classificacao || papel;
+          exe.bindPopup(`<b>${{cam.placa || cam.veiculo || ""}}</b><br>${{classe}} · ${{Number(cam.percentual || 0).toFixed(0)}}%${{exclusivo}}<br>${{cam.horario || ""}}<br>${{rota.setor || ""}}`);
+          const chavePlaca = String(cam.placa || "");
+          if (!layer.porPlaca[chavePlaca]) layer.porPlaca[chavePlaca] = [];
+          layer.porPlaca[chavePlaca].push(exe);
           exe.on("click", () => focar(idx));
           layer.exe.push(exe);
           grupo.push(exe);
@@ -385,6 +390,20 @@ def write_mapa_html(
         }}).addTo(mapa);
         layer.setor.push(halo, meio, borda);
         grupo.push(halo, meio, borda);
+      }});
+      (rota.trechos_feitos || []).forEach((pts) => {{
+        if (!pts || pts.length < 2) return;
+        const linha = L.polyline(pts, {{ color: "#1b8a5a", weight: 6, opacity: 0.9 }}).addTo(mapa);
+        linha.bindTooltip("Trecho executado", {{ sticky: true }});
+        layer.feitos.push(linha);
+        grupo.push(linha);
+      }});
+      (rota.trechos_faltando || []).forEach((pts) => {{
+        if (!pts || pts.length < 2) return;
+        const linha = L.polyline(pts, {{ color: "#c0392b", weight: 4, opacity: 0.8, dashArray: "6 6" }}).addTo(mapa);
+        linha.bindTooltip("Trecho pendente", {{ sticky: true }});
+        layer.falta.push(linha);
+        grupo.push(linha);
       }});
       function horaPino(txt) {{
         const p = String(txt || "").trim().split(/\\s+/);
@@ -415,15 +434,27 @@ def write_mapa_html(
         const iniH = horaPino((visitasCam[0] || cam).hora_inicio || cam.hora_inicio);
         const fimH = horaPino((visitasCam[visitasCam.length - 1] || cam).hora_fim || cam.hora_fim);
         const janela = [iniH, fimH].filter(Boolean).join("–");
-        return `<span style="display:inline-block;width:10px;height:10px;background:${{cam.cor || '#c0392b'}};border-radius:2px;margin-right:4px"></span>${{cam.placa || cam.veiculo || "—"}} <small>${{cam.papel || "passagem"}} ${{Number(cam.percentual || 0).toFixed(0)}}%${{janela ? " · " + janela : ""}}</small>`;
+        const excl = cam.contribuicao_exclusiva == null ? "" : ` · exclusivo ${{Number(cam.contribuicao_exclusiva).toFixed(0)}}%`;
+        const classe = cam.classificacao || cam.papel || "passagem";
+        return `<button type="button" class="chip-placa" data-placa="${{cam.placa || ""}}" style="display:inline-flex;align-items:center;gap:4px;margin:2px 0;border:0;background:transparent;cursor:pointer;font:inherit;text-align:left"><span style="display:inline-block;width:10px;height:10px;background:${{cam.cor || '#c0392b'}};border-radius:2px"></span>${{cam.placa || cam.veiculo || "—"}} <small>${{classe}} ${{Number(cam.percentual || 0).toFixed(0)}}%${{excl}}${{janela ? " · " + janela : ""}}</small></button>`;
       }}).join("<br>");
       const box = document.createElement("div");
       box.className = "item";
       box.innerHTML = `<div class="linha-rota"><b>${{rota.setor || rota.veiculo || ""}}</b> <span class="pct" style="color:${{c}}">${{pct.toFixed(0)}}%</span></div>
-        <div class="detalhe"><small>${{sit}} · SEGTRACK<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}</small>
+        <div class="detalhe"><small>${{sit}} · SEGTRACK<br>${{rota.rota || ""}}${{rota.ontem ? "<br>rota de ontem" : ""}}${{horas ? "<br>" + horas : ""}}${{rota.apoio ? "<br>" + rota.apoio : ""}}</small>
         <div style="margin-top:6px;font-size:12px;line-height:1.45">${{chips}}</div></div>
         <div class="barra"><span style="width:${{Math.min(pct,100)}}%;background:${{c}}"></span></div>`;
       box.onclick = () => focar(idx);
+      box.querySelectorAll(".chip-placa").forEach((el) => {{
+        el.addEventListener("click", (ev) => {{
+          ev.stopPropagation();
+          const placa = el.getAttribute("data-placa") || "";
+          const grupoPlaca = layer.porPlaca[placa] || [];
+          const visivel = grupoPlaca.some((l) => mapa.hasLayer(l));
+          grupoPlaca.forEach((l) => {{ if (visivel) mapa.removeLayer(l); else l.addTo(mapa); }});
+          el.style.opacity = visivel ? "0.35" : "1";
+        }});
+      }});
       lista.appendChild(box);
     }});
     function focar(idx) {{

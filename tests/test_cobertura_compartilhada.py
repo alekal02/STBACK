@@ -502,6 +502,26 @@ def test_65dn_e_outra_rota_oficial_reconhecem_dois_caminhoes():
         assert codigo not in depois["resumo_veiculos"]
 
 
+def test_curva_encostada_permanece_no_percurso():
+    from shapely.geometry import LineString
+
+    reta = _rua(0, 0, 80, 0)
+    curva = LineString([(_X + 80, _Y), (_X + 120, _Y + 69.3)])
+    pontos = []
+    for dist, dx, dy, segundo in ((40, 40, 0, 0), (40, 100, 34.6, 12)):
+        lon, lat = TO_WGS.transform(_X + dx, _Y + dy)
+        pontos.append(
+            {
+                "latitude": lat,
+                "longitude": lon,
+                "timestamp": datetime(2026, 10, 19, 8, 0, segundo).strftime("%Y-%m-%dT%H:%M:%S"),
+                "tz": "BRT",
+            }
+        )
+    resultado = cobertura_compartilhada([reta, curva], [_veiculo("AAA1A11", pontos)])
+    assert 50 <= resultado["percentual"] < 90
+
+
 def test_via_paralela_dentro_do_raio_nao_e_creditada():
     propria = _rua(0, 0, 1200, 0)
     paralela = _rua(0, 30, 1200, 30)

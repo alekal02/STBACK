@@ -805,8 +805,9 @@ def _associar_percurso(
     """Associa cada passo do GPS à via oficial percorrida.
 
     O raio de 45 m só limita a busca. O passo entra se a direção e a velocidade
-    de coleta concordam e a projeção cobre ao menos o passo de 8 m da via.
-    Um segmento curto não exige metade do intervalo inteiro do GPS. Salto acima
+    de coleta concordam e a projeção cobre a via: 8 m, ou a própria peça quando
+    ela é mais curta. Curva e retorno que encostam na via percorrida entram no
+    mesmo passo. Via paralela que não encosta continua sem crédito. Salto acima
     de 160 m não inventa o vão. Duas vias distintas só ficam sem crédito quando
     nenhuma está claramente mais perto que a outra.
     """
@@ -867,7 +868,9 @@ def _associar_percurso(
             if along_linha < dist * 0.5:
                 continue
             along = abs(segmento.project(p1_pt) - segmento.project(p0_pt))
-            if along < 8:
+            # O passo de 8 m mede a via. Numa peça mais curta, vale percorrer a própria peça.
+            limite_along = 8.0 if segmento.length >= 16 else max(2.0, segmento.length * 0.5)
+            if along < limite_along:
                 continue
             candidatos.append((distancia, indice))
         passo_id += 1
@@ -883,12 +886,8 @@ def _associar_percurso(
             mudou = False
             ainda: list[tuple[float, int]] = []
             for distancia, indice in resto:
-                if any(
-                    rumos[base] is not None
-                    and rumos[indice] is not None
-                    and _mesma_via(segmentos[base], segmentos[indice], rumos[base], rumos[indice])
-                    for base in mesmos
-                ):
+                # Curva e retorno encostam na via. Via paralela não encosta e continua em disputa.
+                if any(segmentos[base].distance(segmentos[indice]) <= 1.0 for base in mesmos):
                     mesmos.add(indice)
                     mudou = True
                 else:

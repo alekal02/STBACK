@@ -1590,7 +1590,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         if path == "/api/health":
-            self._json(200, {"ok": True})
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "versao": (os.getenv("RENDER_GIT_COMMIT") or "").strip(),
+                },
+            )
             return
         if path == "/api/diagnostico":
             from .live_db import diagnostico

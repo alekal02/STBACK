@@ -16,11 +16,9 @@ from .cobertura import (
     DENTRO_M,
     FEITA_MIN,
     _xy,
-    avaliar_cobertura,
     cobertura_espacial,
     km_gps,
     passagens_na_rota,
-    percentual_das_vias,
     preparar_pontos,
     recortar_pontos,
     separar_dentro_borda,
@@ -706,22 +704,8 @@ def _analisar_setor(
             melhor_pts=melhor_pts,
             melhor_km=melhor_km,
         )
-        oficial = _cobertura_vias_oficiais(cam.get("pontos") or uso, setor)
-        if oficial is not None:
-            execucao = _execucao_das_vias(oficial["percentual"], oficial["metros"])
-            if execucao == "PASSAGEM":
-                motivo = (
-                    "passagem: GPS no polígono sem cobertura única das vias oficiais"
-                    if float(oficial["metros"]) <= 0
-                    else "passagem: presença nas vias oficiais sem assumir a execução da rota"
-                )
-            elif execucao == "FEITA":
-                motivo = "cobertura das vias oficiais confirma a coleta neste setor"
-            else:
-                motivo = "cobertura parcial das vias oficiais, com permanência na rota"
-        else:
-            execucao = analise["execucao"]
-            motivo = analise["motivo"]
+        execucao = analise["execucao"]
+        motivo = analise["motivo"]
         visitas = passagens_na_rota(cam.get("pontos") or [], setor.get("geom"), dia)
         if visitas:
             trechos = [v["trecho"] for v in visitas if len(v.get("trecho") or []) >= 2]
@@ -750,9 +734,9 @@ def _analisar_setor(
             "pontos_no_setor": len(uso),
             "pontos_dentro": len(dentro),
             "km_coleta": round(float(cob.get("km_coleta") or km_rua), 3),
-            "percentual": float(oficial["percentual"] if oficial is not None else cob.get("percentual") or 0),
-            "percentual_vias": None if oficial is None else oficial["percentual"],
-            "metros_vias": None if oficial is None else oficial["metros"],
+            "percentual": float(cob.get("percentual") or 0),
+            "percentual_vias": None,
+            "metros_vias": None,
             "area_pct": cob.get("area_pct"),
             "veredicto_gps": cob.get("veredicto"),
             "confianca": cob.get("confianca"),
@@ -812,6 +796,7 @@ def _analisar_setor(
         base["caminhao"] = _ficha_caminhao(melhor, "passagem, não coleta")
         base["motivo"] = f"passagem, não coleta — {melhor.get('placa') or melhor.get('veiculo')}"
         base["caminhoes"] = _montar_caminhoes(candidatos, "PASSAGEM", melhor)
+        _aplicar_cobertura_no_setor(base, cobertura)
         return base
     _rebaixar_passagens(candidatos, vencedor)
     base.update(
@@ -896,20 +881,6 @@ def _ficha_caminhao(row: dict[str, Any], evidencias: str) -> dict[str, Any]:
         "lacunas": row.get("lacunas") or [],
         "evidencias": evidencias,
         "tortuosidade": row.get("tortuosidade"),
-    }
-
-
-def _cobertura_vias_oficiais(pontos: list[dict[str, Any]], setor: dict[str, Any]) -> dict[str, float] | None:
-    """Metros únicos das vias oficiais. Não usa o km de GPS solto no polígono."""
-    ruas = setor.get("ruas") or []
-    if not ruas or not pontos:
-        return None
-    cob = avaliar_cobertura([], pontos, geom_setor=setor.get("geom"), ruas=ruas)
-    metros = float(cob.get("km_coleta") or 0) * 1000.0
-    faltando = float(cob.get("km_faltando") or 0) * 1000.0
-    return {
-        "percentual": float(percentual_das_vias(metros, faltando)),
-        "metros": round(metros, 1),
     }
 
 
@@ -2024,7 +1995,7 @@ def _linha(setor: dict[str, Any]) -> dict[str, str]:
         "Setor": setor.get("setor") or "",
         "Rota": setor.get("frequencia") or "",
         "Status": rotulo,
-        "% Concluída": f"{pct:.0f}%",
+        "% Concluída": f"{pct:.1f}%",
         "Veículo": cam.get("veiculo") or "—",
         "Placa": cam.get("placa") or "—",
         "Placa principal": (

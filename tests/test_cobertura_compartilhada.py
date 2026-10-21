@@ -658,3 +658,130 @@ def test_dois_percursos_nao_somam_o_mesmo_segmento():
     )
     assert dois["percentual"] == um["percentual"]
     assert dois["km_feito"] == um["km_feito"]
+
+
+def _caminhao(veiculo: dict) -> dict:
+    copia = dict(veiculo)
+    copia.setdefault("id", copia["placa"])
+    copia.setdefault("fonte", "segtrack")
+    copia.setdefault("fonte_nome", "SEGTRACK")
+    copia.setdefault("inlog", "")
+    return copia
+
+
+def _setor_sintetico(ruas: list, geom) -> dict:
+    return {
+        "codigo": "TST1",
+        "completo": "TST1",
+        "frequencia": "TESTE",
+        "geom": geom,
+        "ruas": ruas,
+        "poligonos": [],
+        "vias": [],
+    }
+
+
+def test_analise_grava_a_uniao_e_o_apoio_entra_no_percentual():
+    """O percentual da rota é o da cobertura consolidada, não o de um caminhão só."""
+    from datetime import date
+
+    from shapely.geometry import Polygon
+
+    from inlog_agent.live_report import _rota
+    from inlog_agent.live_sync import _anexar_geometria_visual
+    from inlog_agent.unificado import _analisar_setor, _linha
+
+    longa = _rua(0, 200, 1200, 200)
+    curta = _rua(0, 360, 800, 360)
+    ruas = [longa, curta]
+    geom = Polygon([(_X - 40, _Y), (_X + 1400, _Y), (_X + 1400, _Y + 500), (_X - 40, _Y + 500)])
+    dia = date(2026, 10, 19)
+    principal = _veiculo("AAA1A11", _pontos(longa, datetime(2026, 10, 19, 8, 0)))
+    apoio = _veiculo("BBB2B22", _pontos(curta, datetime(2026, 10, 19, 9, 0), vel_kmh=12, passo_s=8))
+    repetido = _veiculo("CCC3C33", list(principal["pontos"]))
+    setor = _setor_sintetico(ruas, geom)
+
+    sozinho = _analisar_setor(setor, [_caminhao(principal)], dia)
+    com_apoio = _analisar_setor(setor, [_caminhao(principal), _caminhao(apoio)], dia)
+    conta = cobertura_compartilhada(ruas, [principal, apoio], geom)
+    assert com_apoio["percentual"] == conta["percentual"]
+    assert com_apoio["percentual"] > sozinho["percentual"]
+    assert any(item.get("papel") == "apoio" and item.get("placa") == "BBB2B22" for item in com_apoio["executores"])
+
+    sobreposto = _analisar_setor(setor, [_caminhao(principal), _caminhao(repetido)], dia)
+    um = cobertura_compartilhada(ruas, [principal], geom)
+    dois = cobertura_compartilhada(ruas, [principal, repetido], geom)
+    assert sobreposto["percentual"] == dois["percentual"] == um["percentual"]
+
+    rota = _rota(_linha(com_apoio))
+    rota["codigo"] = "TST1"
+    rota["na_grade"] = True
+    _anexar_geometria_visual([com_apoio], [], [rota])
+    assert rota["percentual"] == conta["percentual"]
+    gravado = ler_executores_json(rota["executores_json"])
+    assert gravado["percentual"] == conta["percentual"]
+    assert "BBB2B22" in gravado["apoio"]
+
+    anterior = os.environ.get("SAGTRACK_LIVE_DB")
+    pasta = Path(tempfile.mkdtemp())
+    os.environ["SAGTRACK_LIVE_DB"] = str(pasta / "live.db")
+    os.environ["SAGTRACK_LIVE_SYNC"] = "0"
+    try:
+        from inlog_agent.live_db import conectar, gravar_rotas, gravar_turno, ler_view
+        from inlog_agent.live_mapa import detalhe_rota
+        from inlog_agent.live_pdf import _rota_lida
+
+        con = conectar()
+        gravar_turno(con, {"data": "2026-10-19", "turno": "diurno", "aberto": 1, "periodo": "teste"})
+        gravar_rotas(con, "2026-10-19", "diurno", [rota])
+        con.commit()
+        linha = con.execute("SELECT * FROM rota WHERE codigo = 'TST1'").fetchone()
+        painel = ler_view(con, "2026-10-19", "diurno")
+        con.close()
+        tabela = next(item for item in painel["rotas"] if item["codigo"] == "TST1")
+        pdf = _rota_lida(linha)
+        detalhe = detalhe_rota("2026-10-19", "diurno", "TST1")
+        assert tabela["percentual"] == pdf["percentual"] == detalhe["percentual"] == conta["percentual"]
+        assert tabela["apoio"] == pdf["apoio"] == detalhe["apoio"]
+        assert "BBB2B22" in tabela["apoio"]
+    finally:
+        if anterior is None:
+            os.environ.pop("SAGTRACK_LIVE_DB", None)
+        else:
+            os.environ["SAGTRACK_LIVE_DB"] = anterior
+
+
+def test_painel_encerrado_mantem_o_snapshot_oficial():
+    anterior = os.environ.get("SAGTRACK_LIVE_DB")
+    pasta = Path(tempfile.mkdtemp())
+    os.environ["SAGTRACK_LIVE_DB"] = str(pasta / "live.db")
+    os.environ["SAGTRACK_LIVE_SYNC"] = "0"
+    try:
+        from inlog_agent.live_db import conectar, gravar_rotas, gravar_turno
+        from inlog_agent.live_report import ler_estado
+
+        con = conectar()
+        gravar_turno(con, {"data": "2026-10-01", "turno": "noturno", "aberto": 0, "periodo": "teste"})
+        con.execute(
+            "UPDATE turno SET situacao = 'ENCERRADO', aberto = 0, resumo_json = ? WHERE data = ? AND turno = ?",
+            ('{"percentual_geral": 38, "nao_iniciadas": 0, "parciais": 1, "previstas": 1}', "2026-10-01", "noturno"),
+        )
+        gravar_rotas(
+            con,
+            "2026-10-01",
+            "noturno",
+            [{"codigo": "65DN", "placa": "HIST1", "percentual": 37.5, "grupo": "parcial", "status": "Parcial", "na_grade": True, "_geo": True}],
+        )
+        con.commit()
+        con.close()
+        painel = ler_estado(pasta, "2026-10-01", "noturno")
+        tela = next(item for item in painel["rotas"] if item["codigo"] == "65DN")
+        assert painel["historico"] is True
+        assert tela["percentual"] == 37.5
+        assert tela["placa"] == "HIST1"
+        assert "leitura" not in tela
+    finally:
+        if anterior is None:
+            os.environ.pop("SAGTRACK_LIVE_DB", None)
+        else:
+            os.environ["SAGTRACK_LIVE_DB"] = anterior

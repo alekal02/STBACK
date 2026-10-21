@@ -318,11 +318,6 @@ def ler_painel(
     cab = view["turno"]
     rotas = view["rotas"]
     situacao = str(cab["situacao"] or "") if "situacao" in cab.keys() else ""
-    if situacao == "ENCERRADO":
-        try:
-            rotas = _exibir_cobertura_oficial(output_dir, dia, pedido, rotas)
-        except Exception as exc:
-            print(f"Cobertura oficial não exibida em {dia.isoformat()} {pedido}: {exc}", flush=True)
     if not situacao:
         situacao = "ENCERRADO" if not cab["aberto"] else "ABERTO"
     from .live_turno import resumo_guardado
@@ -1858,10 +1853,11 @@ def _anexar_geometria_visual(
     caminhoes: list[dict[str, Any]],
     rotas: list[dict[str, Any]],
 ) -> None:
-    """Verde, vermelho e percentual saem da união das vias oficiais, raio 45 m.
+    """Verde, vermelho e percentual saem da cobertura consolidada já calculada.
 
-    Não usa a área do polígono nem o km oficial. 100% só sem trecho faltante.
-    Principal e apoios vêm do mesmo cálculo.
+    É a união das vias oficiais percorridas, com o apoio efetivo dentro do total.
+    Não usa a área do polígono, o km oficial nem a proximidade de 45 m sozinha.
+    100% só sem trecho faltante. Principal e apoios vêm do mesmo cálculo.
     """
     from .live_mapa import compactar_trechos
     from .live_report import _faixa_percentual, _tempo

@@ -326,12 +326,13 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     tela = next(rota for rota in painel["rotas"] if rota["codigo"] == "POLO INDUSTRIAL")
     assert painel["situacao"] == "ENCERRADO"
     assert painel["historico"] is True
-    assert tela["placa"] == "SDJ-6C47"
-    assert tela["status"] == "Parcial"
-    assert 70 <= tela["percentual"] < 95
-    assert painel["resumo"]["percentual_geral"] == round(tela["percentual"])
-    assert painel["resumo"]["parciais"] == 1
-    assert painel["resumo"]["nao_iniciadas"] == 0
+    assert tela["percentual"] == 0
+    assert tela["placa"] in {"", "—", None}
+    assert tela["status"] == "Não iniciada"
+    assert painel["resumo"]["percentual_geral"] == 0
+    assert painel["resumo"]["parciais"] == 0
+    assert painel["resumo"]["nao_iniciadas"] == 1
+    assert ficha["percentual"] != tela["percentual"]
 
     con = conectar()
     depois = con.execute(

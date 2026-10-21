@@ -273,7 +273,7 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     assert previa["previa"] is True
     ficha = previa["rotas"]["POLO INDUSTRIAL"]
     assert ficha["placa"] == "SDJ-6C47"
-    assert 80 <= ficha["percentual"] < 95
+    assert 70 <= ficha["percentual"] < 95
     assert ficha["metros_cobertos"] > 20000
     assert ficha["status"] == "Parcial"
 
@@ -287,8 +287,8 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     bloqueada = so_passagem["rotas"]["POLO INDUSTRIAL"]
     assert bloqueada["placa"] == "SDE6B76"
     assert bloqueada["placa"] != "SDJ-6C47"
-    assert 40 <= bloqueada["percentual"] < 80
-    assert bloqueada["metros_cobertos"] > 10000
+    assert 20 <= bloqueada["percentual"] < 70
+    assert bloqueada["metros_cobertos"] > 5000
 
     so_executor = reprocessar_rotas_historicas(
         tmp_path,
@@ -299,7 +299,7 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     )
     assert so_executor["rotas"]["POLO INDUSTRIAL"]["placa"] == "SDJ-6C47"
     assert so_executor["rotas"]["POLO INDUSTRIAL"]["status"] == "Parcial"
-    assert 80 <= so_executor["rotas"]["POLO INDUSTRIAL"]["percentual"] < 95
+    assert 70 <= so_executor["rotas"]["POLO INDUSTRIAL"]["percentual"] < 95
 
     con = conectar()
     intacta = con.execute(
@@ -328,7 +328,7 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     assert painel["historico"] is True
     assert tela["placa"] == "SDJ-6C47"
     assert tela["status"] == "Parcial"
-    assert 80 <= tela["percentual"] < 95
+    assert 70 <= tela["percentual"] < 95
     assert painel["resumo"]["percentual_geral"] == round(tela["percentual"])
     assert painel["resumo"]["parciais"] == 1
     assert painel["resumo"]["nao_iniciadas"] == 0

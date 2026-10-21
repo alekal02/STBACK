@@ -424,6 +424,64 @@ def trechos_internos_dificil(
     return saida
 
 
+def _linhas_recortadas(
+    pontos: list[tuple[str, float, float]],
+    aneis: list[list[list[float]]],
+) -> list[list[list[float]]]:
+    """Desenho da rota: só o que entra no polígono oficial.
+
+    A quebra de tempo e de salto continua a de _linhas_visuais. Cada permanência
+    dentro do polígono vira um trecho, cortado na borda para guardar a entrada
+    e a saída. Um vão fora do setor não é religado, e dois pulsos externos não
+    desenham uma reta atravessando o setor. Sem polígono, não há o que recortar.
+    """
+    from shapely.geometry import LineString, Point
+
+    if not aneis:
+        return []
+
+    geoms = _poligonos_oficiais([{"poligonos": aneis}])
+    if not geoms:
+        return []
+    saida: list[list[list[float]]] = []
+    for linha in _linhas_visuais(pontos):
+        coords = [(float(par[0]), float(par[1])) for par in linha if len(par) >= 2]
+        if len(coords) < 2:
+            continue
+        dentro = [any(pronto.covers(Point(lon, lat)) for _geom, pronto in geoms) for lat, lon in coords]
+        i = 0
+        n = len(coords)
+        while i < n:
+            if not dentro[i]:
+                i += 1
+                continue
+            ini = i - 1 if i > 0 and not dentro[i - 1] else i
+            j = i
+            while j + 1 < n and dentro[j + 1]:
+                j += 1
+            fim = j + 1 if j + 1 < n and not dentro[j + 1] else j
+            trecho = coords[ini : fim + 1]
+            i = fim + 1
+            if len(trecho) < 2:
+                continue
+            trilha = LineString([(lon, lat) for lat, lon in trecho])
+            if trilha.is_empty:
+                continue
+            for geom, pronto in geoms:
+                for parte in _iter_linhas(trilha.intersection(geom)):
+                    meio = parte.interpolate(0.5, normalized=True)
+                    if not pronto.covers(meio):
+                        continue
+                    desenho: list[list[float]] = []
+                    for lon, lat in parte.coords:
+                        par = _coord_visual(lat, lon)
+                        if not desenho or par != desenho[-1]:
+                            desenho.append(par)
+                    if len(desenho) >= 2:
+                        saida.append(desenho)
+    return saida
+
+
 def trilhas(
     data: str | None,
     turno: str | None,
@@ -480,7 +538,7 @@ def trilhas(
     if filtro_rota:
         permitidas = _placas_executoras(dia.isoformat(), pedido, filtro_rota)
         if permitidas is not None:
-            veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() in permitidas]
+            veiculos = [item for item in veiculos if _norm_placa(item.get("placa")) in permitidas]
     return {
         "data": dia.isoformat(),
         "turno": pedido,
@@ -728,6 +786,150 @@ def _marco(lat: Any, lon: Any, hora: Any) -> dict[str, Any] | None:
         return None
 
 
+def _norm_placa(placa: Any) -> str:
+    return "".join(ch for ch in str(placa or "").upper() if ch.isalnum())
+
+
+def _formas_placa(placa: str) -> list[str]:
+    texto = str(placa or "").strip().upper()
+    chave = _norm_placa(texto)
+    formas: list[str] = []
+    for item in (texto, chave, f"{chave[:3]}-{chave[3:]}" if len(chave) == 7 else ""):
+        if item and item not in formas:
+            formas.append(item)
+    return formas
+
+
+def _comparacao_vazia(aviso: str, *, disponivel: bool = False) -> dict[str, Any]:
+    return {
+        "oficial": False,
+        "disponivel": disponivel,
+        "percentual_leitura": None,
+        "placa_principal": "",
+        "placas_apoio": [],
+        "ausente_no_snapshot": [],
+        "sobrepostos": [],
+        "passagens": [],
+        "nao_confirmados": [],
+        "executores": [],
+        "aviso": aviso,
+    }
+
+
+_LEITURA: dict[tuple, tuple[float, dict[str, Any]]] = {}
+
+
+def _copia_leitura(pacote: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "oficial": False,
+        "disponivel": bool(pacote.get("disponivel")),
+        "percentual_leitura": pacote.get("percentual_leitura"),
+        "placa_principal": str(pacote.get("placa_principal") or ""),
+        "placas_apoio": list(pacote.get("placas_apoio") or []),
+        "ausente_no_snapshot": list(pacote.get("ausente_no_snapshot") or []),
+        "sobrepostos": list(pacote.get("sobrepostos") or []),
+        "passagens": list(pacote.get("passagens") or []),
+        "nao_confirmados": list(pacote.get("nao_confirmados") or []),
+        "executores": [dict(item) for item in pacote.get("executores") or [] if isinstance(item, dict)],
+        "aviso": str(pacote.get("aviso") or ""),
+    }
+
+
+def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
+    """GPS já gravado e o motor homologado. Não grava turno, rota nem ponto."""
+    from .dificil_acesso import eh_basculante
+    from .live_db import caminho_banco, ler_pontos_placa
+
+    con = conectar()
+    try:
+        n_pontos = int(
+            con.execute(
+                "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ?",
+                (data, turno),
+            ).fetchone()[0]
+        )
+        if n_pontos < 2:
+            return _comparacao_vazia("Não há GPS persistido para comparar com o snapshot.")
+        chave = (str(caminho_banco()), data, turno, codigo, n_pontos)
+        agora = time.time()
+        guardado = _LEITURA.get(chave)
+        if guardado and agora - guardado[0] < 120:
+            return _copia_leitura(guardado[1])
+        nomes = [
+            str(row[0] or "")
+            for row in con.execute(
+                "SELECT DISTINCT placa FROM ponto WHERE data = ? AND turno = ?",
+                (data, turno),
+            )
+            if str(row[0] or "").strip()
+        ]
+        caminhoes = []
+        for nome in nomes:
+            if eh_basculante(nome):
+                continue
+            pontos = ler_pontos_placa(con, data, turno, nome)
+            if len(pontos) < 2:
+                continue
+            caminhoes.append(
+                {
+                    "id": nome,
+                    "fonte": "segtrack",
+                    "fonte_nome": "SEGTRACK",
+                    "veiculo": nome,
+                    "placa": nome,
+                    "inlog": "",
+                    "pontos": pontos,
+                }
+            )
+    finally:
+        con.close()
+    if not caminhoes:
+        return _comparacao_vazia("Não há GPS persistido para comparar com o snapshot.")
+    from datetime import date as dia_tipo
+
+    from .unificado import analisar_codigos
+
+    setores = analisar_codigos(dia_tipo.fromisoformat(data), caminhoes, {codigo}, turno)
+    setor = next((item for item in setores if str(item.get("codigo") or "").upper() == codigo), None)
+    cobertura = (setor or {}).get("_cobertura") or {}
+    if not cobertura.get("calculado"):
+        pacote = _comparacao_vazia("O GPS persistido não comprovou execução nesta rota.", disponivel=True)
+    else:
+        executores = []
+        for item in cobertura.get("executores") or []:
+            papel = str(item.get("papel") or "")
+            if papel not in {"principal", "apoio", "sobreposta"} or not item.get("placa"):
+                continue
+            executores.append(
+                {
+                    "placa": item.get("placa") or "",
+                    "veiculo": item.get("veiculo") or item.get("placa") or "",
+                    "papel": papel,
+                    "classificacao": item.get("classificacao") or "",
+                    "percentual": item.get("percentual"),
+                    "contribuicao_exclusiva": item.get("contribuicao_exclusiva"),
+                    "contribuicao_compartilhada": item.get("contribuicao_compartilhada"),
+                    "cor": item.get("cor") or "",
+                    "horario": item.get("horario") or "",
+                }
+            )
+        pacote = {
+            "oficial": False,
+            "disponivel": True,
+            "percentual_leitura": cobertura.get("percentual"),
+            "placa_principal": str(cobertura.get("placa_principal") or ""),
+            "placas_apoio": [str(item.get("placa") or "") for item in executores if item.get("papel") == "apoio"],
+            "ausente_no_snapshot": [],
+            "sobrepostos": [str(item.get("placa") or "") for item in executores if item.get("papel") == "sobreposta"],
+            "passagens": [str(item) for item in cobertura.get("passagens") or [] if str(item or "").strip()],
+            "nao_confirmados": [str(item) for item in cobertura.get("nao_confirmados") or [] if str(item or "").strip()],
+            "executores": executores,
+            "aviso": "",
+        }
+    _LEITURA[chave] = (time.time(), pacote)
+    return _copia_leitura(pacote)
+
+
 def _placas_executoras(data: str, turno: str, codigo: str) -> set[str] | None:
     """None quando a rota não está gravada. Conjunto vazio não filtra por engano o mapa geral."""
     from .cobertura import ler_executores_json
@@ -744,10 +946,15 @@ def _placas_executoras(data: str, turno: str, codigo: str) -> set[str] | None:
         return set()
     bruto = row["executores_json"] if "executores_json" in row.keys() else ""
     info = ler_executores_json(bruto)
-    placas = {str(item.get("placa") or "").upper() for item in info["executores"] if item.get("placa")}
+    placas = {_norm_placa(item.get("placa")) for item in info["executores"] if _norm_placa(item.get("placa"))}
+    tem_apoio = any(str(item.get("papel") or "") == "apoio" for item in info["executores"])
+    if not tem_apoio:
+        for item in _leitura_cobertura(data, turno, codigo).get("executores") or []:
+            if str(item.get("papel") or "") in {"principal", "apoio"} and _norm_placa(item.get("placa")):
+                placas.add(_norm_placa(item.get("placa")))
     if placas:
         return placas
-    legado = str(row["placa"] or "").strip().upper()
+    legado = _norm_placa(row["placa"])
     return {legado} if legado else set()
 
 
@@ -756,42 +963,98 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
     placas = [str(item.get("placa") or "").strip() for item in executores if str(item.get("placa") or "").strip()]
     if not placas:
         return []
+    formas: list[str] = []
+    for placa in placas:
+        for forma in _formas_placa(placa):
+            if forma not in formas:
+                formas.append(forma)
     con = conectar()
     try:
-        marcas = ",".join("?" for _ in placas)
+        marcas = ",".join("?" for _ in formas)
         rows = con.execute(
             f"""
             SELECT placa, ts, lat, lon FROM ponto
             WHERE data = ? AND turno = ? AND placa IN ({marcas})
             ORDER BY placa, ts
             """,
-            [data, turno, *placas],
+            [data, turno, *formas],
         ).fetchall()
     finally:
         con.close()
     por_placa: dict[str, list[tuple[str, float, float]]] = {}
     for row in rows:
-        por_placa.setdefault(str(row["placa"] or ""), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
+        por_placa.setdefault(_norm_placa(row["placa"]), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
     aneis = []
     for setor in _poligonos():
         if str(setor.get("codigo") or "").upper() == codigo:
             aneis = setor.get("aneis") or []
             break
-    referencia = [{"codigo": codigo, "aneis": aneis}] if aneis else []
     saida = []
     for item in executores:
         placa = str(item.get("placa") or "")
-        brutos = por_placa.get(placa) or []
-        serie = brutos
-        if referencia:
-            serie = [ponto for ponto in brutos if codigo_que_contem(ponto[1], ponto[2], referencia)]
-        linhas = _linhas_visuais(serie) if serie else []
-        if not linhas:
-            linhas = _linhas_visuais(brutos)
+        brutos = por_placa.get(_norm_placa(placa)) or []
         copia = dict(item)
-        copia["linhas"] = linhas
+        copia["linhas"] = _linhas_recortadas(brutos, aneis) if aneis else _linhas_visuais(brutos)
         saida.append(copia)
     return saida
+
+
+def _comparar_com_snapshot(info: dict[str, Any], placa_gravada: str, leitura: dict[str, Any]) -> dict[str, Any]:
+    """A leitura fica ao lado do snapshot. O percentual histórico não entra aqui."""
+    pacote = _copia_leitura(leitura)
+    normas = {_norm_placa(placa) for placa in info.get("placas_apoio") or []}
+    normas.add(_norm_placa(info.get("placa_principal") or placa_gravada))
+    normas.discard("")
+    ausentes = [
+        str(placa)
+        for placa in pacote.get("placas_apoio") or []
+        if _norm_placa(placa) and _norm_placa(placa) not in normas
+    ]
+    pacote["ausente_no_snapshot"] = ausentes
+    if ausentes:
+        pacote["aviso"] = (
+            "O snapshot encerrado não registra este apoio efetivo. "
+            "A leitura do GPS não altera o percentual histórico."
+        )
+    elif pacote.get("disponivel"):
+        pacote["aviso"] = "A leitura do GPS não comprovou apoio efetivo além do snapshot."
+    return pacote
+
+
+def _veiculos_da_rota(
+    data: str,
+    turno: str,
+    codigo: str,
+    info: dict[str, Any],
+    placa_gravada: str,
+    leitura: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Principal e apoio comprovados. Passagem e cobertura só repetida ficam fora do destaque."""
+    oficiais = _trajetorias(data, turno, codigo, info.get("executores") or [])
+    for item in oficiais:
+        item["oficial"] = True
+        item["origem"] = "snapshot"
+    vistos = {_norm_placa(item.get("placa")) for item in oficiais}
+    principal = _norm_placa(info.get("placa_principal") or placa_gravada)
+    apoios = {_norm_placa(placa) for placa in info.get("placas_apoio") or []}
+    extras = []
+    for item in leitura.get("executores") or []:
+        papel = str(item.get("papel") or "")
+        if papel not in {"principal", "apoio"}:
+            continue
+        chave = _norm_placa(item.get("placa"))
+        if not chave or chave in vistos:
+            continue
+        extras.append(item)
+        vistos.add(chave)
+    for item in _trajetorias(data, turno, codigo, extras):
+        chave = _norm_placa(item.get("placa"))
+        papel = str(item.get("papel") or "")
+        casa = (papel == "principal" and chave == principal) or (papel == "apoio" and chave in apoios)
+        item["oficial"] = casa
+        item["origem"] = "snapshot" if casa else "leitura"
+        oficiais.append(item)
+    return oficiais
 
 
 def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[str, Any]:
@@ -830,6 +1093,7 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
         "passagens": [],
         "nao_confirmados": [],
         "veiculos": [],
+        "comparacao_leitura": _comparacao_vazia("Rota não encontrada neste turno."),
         "entrada": None,
         "saida": None,
         "trechos_feitos": {"type": "FeatureCollection", "features": []},
@@ -838,7 +1102,16 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     if row is None:
         return vazio
     info = ler_executores_json(row["executores_json"] if "executores_json" in row.keys() else "")
-    veiculos = _trajetorias(dia.isoformat(), pedido, codigo, info["executores"])
+    tem_apoio = any(str(item.get("papel") or "") == "apoio" for item in info["executores"])
+    if tem_apoio:
+        leitura = _comparacao_vazia("O snapshot já registra o apoio efetivo.")
+    else:
+        leitura = _comparar_com_snapshot(
+            info,
+            str(row["placa"] or ""),
+            _leitura_cobertura(dia.isoformat(), pedido, codigo),
+        )
+    veiculos = _veiculos_da_rota(dia.isoformat(), pedido, codigo, info, str(row["placa"] or ""), leitura)
     return {
         "ok": True,
         "data": dia.isoformat(),
@@ -857,6 +1130,7 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
         "nao_confirmados": info["nao_confirmados"],
         "auditoria": info["auditoria"],
         "veiculos": veiculos,
+        "comparacao_leitura": leitura,
         "entrada": _marco(row["entrada_lat"], row["entrada_lon"], row["entrada_hora"]),
         "saida": _marco(row["saida_lat"], row["saida_lon"], row["saida_hora"]),
         "trechos_feitos": _linhas_geojson(str(row["trechos_feitos"] or ""), "feitos"),

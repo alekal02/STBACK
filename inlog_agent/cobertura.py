@@ -772,6 +772,282 @@ def _indices_com_progressao(
     return comprovados
 
 
+def _delta_rumo(a: float, b: float) -> float:
+    delta = abs(a - b) % math.pi
+    if delta > math.pi / 2:
+        delta = math.pi - delta
+    return delta
+
+
+def _rumo_segmento(segmento: LineString) -> float | None:
+    if segmento.length < 1:
+        return None
+    origem = segmento.interpolate(0.0)
+    amostra = segmento.interpolate(min(segmento.length, 8.0))
+    dx = amostra.x - origem.x
+    dy = amostra.y - origem.y
+    if math.hypot(dx, dy) < 1:
+        return None
+    return math.atan2(dy, dx)
+
+
+def _mesma_via(a: LineString, b: LineString, rumo_a: float, rumo_b: float) -> bool:
+    """Pedaços cortados da mesma via se encostam e seguem o mesmo rumo."""
+    if a.distance(b) > 1.0:
+        return False
+    return _delta_rumo(rumo_a, rumo_b) <= math.pi / 4
+
+
+def _associar_percurso(
+    pontos: list[dict[str, Any]],
+    segmentos: list[LineString],
+) -> tuple[set[int], bool, dict[int, set[int]], dict[int, dict[str, Any]]]:
+    """Associa cada passo do GPS à via oficial percorrida.
+
+    O raio de 45 m só limita a busca. O passo entra se a direção e a velocidade
+    de coleta concordam e a projeção cobre ao menos o passo de 8 m da via.
+    Um segmento curto não exige metade do intervalo inteiro do GPS. Salto acima
+    de 160 m não inventa o vão. Duas vias distintas só ficam sem crédito quando
+    nenhuma está claramente mais perto que a outra.
+    """
+    from shapely.ops import nearest_points
+    from shapely.strtree import STRtree
+
+    from .verificacao import VEL_COLETA_MAX
+
+    if not segmentos:
+        return set(), False, {}, {}
+    rumos = [_rumo_segmento(segmento) for segmento in segmentos]
+    arvore = STRtree(segmentos)
+    marcas: list[tuple[datetime, tuple[float, float]]] = []
+    for ponto in pontos or []:
+        par = _xy(ponto)
+        instante = _instante(ponto)
+        if par and instante is not None:
+            marcas.append((instante, par))
+    marcas.sort(key=lambda item: item[0])
+    comprovados: set[int] = set()
+    passos: dict[int, set[int]] = {}
+    info: dict[int, dict[str, Any]] = {}
+    ambiguo = False
+    passo_id = 0
+    for (t0, p0), (t1, p1) in zip(marcas, marcas[1:]):
+        segundos = (t1 - t0).total_seconds()
+        if segundos < 1 or segundos > 180:
+            continue
+        dist = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        if dist < 8 or dist > SALTO_GPS_M:
+            continue
+        vel = dist / segundos * 3.6
+        if vel > VEL_COLETA_MAX:
+            continue
+        rumo = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+        meio = Point(((p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0))
+        p0_pt = Point(p0)
+        p1_pt = Point(p1)
+        candidatos: list[tuple[float, int]] = []
+        try:
+            vizinhos = [int(item) for item in arvore.query(LineString([p0, p1]).buffer(RAIO_M))]
+        except Exception:
+            vizinhos = list(range(len(segmentos)))
+        for indice in vizinhos:
+            segmento = segmentos[indice]
+            distancia = segmento.distance(meio)
+            if distancia > RAIO_M and segmento.distance(p0_pt) > RAIO_M and segmento.distance(p1_pt) > RAIO_M:
+                continue
+            proj = float(segmento.project(nearest_points(segmento, meio)[0]))
+            antes = segmento.interpolate(max(0.0, proj - 8.0))
+            depois = segmento.interpolate(min(segmento.length, proj + 8.0))
+            dx = depois.x - antes.x
+            dy = depois.y - antes.y
+            if math.hypot(dx, dy) < 1 or _delta_rumo(rumo, math.atan2(dy, dx)) > math.pi / 4:
+                continue
+            norma = math.hypot(dx, dy)
+            along_linha = abs((p1[0] - p0[0]) * dx / norma + (p1[1] - p0[1]) * dy / norma)
+            if along_linha < dist * 0.5:
+                continue
+            along = abs(segmento.project(p1_pt) - segmento.project(p0_pt))
+            if along < 8:
+                continue
+            candidatos.append((distancia, indice))
+        passo_id += 1
+        info[passo_id] = {"t0": t0, "vel": vel, "rumo": rumo}
+        if not candidatos:
+            continue
+        candidatos.sort()
+        melhor_dist, melhor = candidatos[0]
+        mesmos = {melhor}
+        resto = candidatos[1:]
+        mudou = True
+        while mudou:
+            mudou = False
+            ainda: list[tuple[float, int]] = []
+            for distancia, indice in resto:
+                if any(
+                    rumos[base] is not None
+                    and rumos[indice] is not None
+                    and _mesma_via(segmentos[base], segmentos[indice], rumos[base], rumos[indice])
+                    for base in mesmos
+                ):
+                    mesmos.add(indice)
+                    mudou = True
+                else:
+                    ainda.append((distancia, indice))
+            resto = ainda
+        if any(distancia <= melhor_dist * 2.0 for distancia, _indice in resto):
+            ambiguo = True
+            continue
+        for indice in mesmos:
+            passos.setdefault(indice, set()).add(passo_id)
+        comprovados |= mesmos
+    return comprovados, ambiguo, passos, info
+
+
+def _mascara_interna(segmentos: list[LineString], geom) -> list[bool]:
+    """Rua interna fica além do raio de 45 m da borda. Sem polígono, não há contorno."""
+    if geom is None:
+        return [True] * len(segmentos)
+    borda = geom.boundary
+    mascara: list[bool] = []
+    for segmento in segmentos:
+        if segmento.is_empty or not segmento.intersects(geom):
+            mascara.append(False)
+            continue
+        miolo = segmento.intersection(geom)
+        mascara.append(bool(not miolo.is_empty and borda.distance(miolo) > RAIO_M))
+    return mascara
+
+
+def _componentes_via(indices: set[int], segmentos: list[LineString], rumos: list[float | None]) -> list[set[int]]:
+    resto = set(indices)
+    grupos: list[set[int]] = []
+    while resto:
+        origem = resto.pop()
+        grupo = {origem}
+        fila = [origem]
+        while fila:
+            atual = fila.pop()
+            ligar = []
+            for outro in resto:
+                if rumos[atual] is None or rumos[outro] is None:
+                    continue
+                if _mesma_via(segmentos[atual], segmentos[outro], rumos[atual], rumos[outro]):
+                    ligar.append(outro)
+            for outro in ligar:
+                resto.remove(outro)
+                grupo.add(outro)
+                fila.append(outro)
+        grupos.append(grupo)
+    return grupos
+
+
+def _corridas(ids: set[int]) -> list[list[int]]:
+    """Passos vizinhos na sequência do GPS. Outro movimento no meio quebra a corrida."""
+    if not ids:
+        return []
+    ordenados = sorted(ids)
+    grupos = [[ordenados[0]]]
+    for atual in ordenados[1:]:
+        if atual == grupos[-1][-1] + 1:
+            grupos[-1].append(atual)
+        else:
+            grupos.append([atual])
+    return grupos
+
+
+def _corrida_confirma(corrida: list[int], info: dict[int, dict[str, Any]]) -> str:
+    """Execução, circulação ou insuficiente. Dois passos sozinhos não provam coleta.
+
+    Circulação é a corrida curta, em um sentido, com todos os passos no terço
+    superior da velocidade de coleta já homologada (28 km/h). Não há piso de
+    metros nem de percentual.
+    """
+    from .verificacao import VEL_COLETA_MAX
+
+    if len(corrida) < 2:
+        return "insuficiente"
+    rumos = [float(info[i]["rumo"]) for i in corrida if i in info and info[i].get("rumo") is not None]
+    vels = [float(info[i]["vel"]) for i in corrida if i in info and info[i].get("vel") is not None]
+    if len(rumos) < 2 or len(vels) < 2:
+        return "insuficiente"
+    reverso = max(_delta_rumo(a, b) for a in rumos for b in rumos) > math.pi / 2
+    rolando = all(vel > VEL_COLETA_MAX * 2.0 / 3.0 for vel in vels)
+    if len(corrida) < 3:
+        return "circulacao" if rolando and not reverso else "insuficiente"
+    if rolando and not reverso:
+        return "circulacao"
+    return "execucao"
+
+
+def _qualidade_grupo(
+    marcas: set[int],
+    info: dict[int, dict[str, Any]],
+    todos: set[int],
+) -> str:
+    if marcas and marcas == todos:
+        return "execucao"
+    achado = "pulso"
+    for corrida in _corridas(marcas):
+        classe = _corrida_confirma(corrida, info)
+        if classe == "execucao":
+            return "execucao"
+        if classe == "circulacao":
+            achado = "circulacao"
+        elif classe == "insuficiente" and len(corrida) >= 2 and achado != "circulacao":
+            achado = "par"
+    return achado if marcas else "ausente"
+
+
+def _trechos_continuos(
+    indices: set[int],
+    passos: dict[int, set[int]],
+    segmentos: list[LineString],
+    rumos: list[float | None],
+    info: dict[int, dict[str, Any]] | None = None,
+) -> set[int]:
+    """Rua interna com progressão de coleta, não com um par de passos nem com duas visitas separadas."""
+    fichas = info or {}
+    todos: set[int] = set()
+    for marcas_via in passos.values():
+        todos |= marcas_via
+    saida: set[int] = set()
+    for grupo in _componentes_via(indices, segmentos, rumos):
+        marcas: set[int] = set()
+        for indice in grupo:
+            marcas |= passos.get(indice) or set()
+        if _qualidade_grupo(marcas, fichas, todos) == "execucao":
+            saida |= grupo
+    return saida
+
+
+def _qualidade_trechos(
+    indices: set[int],
+    passos: dict[int, set[int]],
+    segmentos: list[LineString],
+    rumos: list[float | None],
+    info: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    fichas = info or {}
+    todos: set[int] = set()
+    for marcas_via in passos.values():
+        todos |= marcas_via
+    achado = "ausente"
+    for grupo in _componentes_via(indices, segmentos, rumos):
+        marcas: set[int] = set()
+        for indice in grupo:
+            marcas |= passos.get(indice) or set()
+        classe = _qualidade_grupo(marcas, fichas, todos)
+        if classe == "execucao":
+            return "execucao"
+        if classe == "circulacao":
+            achado = "circulacao"
+        elif classe == "par" and achado not in {"circulacao"}:
+            achado = "par"
+        elif classe == "pulso" and achado not in {"circulacao", "par"}:
+            achado = "pulso"
+    return achado
+
+
 def _classe_presenca(
     pontos: list[dict[str, Any]],
     segmentos: list[LineString],
@@ -966,7 +1242,7 @@ def resumo_executores(
         return apoio or ""
     partes = []
     for item in itens:
-        if str(item.get("papel") or "") == "sobreposta":
+        if str(item.get("papel") or "") not in {"principal", "apoio"}:
             continue
         papel = "Principal" if str(item.get("papel") or "") == "principal" else "Apoio efetivo"
         horario = str(item.get("horario") or "").strip()
@@ -1051,12 +1327,15 @@ def cobertura_compartilhada(
     veiculos: list[dict[str, Any]],
     geom_setor=None,
 ) -> dict[str, Any]:
-    """União dos trechos oficiais executados por todos os veículos elegíveis.
+    """União dos trechos oficiais em que o GPS percorreu a via.
 
-    O caminhão de maior cobertura individual é o principal. Apoio efetivo é quem
-    progrediu por um trecho oficial que nenhum outro cobriu. Cobertura só
-    repetida, ou exclusiva apenas por aproximação, fica no detalhe. A união
-    geográfica não depende da ordem e não descarta trecho já creditado.
+    Proximidade de 45 m não credita sozinha uma rua paralela. O principal é quem
+    tem a maior cobertura contínua; uma diferença menor que um trecho da malha
+    não troca o caminhão por ruído. Apoio efetivo exige exclusiva interna com
+    progressão de coleta: uma corrida seguida na sequência do GPS, não um par
+    de passos nem duas visitas separadas. Via de contorno percorrida entra no
+    percentual e não cria apoio. Exclusiva sem essa progressão fica não
+    confirmada, e não vira cobertura sobreposta. A união não soma duas vezes.
     """
     segmentos = _segmentos_oficiais(ruas)
     vazio_exec: list[dict[str, Any]] = []
@@ -1088,9 +1367,21 @@ def cobertura_compartilhada(
                 }
             )
             continue
-        indices = _indices_cobertos(segmentos, pontos)
+        proximos = _indices_cobertos(segmentos, pontos)
+        percorridos, ambiguo, passos_via, passos_info = _associar_percurso(pontos, segmentos)
+        if percorridos:
+            indices = percorridos
+            classe, motivo = "executor", "percurso comprovado ao longo da via oficial"
+        elif ambiguo:
+            indices = set()
+            classe, motivo = (
+                "nao_confirmado",
+                "vias oficiais próximas sem correspondência única com a sequência do GPS",
+            )
+        else:
+            indices = set()
+            classe, motivo = _classe_presenca(pontos, segmentos, proximos, "")
         metros = _metros_indices(segmentos, indices)
-        classe, motivo = _classe_presenca(pontos, segmentos, indices, str(veiculo.get("execucao") or ""))
         auditoria.append(
             {
                 "placa": placa,
@@ -1115,6 +1406,8 @@ def cobertura_compartilhada(
                 "veiculo": str(veiculo.get("veiculo") or placa),
                 "pontos": pontos,
                 "indices": indices,
+                "passos": passos_via,
+                "passos_info": passos_info,
                 "metros": metros,
                 "n": len(_pontos_com_xy(pontos)),
             }
@@ -1139,7 +1432,24 @@ def cobertura_compartilhada(
     total = metros_feitos + metros_falta
     percentual = percentual_das_vias(metros_feitos, metros_falta)
 
-    avaliados.sort(key=lambda item: (-item["metros"], -item["n"], item["placa"]))
+    rua_interna = _mascara_interna(segmentos, geom_setor)
+    rumos = [_rumo_segmento(segmento) for segmento in segmentos]
+
+    def _metros_continuos(item: dict[str, Any]) -> float:
+        trechos = _trechos_continuos(
+            set(item["indices"]),
+            item.get("passos") or {},
+            segmentos,
+            rumos,
+            item.get("passos_info") or {},
+        )
+        return sum(segmentos[i].length for i in trechos)
+
+    def _chave_principal(item: dict[str, Any]) -> tuple[int, str]:
+        # Um trecho a mais, abaixo do corte da malha, não troca o principal.
+        return (-int(_metros_continuos(item) // PASSO_M), str(item["placa"]))
+
+    avaliados.sort(key=_chave_principal)
     principal_placa = avaliados[0]["placa"]
     executores: list[dict[str, Any]] = []
     for item in avaliados:
@@ -1149,21 +1459,37 @@ def cobertura_compartilhada(
                 outros |= vizinho["indices"]
         exclusivos = item["indices"] - outros
         compartilhados = item["indices"] & outros
-        progrediu = exclusivos if item["placa"] == principal_placa else _indices_com_progressao(item["pontos"], segmentos, exclusivos)
-        sem_progressao = exclusivos - progrediu
-        metros_exclusivos = _metros_wgs(_fundir([segmentos[i] for i in sorted(progrediu)])) if progrediu else 0.0
+        internos = {indice for indice in exclusivos if rua_interna[indice]}
+        info = item.get("passos_info") or {}
+        continuos = _trechos_continuos(internos, item.get("passos") or {}, segmentos, rumos, info)
+        qualidade = _qualidade_trechos(internos, item.get("passos") or {}, segmentos, rumos, info)
+        if item["placa"] == principal_placa:
+            papel_item, classificacao_item = "principal", "Principal"
+            base_exclusiva = exclusivos
+        elif continuos:
+            papel_item, classificacao_item = "apoio", "Apoio efetivo"
+            base_exclusiva = continuos
+        elif qualidade in {"circulacao", "pulso", "par"}:
+            papel_item, classificacao_item = "nao_confirmado", "Execução não confirmada"
+            base_exclusiva = set()
+            nao_confirmados.append(item["placa"])
+        else:
+            papel_item, classificacao_item = "sobreposta", "Cobertura sobreposta"
+            base_exclusiva = set()
+        item["papel_item"] = papel_item
+        item["classificacao_item"] = classificacao_item
+        item["so_contorno"] = bool(exclusivos) and not internos and papel_item == "sobreposta"
+        item["pulso_isolado"] = qualidade == "pulso" and papel_item == "nao_confirmado"
+        item["par_insuficiente"] = qualidade == "par" and papel_item == "nao_confirmado"
+        item["circulacao"] = qualidade == "circulacao" and papel_item == "nao_confirmado"
+        metros_exclusivos = _metros_wgs(_fundir([segmentos[i] for i in sorted(base_exclusiva)])) if base_exclusiva else 0.0
         metros_compartilhados = _metros_wgs(_fundir([segmentos[i] for i in sorted(compartilhados)])) if compartilhados else 0.0
         item["metros_exclusivos"] = metros_exclusivos
         item["metros_compartilhados"] = metros_compartilhados
-        item["metros_sem_progressao"] = _metros_wgs(_fundir([segmentos[i] for i in sorted(sem_progressao)])) if sem_progressao else 0.0
+        item["metros_sem_progressao"] = 0.0
         metros_proprios = _metros_wgs(_fundir([segmentos[i] for i in sorted(item["indices"])]))
         janela = _janela_participacao(item["pontos"])
-        if item["placa"] == principal_placa:
-            papel, classificacao = "principal", "Principal"
-        elif progrediu:
-            papel, classificacao = "apoio", "Apoio efetivo"
-        else:
-            papel, classificacao = "sobreposta", "Cobertura sobreposta"
+        papel, classificacao = papel_item, classificacao_item
         executores.append(
             {
                 "placa": item["placa"],
@@ -1202,12 +1528,15 @@ def cobertura_compartilhada(
             1,
         )
         if item["papel"] == "apoio":
-            ficha["motivo"] = "progressão contínua em trechos oficiais que nenhum outro veículo cobriu"
-        elif item["papel"] == "sobreposta" and ficha["metros_sem_progressao"] > 0:
-            ficha["motivo"] = (
-                "coleta comprovada nas vias já cobertas por outro veículo; "
-                "o trecho exclusivo é aproximação ou cruzamento, sem progressão contínua"
-            )
+            ficha["motivo"] = "execução exclusiva em rua interna, com progressão contínua do GPS"
+        elif item["papel"] == "nao_confirmado" and origem.get("circulacao"):
+            ficha["motivo"] = "percurso interno em um sentido, em velocidade de circulação, sem coleta confirmada"
+        elif item["papel"] == "nao_confirmado" and origem.get("par_insuficiente"):
+            ficha["motivo"] = "dois passos seguidos no mesmo trecho não confirmam coleta"
+        elif item["papel"] == "nao_confirmado" and origem.get("pulso_isolado"):
+            ficha["motivo"] = "trecho interno exclusivo atingido por um único passo de GPS; execução não confirmada"
+        elif item["papel"] == "sobreposta" and origem.get("so_contorno"):
+            ficha["motivo"] = "percurso comprovado em via de contorno ou divisa, sem execução exclusiva em rua interna"
         elif item["papel"] == "sobreposta":
             ficha["motivo"] = "coleta comprovada apenas em trechos já cobertos por outro veículo"
     somente_geograficos = sum(float(item.get("metros_sem_progressao") or 0) for item in avaliados)

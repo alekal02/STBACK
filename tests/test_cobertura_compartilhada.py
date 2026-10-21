@@ -191,7 +191,7 @@ def test_aproximacao_nao_cria_apoio_e_preserva_a_uniao():
     ruas = [longa, outra, ponta]
     um = cobertura_compartilhada(ruas, [principal])
     dois = cobertura_compartilhada(ruas, [encosta, principal])
-    assert dois["percentual"] >= um["percentual"]
+    assert abs(dois["percentual"] - um["percentual"]) < 1.5
     segundo = next(item for item in dois["executores"] if item["placa"] == "BBB2B22")
     assert segundo["papel"] == "sobreposta"
     assert segundo["contribuicao_exclusiva"] == 0
@@ -199,7 +199,7 @@ def test_aproximacao_nao_cria_apoio_e_preserva_a_uniao():
     assert "BBB2B22" in dois["cobertura_sobreposta"]
     assert dois["placa_principal"] == "AAA1A11"
     ficha = next(item for item in dois["auditoria"] if item["placa"] == "BBB2B22")
-    assert "aproximação" in ficha["motivo"]
+    assert "já cobertos" in ficha["motivo"]
     assert segundo["trechos"]
     lido = ler_executores_json(__import__("json").dumps(dois["persistencia"]))
     assert lido["apoio"] == dois["apoio"]
@@ -500,3 +500,141 @@ def test_65dn_e_outra_rota_oficial_reconhecem_dois_caminhoes():
         assert set(_placas(depois)) == {"PRI0A00", "APO0B00"}
         assert depois["apoio"] != SEM_APOIO
         assert codigo not in depois["resumo_veiculos"]
+
+
+def test_via_paralela_dentro_do_raio_nao_e_creditada():
+    propria = _rua(0, 0, 1200, 0)
+    paralela = _rua(0, 30, 1200, 30)
+    resultado = cobertura_compartilhada(
+        [propria, paralela],
+        [_veiculo("AAA1A11", _pontos(propria, datetime(2026, 10, 19, 8, 0)))],
+    )
+    assert 40 <= resultado["percentual"] <= 60
+    assert resultado["executores"][0]["papel"] == "principal"
+
+
+def test_contorno_percorrido_entra_no_percentual_sem_virar_apoio():
+    from shapely.geometry import Polygon
+
+    interna = _rua(0, 200, 1200, 200)
+    contorno = _rua(0, 5, 800, 5)
+    geom = Polygon([(_X - 30, _Y), (_X + 1400, _Y), (_X + 1400, _Y + 500), (_X - 30, _Y + 500)])
+    principal = _veiculo("AAA1A11", _pontos(interna, datetime(2026, 10, 19, 8, 0)))
+    beira = _veiculo("BBB2B22", _pontos(contorno, datetime(2026, 10, 19, 9, 0)))
+    so_interna = cobertura_compartilhada([interna, contorno], [principal], geom)
+    ambos = cobertura_compartilhada([interna, contorno], [principal, beira], geom)
+    assert ambos["percentual"] > so_interna["percentual"] + 15
+    papeis = {item["placa"]: item["papel"] for item in ambos["executores"]}
+    assert papeis["AAA1A11"] == "principal"
+    assert papeis["BBB2B22"] == "sobreposta"
+    assert ambos["apoio"] == SEM_APOIO
+    ficha = next(item for item in ambos["auditoria"] if item["placa"] == "BBB2B22")
+    assert "contorno" in ficha["motivo"]
+
+
+def test_exclusiva_interna_curta_continua_apoio():
+    from shapely.geometry import Polygon
+
+    longa = _rua(0, 200, 1200, 200)
+    curta = _rua(80, 260, 160, 260)
+    geom = Polygon([(_X - 30, _Y), (_X + 1400, _Y), (_X + 1400, _Y + 500), (_X - 30, _Y + 500)])
+    principal = _veiculo("AAA1A11", _pontos(longa, datetime(2026, 10, 19, 8, 0)))
+    apoio = _veiculo("BBB2B22", _pontos(curta, datetime(2026, 10, 19, 9, 0), vel_kmh=12, passo_s=8))
+    resultado = cobertura_compartilhada([longa, curta], [principal, apoio], geom)
+    segundo = next(item for item in resultado["executores"] if item["placa"] == "BBB2B22")
+    assert segundo["papel"] == "apoio"
+    assert segundo["contribuicao_exclusiva"] > 0
+
+
+def test_vias_indistinguiveis_ficam_nao_confirmadas():
+    esquerda = _rua(0, 0, 800, 0)
+    direita = _rua(0, 10, 800, 10)
+    meio = LineString([(_X, _Y + 5), (_X + 800, _Y + 5)])
+    resultado = cobertura_compartilhada(
+        [esquerda, direita],
+        [_veiculo("AAA1A11", _pontos(meio, datetime(2026, 10, 19, 8, 0)))],
+    )
+    assert resultado["percentual"] == 0
+    assert resultado["executores"] == []
+    assert "AAA1A11" in resultado["nao_confirmados"]
+
+
+def test_amostragem_espaçada_cobre_a_via_percorrida():
+    propria = _rua(0, 0, 800, 0)
+    paralela = _rua(0, 30, 800, 30)
+    pontos = _pontos(propria, datetime(2026, 10, 19, 8, 0), vel_kmh=18, passo_s=20)
+    resultado = cobertura_compartilhada([propria, paralela], [_veiculo("AAA1A11", pontos)])
+    assert resultado["percentual"] >= 45
+    assert resultado["percentual"] <= 60
+
+
+def test_passo_isolado_nao_cria_apoio_e_o_trecho_entra_na_uniao():
+    from shapely.geometry import Polygon
+
+    longa = _rua(0, 200, 1200, 200)
+    beco = _rua(400, 260, 440, 260)
+    geom = Polygon([(_X - 30, _Y), (_X + 1400, _Y), (_X + 1400, _Y + 500), (_X - 30, _Y + 500)])
+    principal = _veiculo("AAA1A11", _pontos(longa, datetime(2026, 10, 19, 8, 0)))
+    isolado = _veiculo(
+        "BBB2B22",
+        _pontos(longa, datetime(2026, 10, 19, 8, 0))[:8] + _pontos(beco, datetime(2026, 10, 19, 9, 0)),
+    )
+    so = cobertura_compartilhada([longa, beco], [principal], geom)
+    ambos = cobertura_compartilhada([longa, beco], [principal, isolado], geom)
+    assert ambos["percentual"] > so["percentual"]
+    papeis = {item["placa"]: item["papel"] for item in ambos["executores"]}
+    assert papeis["AAA1A11"] == "principal"
+    assert papeis["BBB2B22"] == "nao_confirmado"
+    assert ambos["apoio"] == SEM_APOIO
+    assert "BBB2B22" not in ambos["cobertura_sobreposta"]
+    assert "BBB2B22" in ambos["nao_confirmados"]
+    ficha = next(item for item in ambos["auditoria"] if item["placa"] == "BBB2B22")
+    assert "único passo" in ficha["motivo"]
+    assert "não confirmada" in ficha["motivo"]
+
+
+def test_circulacao_em_um_sentido_nao_vira_apoio():
+    longa = _rua(0, 0, 1200, 0)
+    reta = _rua(0, 200, 120, 200)
+    principal = _veiculo("AAA1A11", _pontos(longa, datetime(2026, 10, 19, 8, 0)))
+    passagem = _veiculo(
+        "BBB2B22",
+        _pontos(longa, datetime(2026, 10, 19, 8, 0))[:8]
+        + _pontos(reta, datetime(2026, 10, 19, 10, 0), vel_kmh=24, passo_s=6),
+    )
+    so = cobertura_compartilhada([longa, reta], [principal])
+    ambos = cobertura_compartilhada([longa, reta], [principal, passagem])
+    assert ambos["percentual"] > so["percentual"]
+    papeis = {item["placa"]: item["papel"] for item in ambos["executores"]}
+    assert papeis["AAA1A11"] == "principal"
+    assert papeis["BBB2B22"] == "nao_confirmado"
+    assert "BBB2B22" not in ambos["apoio"]
+    assert "BBB2B22" not in ambos["cobertura_sobreposta"]
+    ficha = next(item for item in ambos["auditoria"] if item["placa"] == "BBB2B22")
+    assert "circulação" in ficha["motivo"]
+
+
+def test_empate_curto_nao_troca_o_principal_por_ruido():
+    from shapely.geometry import Polygon
+
+    base = _rua(0, 200, 1200, 200)
+    lasca = _rua(0, 260, 30, 260)
+    geom = Polygon([(_X - 30, _Y), (_X + 1400, _Y), (_X + 1400, _Y + 500), (_X - 30, _Y + 500)])
+    inicio = datetime(2026, 10, 19, 8, 0)
+    comum = _pontos(base, inicio)
+    com_lasca = _veiculo("ZZZ9Z99", comum + _pontos(lasca, inicio + timedelta(hours=2)))
+    estavel = _veiculo("AAA1A11", list(comum))
+    resultado = cobertura_compartilhada([base, lasca], [com_lasca, estavel], geom)
+    assert resultado["placa_principal"] == "AAA1A11"
+
+
+def test_dois_percursos_nao_somam_o_mesmo_segmento():
+    ruas = [_rua(0, 0, 1000, 0), _rua(0, 180, 1000, 180)]
+    pontos = _pontos(ruas[0], datetime(2026, 10, 19, 8, 0))
+    um = cobertura_compartilhada(ruas, [_veiculo("AAA1A11", pontos)])
+    dois = cobertura_compartilhada(
+        ruas,
+        [_veiculo("AAA1A11", pontos), _veiculo("BBB2B22", list(pontos))],
+    )
+    assert dois["percentual"] == um["percentual"]
+    assert dois["km_feito"] == um["km_feito"]

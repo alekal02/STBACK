@@ -57,7 +57,8 @@ class PdfTiles(unittest.TestCase):
         self.assertEqual(blob, simples)
         self.assertEqual(live_pdf.mapas_fallback, antes + 1)
         self.assertNotIn(("area", "Área oficial"), itens)
-        self.assertIn(("concluida", "Concluída"), itens)
+        self.assertNotIn(("gps", "GPS"), itens)
+        self.assertEqual(itens, [])
         self.assertTrue(blob.startswith(b"\xff\xd8"))
         Image.open(BytesIO(blob)).verify()
 

@@ -1,9 +1,10 @@
-"""Trajetoria dos basculantes de dificil acesso.
+"""Trajetoria e cobertura dos basculantes de dificil acesso.
 
 Usa so os pontos ja gravados no turno. Nao consulta a Segtrack e nao
-calcula cobertura, percentual nem status. Entrada, saida e permanencia
-sao lidas desses pontos contra os poligonos oficiais. Nada disso e gravado
-de novo e nenhum evento e inventado entre dois GPS.
+altera o percentual das rotas dos compactadores. A cobertura de cada
+poligono sai do motor homologado, na uniao das vias oficiais daquele
+setor. Entrada, saida e permanencia sao lidas desses pontos contra os
+poligonos oficiais. Nada disso regrava GPS, geometria ou turno encerrado.
 """
 
 from __future__ import annotations
@@ -548,3 +549,83 @@ def rotulo_operacional(
         "aviso": "",
         "rotulo": situacao,
     }
+
+
+def cobertura_dos_basculantes(
+    ruas: list[Any],
+    geom,
+    series: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Percentual do polígono. A mesma via não entra duas vezes.
+
+    Sem vias oficiais não há percentual. Sem GPS válido a cobertura fica em zero
+    e nenhuma via de fora do polígono é acrescentada.
+    """
+    if not ruas or geom is None:
+        return {"calculado": False, "percentual": None}
+    from .cobertura import cobertura_compartilhada
+
+    veiculos = []
+    for item in series or []:
+        placa = str(item.get("placa") or "").strip()
+        pontos = [ponto for ponto in (item.get("pontos") or []) if isinstance(ponto, dict)]
+        if not placa or len(pontos) < 2:
+            continue
+        veiculos.append(
+            {
+                "placa": placa,
+                "veiculo": str(item.get("veiculo") or placa),
+                "pontos": pontos,
+            }
+        )
+    pacote = cobertura_compartilhada(ruas, veiculos, geom)
+    return {
+        "calculado": bool(pacote.get("calculado")),
+        "percentual": pacote.get("percentual"),
+    }
+
+
+_COBERTURA_AREA: dict[tuple, Any] = {}
+
+
+def anotar_cobertura(
+    areas: list[dict[str, Any]],
+    series: dict[str, list[tuple[str, float, float]]],
+    malha: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Grava o percentual em cada área programada. Não mexe no anel nem na rota."""
+    from .mapa_oficial import malha_areas_dificil
+
+    base = malha if malha is not None else malha_areas_dificil()
+    pacotes: list[dict[str, Any]] = []
+    ultimo = ""
+    total = 0
+    for item in BASCULANTES:
+        pontos = []
+        for ts, lat, lon in series.get(item["codigo"]) or []:
+            pontos.append({"latitude": lat, "longitude": lon, "timestamp": ts})
+            if ts > ultimo:
+                ultimo = ts
+        total += len(pontos)
+        pacotes.append({"placa": item["placa"], "veiculo": item["codigo"], "pontos": pontos})
+    for area in areas:
+        if not area.get("programada"):
+            area["percentual"] = None
+            continue
+        ident = str(area.get("id") or "")
+        info = base.get(ident) or {}
+        ruas = info.get("ruas") or []
+        chave = (ident, total, ultimo, len(ruas))
+        if chave in _COBERTURA_AREA:
+            area["percentual"] = _COBERTURA_AREA[chave]
+            continue
+        try:
+            cob = cobertura_dos_basculantes(ruas, info.get("geom"), pacotes)
+        except Exception as exc:
+            print(f"Cobertura de difícil acesso {area.get('nome') or ident}: {exc}", flush=True)
+            cob = {"calculado": False, "percentual": None}
+        valor = cob["percentual"] if cob.get("calculado") else None
+        if len(_COBERTURA_AREA) > 400:
+            _COBERTURA_AREA.clear()
+        _COBERTURA_AREA[chave] = valor
+        area["percentual"] = valor

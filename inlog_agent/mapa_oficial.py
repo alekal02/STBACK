@@ -402,6 +402,74 @@ def carregar_areas_dificil() -> list[dict[str, Any]]:
         con.close()
 
 
+_MALHA_AREAS: dict[str, dict[str, Any]] | None = None
+
+
+def _linhas_no_poligono(geom) -> list[Any]:
+    if geom is None or geom.is_empty:
+        return []
+    tipo = geom.geom_type
+    if tipo == "LineString":
+        return [geom] if len(geom.coords) >= 2 and geom.length >= 10 else []
+    if tipo in {"MultiLineString", "GeometryCollection"}:
+        saida: list[Any] = []
+        for parte in geom.geoms:
+            saida.extend(_linhas_no_poligono(parte))
+        return saida
+    return []
+
+
+def malha_areas_dificil() -> dict[str, dict[str, Any]]:
+    """Vias oficiais recortadas por polígono. Não entra na malha das rotas."""
+    global _MALHA_AREAS
+    if _MALHA_AREAS is not None:
+        return _MALHA_AREAS
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from shapely.strtree import STRtree
+
+    saida: dict[str, dict[str, Any]] = {}
+    malha = carregar_vias()
+    arvore = STRtree(malha) if malha else None
+    for area in carregar_areas_dificil():
+        polys = []
+        for anel in area.get("poligonos") or []:
+            coords = []
+            for par in anel:
+                if not isinstance(par, (list, tuple)) or len(par) < 2:
+                    continue
+                try:
+                    lat = float(par[0])
+                    lon = float(par[1])
+                except (TypeError, ValueError):
+                    continue
+                x, y = TO_UTM.transform(lon, lat)
+                coords.append((float(x), float(y)))
+            if len(coords) < 4:
+                continue
+            poly = Polygon(coords)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if not poly.is_empty:
+                polys.append(poly)
+        if not polys:
+            continue
+        geom = unary_union(polys) if len(polys) > 1 else polys[0]
+        recorte: list[Any] = []
+        if arvore is not None and not geom.is_empty:
+            try:
+                indices = list(arvore.query(geom, predicate="intersects"))
+            except TypeError:
+                indices = [i for i, linha in enumerate(malha) if linha.intersects(geom)]
+            for idx in indices:
+                linha = malha[int(idx)]
+                inter = linha.intersection(geom)
+                recorte.extend(_linhas_no_poligono(inter))
+        saida[str(area.get("id") or "")] = {"geom": geom, "ruas": recorte}
+    _MALHA_AREAS = saida
+    return saida
+
+
 def recortar_se_houver(pontos: list[dict[str, Any]], geom) -> list[dict[str, Any]]:
     from .cobertura import recortar_pontos
 

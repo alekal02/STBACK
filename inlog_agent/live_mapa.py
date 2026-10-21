@@ -553,6 +553,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
     from .dificil_acesso import (
         BASCULANTES,
+        anotar_cobertura,
         anotar_programacao,
         codigo_da_frota,
         eventos_nas_areas,
@@ -598,6 +599,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
 
     areas = areas_dificil()
     areas_marcadas = anotar_programacao(areas, dia, pedido)
+    anotar_cobertura(areas_marcadas, bruto)
     programadas = [area for area in areas_marcadas if area.get("programada")]
     from .live_sync import agora_brt
     from .live_turno import situacao_pelo_relogio
@@ -649,6 +651,11 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "pontos_fora": desenho["pontos_fora"],
                 "trajeto": desenho["trajeto"],
                 "trechos_internos": trechos_internos_dificil(serie, programadas),
+                "trechos_por_area": {
+                    str(area.get("id") or ""): linhas
+                    for area in programadas
+                    if (linhas := trechos_internos_dificil(serie, [area]))
+                },
                 "na_rota": desenho["na_rota"],
                 "deslocamento": desenho["deslocamento"],
                 "dificil": desenho["dificil"],

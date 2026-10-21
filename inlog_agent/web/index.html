@@ -471,6 +471,18 @@
     .badge.ok { border-color: #2f7c74; color: #8ee0d6; }
     .badge.run { border-color: #8a6b2b; color: #f0d48a; }
     .badge.err { border-color: #8a3d3d; color: #f0a8a6; }
+    .aud-tabela { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .aud-tabela th, .aud-tabela td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .aud-tabela th { color: var(--muted); font-size: 11px; letter-spacing: .4px; text-transform: uppercase; }
+    .aud-ok { color: var(--ok); font-weight: 700; }
+    .aud-alerta { color: var(--err); font-weight: 700; }
+    .aud-aviso { color: var(--warn); font-weight: 700; }
+    .aud-lista { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+    .aud-grade { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 8px 0 12px; }
+    .aud-grade div { background: #f6f8f9; border-radius: 10px; padding: 10px 12px; }
+    .aud-grade small { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .3px; }
+    .aud-grade b { font-size: 16px; }
+    #acesso-box[hidden], #tab-auditoria[hidden], #aba-auditoria[hidden] { display: none !important; }
     a { color: var(--teal); }
     .hint { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 4px; }
     #arquivos-uni, #arquivos, #arquivos-argos, #arquivos-segtrack { display: grid; gap: 6px; }
@@ -501,6 +513,7 @@
       </div>
       <nav class="tabs">
         <button type="button" id="tab-uni" class="nav-item ativo" onclick="mostrarAba('uni')">Relatório do dia</button>
+        <button type="button" id="tab-auditoria" class="nav-item" hidden onclick="mostrarAba('auditoria')">Auditoria de rotas</button>
         <p class="nav-grupo">Uma rota</p>
         <div class="sidebar-rota" style="padding:0; gap:8px;">
           <select id="filtro-rota" class="campo-side" title="Rotas da grade do dia">
@@ -520,6 +533,18 @@
         </select>
       </nav>
       <div class="sidebar-base">
+        <div id="acesso-box" hidden>
+          <form id="acesso-form" onsubmit="entrarPainel(event)">
+            <input id="acesso-login" class="campo-side" autocomplete="username" placeholder="Usuário administrador" />
+            <input id="acesso-senha" class="campo-side" type="password" autocomplete="current-password" placeholder="Senha" />
+            <button type="submit" class="principal">Entrar</button>
+            <small id="acesso-msg" class="rota-info"></small>
+          </form>
+          <div id="acesso-logado" hidden>
+            <small id="acesso-nome" class="rota-info"></small>
+            <button type="button" class="sec" onclick="sairPainel()">Sair</button>
+          </div>
+        </div>
         <span id="badge" class="badge ok">parado</span>
         <small>Diurno 06:00–18:59 · Noturno 19:00–05:59</small>
         <details class="chatbot-box" id="chatbot-box">
@@ -749,6 +774,29 @@
       <div class="vista" data-vista-panel="arquivos">
         <div id="arquivos-segtrack">Nenhuma extração SEGTRACK deste dia.</div>
       </div>
+    </section>
+  </main>
+
+  <main id="aba-auditoria" class="painel" hidden>
+    <section class="card">
+      <p class="hint">Consulta o snapshot já gravado. A tabela, o detalhe e o PDF são conferidos sem recalcular turno encerrado.</p>
+      <div class="linha">
+        <input class="campo" id="aud-data" type="date" title="Dia da auditoria" />
+        <select class="campo" id="aud-turno" title="Turno">
+          <option value="diurno">Diurno</option>
+          <option value="noturno">Noturno</option>
+        </select>
+        <select class="campo" id="aud-rota" title="Rota">
+          <option value="">Todas as rotas</option>
+        </select>
+        <button type="button" class="principal" onclick="carregarAuditoria()">Consultar</button>
+        <button type="button" class="sec" onclick="baixarAuditoria()">PDF da auditoria</button>
+      </div>
+      <p class="hint" id="aud-sync"></p>
+      <ul class="aud-lista" id="aud-alertas"></ul>
+    </section>
+    <section class="card" id="aud-resultado">
+      <p class="hint">Escolha a data e o turno para ler a auditoria.</p>
     </section>
   </main>
   <div id="datas-espelho" hidden>
@@ -1039,7 +1087,9 @@
     const paginas = {
       uni: ["Relatório", "Relatório do dia", "Diurno: 06:00–18:59. Noturno: a partir das 19:00 até 05:59. Cada um traz os polígonos do dia e desenha a trajetória dentro deles."],
       segtrack: ["GPS", "SEGTRACK", "Busca o GPS da SEGTRACK, no dia escolhido no topo."],
+      auditoria: ["Auditoria", "Auditoria de rotas", "Confere o percentual da tabela, do detalhe e do PDF com o snapshot gravado. Não recalcula turno encerrado."],
     };
+    let acesso = { exigida: false, usuario: null, csrf: "" };
 
     function abrirEmpresa(nome) {
       if (nome === "segtrack") {
@@ -1050,16 +1100,24 @@
     }
 
     function mostrarAba(nome) {
-      if (nome !== "uni" && nome !== "segtrack") nome = "uni";
+      if (nome === "auditoria") {
+        if (!acesso.usuario || acesso.usuario.perfil !== "admin") return;
+      } else if (nome !== "uni" && nome !== "segtrack") {
+        nome = "uni";
+      }
       aba = nome;
       document.body.dataset.pagina = nome;
-      ["uni", "inlog", "argos", "segtrack"].forEach((id) => {
+      ["uni", "inlog", "argos", "segtrack", "auditoria"].forEach((id) => {
         const el = $("aba-" + id);
+        if (!el) return;
         const on = nome === id;
         el.hidden = !on;
         el.classList.toggle("ativo", on);
       });
       $("tab-uni").className = nome === "uni" ? "nav-item ativo" : "nav-item";
+      const tabAud = $("tab-auditoria");
+      if (tabAud) tabAud.className = nome === "auditoria" ? "nav-item ativo" : "nav-item";
+      if ($("hint-ciclo-uni")) $("hint-ciclo-uni").hidden = nome === "auditoria";
       const sel = $("sel-empresa");
       if (sel) {
         sel.value = nome === "segtrack" ? nome : "";
@@ -1071,6 +1129,188 @@
       if ($("desc-pagina")) $("desc-pagina").textContent = pagina[2];
       if (nome === "segtrack") carregarDiaSegtrack(false);
       if (nome === "uni") atualizar();
+      if (nome === "auditoria") carregarAuditoria();
+    }
+
+    function pintarAcesso() {
+      const box = $("acesso-box");
+      const form = $("acesso-form");
+      const logado = $("acesso-logado");
+      const admin = !!(acesso.usuario && acesso.usuario.perfil === "admin");
+      const tab = $("tab-auditoria");
+      if (tab) tab.hidden = !admin;
+      if (box) box.hidden = !(acesso.exigida || acesso.usuario);
+      if (form) form.hidden = !acesso.exigida || !!acesso.usuario;
+      if (logado) logado.hidden = !acesso.usuario;
+      const nome = $("acesso-nome");
+      if (nome && acesso.usuario) {
+        nome.textContent = (acesso.usuario.nome || acesso.usuario.login || "Usuário") + " · " + (acesso.usuario.perfil === "admin" ? "Administrador" : "Operador");
+      }
+      if (!admin && aba === "auditoria") mostrarAba("uni");
+    }
+
+    async function prepararAcesso() {
+      try {
+        const res = await fetch("/api/auth/sessao");
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          acesso = { exigida: !!data.exigida, usuario: data.usuario || null, csrf: data.csrf || "" };
+        } else {
+          acesso = { exigida: data.exigida !== false, usuario: null, csrf: "" };
+        }
+      } catch (e) {
+        acesso = { exigida: false, usuario: null, csrf: "" };
+      }
+      pintarAcesso();
+    }
+
+    async function entrarPainel(ev) {
+      if (ev) ev.preventDefault();
+      const msg = $("acesso-msg");
+      if (msg) msg.textContent = "Entrando...";
+      try {
+        const data = await api("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            login: $("acesso-login").value,
+            senha: $("acesso-senha").value,
+          }),
+        });
+        $("acesso-senha").value = "";
+        acesso = { exigida: true, usuario: data.usuario || null, csrf: data.csrf || "" };
+        if (msg) msg.textContent = "";
+        pintarAcesso();
+      } catch (e) {
+        if (msg) msg.textContent = e.message;
+      }
+    }
+
+    async function sairPainel() {
+      try {
+        await api("/api/auth/logout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": acesso.csrf || "" },
+          body: "{}",
+        });
+      } catch (e) {
+        const msg = $("acesso-msg");
+        if (msg) msg.textContent = e.message;
+      }
+      acesso = { exigida: true, usuario: null, csrf: "" };
+      pintarAcesso();
+    }
+
+    function escAud(valor) {
+      return String(valor == null ? "" : valor).replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[ch]));
+    }
+
+    function audQuery() {
+      const data = $("aud-data").value;
+      const turno = $("aud-turno").value;
+      const rota = $("aud-rota").value;
+      const params = new URLSearchParams();
+      if (data) params.set("data", data);
+      if (turno) params.set("turno", turno);
+      if (rota) params.set("rota", rota);
+      return params.toString();
+    }
+
+    function preencherRotasAuditoria(rotas) {
+      const sel = $("aud-rota");
+      const atual = sel.value;
+      const opcoes = ['<option value="">Todas as rotas</option>'].concat((rotas || []).map((rota) => {
+        const codigo = escAud(rota.codigo);
+        return `<option value="${codigo}">${codigo}</option>`;
+      }));
+      sel.innerHTML = opcoes.join("");
+      if (atual && (rotas || []).some((rota) => rota.codigo === atual)) sel.value = atual;
+    }
+
+    function htmlAuditoria(info) {
+      const rota = info.rota && info.rota.encontrada === false ? null : info.rota;
+      const foco = rota || null;
+      const linhas = foco ? [foco] : (info.rotas || []);
+      if (!linhas.length) {
+        return `<p class="hint">${escAud(info.aviso || "Nenhuma rota gravada neste turno.")}</p>`;
+      }
+      const blocos = linhas.map((item) => {
+        const estado = item.divergente ? "aud-alerta" : (item.incompleto || item.legado ? "aud-aviso" : "aud-ok");
+        const rotulo = item.divergente ? "Divergente" : (item.consistente ? "Consistente" : "Histórico incompleto");
+        const apoios = (item.placas_apoio || []).join(", ") || item.apoio || "—";
+        const comparacao = (item.comparacao || []).map((fonte) =>
+          `<tr><td>${escAud(fonte.fonte)}</td><td>${escAud(fonte.texto)}</td><td class="${fonte.confere ? "aud-ok" : "aud-alerta"}">${fonte.confere ? "Confere" : "Não confere"}</td></tr>`
+        ).join("");
+        const caminhoes = (item.caminhoes || []).map((cam) =>
+          `<tr><td>${escAud(cam.placa)} <small>${escAud(cam.classificacao || cam.papel || "")}</small></td><td>${cam.percentual_individual == null ? "—" : escAud(cam.percentual_individual) + "%"}</td><td>${cam.cobertura_exclusiva == null ? "—" : escAud(cam.cobertura_exclusiva) + "%"}</td><td>${cam.cobertura_sobreposta == null ? "—" : escAud(cam.cobertura_sobreposta) + "%"}</td><td>${escAud(cam.justificativa || "")}</td></tr>`
+        ).join("");
+        const lista = (titulo, itens) => itens && itens.length
+          ? `<h3>${titulo}</h3><ul class="aud-lista">${itens.map((obs) => `<li><b>${escAud(obs.placa)}</b> — ${escAud(obs.justificativa)}</li>`).join("")}</ul>`
+          : "";
+        const avisos = (item.alertas || []).map((texto) => `<li>${escAud(texto)}</li>`).join("");
+        return `<article>
+          <p class="${estado}">${escAud(item.codigo)} · ${rotulo}</p>
+          <div class="aud-grade">
+            <div><small>Percentual consolidado</small><b>${escAud(item.percentual_texto || "—")}</b></div>
+            <div><small>Placa principal</small><b>${escAud(item.placa_principal || "—")}</b></div>
+            <div><small>Apoios efetivos</small><b>${escAud(apoios)}</b></div>
+          </div>
+          <table class="aud-tabela"><thead><tr><th>Fonte</th><th>Percentual</th><th>Snapshot</th></tr></thead><tbody>${comparacao}</tbody></table>
+          <table class="aud-tabela"><thead><tr><th>Caminhão</th><th>Individual</th><th>Exclusiva</th><th>Sobreposta</th><th>Justificativa</th></tr></thead><tbody>${caminhoes || "<tr><td colspan='5'>Nenhum caminhão no snapshot.</td></tr>"}</tbody></table>
+          ${lista("Passagens", item.passagens)}
+          ${lista("Veículos não confirmados", item.nao_confirmados)}
+          ${avisos ? `<ul class="aud-lista">${avisos}</ul>` : ""}
+        </article>`;
+      }).join("");
+      return blocos;
+    }
+
+    async function carregarAuditoria() {
+      if (!acesso.usuario || acesso.usuario.perfil !== "admin") return;
+      const data = $("aud-data");
+      if (data && !data.value && $("data-uni")) data.value = $("data-uni").value || hojeIso();
+      const sync = $("aud-sync");
+      const alertas = $("aud-alertas");
+      const box = $("aud-resultado");
+      if (sync) sync.textContent = "Lendo o snapshot gravado...";
+      try {
+        const info = await api("/api/admin/auditoria-rotas?" + audQuery());
+        preencherRotasAuditoria(info.rotas || []);
+        const quando = info.ultima_sincronizacao || info.atualizado_em || "não informada";
+        const marca = info.sincronizacao_antiga ? " · sincronização antiga" : "";
+        const falta = info.falha_sincronizacao ? " · última sincronização com falha" : "";
+        const incompleto = info.incompleto ? " · informação incompleta" : "";
+        if (sync) sync.textContent = `Última sincronização: ${quando}${marca}${falta}${incompleto}. ${info.situacao || ""}`.trim();
+        if (alertas) alertas.innerHTML = (info.alertas || []).map((texto) => `<li>${escAud(texto)}</li>`).join("");
+        if (box) box.innerHTML = htmlAuditoria(info);
+      } catch (e) {
+        if (sync) sync.textContent = e.message;
+        if (box) box.innerHTML = "";
+      }
+    }
+
+    async function baixarAuditoria() {
+      const sync = $("aud-sync");
+      try {
+        const res = await fetch("/api/admin/auditoria-rotas.pdf?" + audQuery());
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.erro || "Não foi possível gerar o PDF.");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        const rota = $("aud-rota").value;
+        link.href = url;
+        link.download = "SEGTRACK_Auditoria_" + ($("aud-data").value || "turno") + (rota ? "_" + rota : "") + ".pdf";
+        link.click();
+        URL.revokeObjectURL(url);
+        if (sync) sync.textContent = "PDF de auditoria gerado.";
+      } catch (e) {
+        if (sync) sync.textContent = e.message;
+      }
     }
 
     function toggleMenu(btn) {
@@ -2247,6 +2487,7 @@
     });
     carregarRotasDoDia();
     carregarDia(false);
+    prepararAcesso();
     function agendarStatus(ms) {
       clearTimeout(agendarStatus.t);
       agendarStatus.t = setTimeout(() => {

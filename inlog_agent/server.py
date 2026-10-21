@@ -1360,7 +1360,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(500, {"ok": False, "erro": "Não foi possível concluir o acesso."}, self._no_store())
 
-    def _exigir(self, method: str, *, admin: bool = False) -> bool:
+    def _exigir(
+        self,
+        method: str,
+        *,
+        admin: bool = False,
+        erro_admin: str = "Somente administradores podem gerenciar usuários.",
+    ) -> bool:
         from .acesso import ErroAcesso, auth_exigida, csrf_confere, mensagem_sessao, negar, resolver, tocar
 
         try:
@@ -1397,7 +1403,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             self._json(
                 403,
-                {"ok": False, "erro": "Somente administradores podem gerenciar usuários."},
+                {"ok": False, "erro": erro_admin},
                 self._no_store(),
             )
             return False
@@ -1534,6 +1540,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"ok": False, "erro": "Rota não encontrada."}, self._no_store())
 
+    def _responder_auditoria_rotas(self, path: str, qs: dict[str, list[str]]) -> None:
+        from .auditoria_rotas import consultar, gerar_pdf
+
+        data = (qs.get("data") or [None])[0]
+        turno = (qs.get("turno") or [None])[0]
+        rota = (qs.get("rota") or [None])[0]
+        try:
+            if path.endswith(".pdf"):
+                conteudo, nome = gerar_pdf(data, turno, rota)
+                self._bytes(200, conteudo, "application/pdf", download=nome)
+                return
+            self._json(200, consultar(data, turno, rota), self._no_store())
+        except ValueError as exc:
+            self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
+        except Exception as exc:
+            print(f"Auditoria de rotas: {exc}", flush=True)
+            self._json(500, {"ok": False, "erro": "Não foi possível ler a auditoria."}, self._no_store())
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self._cors()
@@ -1551,6 +1575,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self._exigir("GET", admin=True):
                 return
             self._responder_admin_get(path)
+            return
+        if path in {"/api/admin/auditoria-rotas", "/api/admin/auditoria-rotas.pdf"}:
+            if not self._exigir(
+                "GET",
+                admin=True,
+                erro_admin="Somente administradores podem auditar rotas.",
+            ):
+                return
+            self._responder_auditoria_rotas(path, parse_qs(parsed.query))
             return
         if path not in {"/api/health", "/config.js", "/", "/index.html"}:
             if not self._exigir("GET"):
@@ -1872,6 +1905,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self._exigir("POST", admin=True):
                 return
             self._responder_admin_post(path, payload if isinstance(payload, dict) else {})
+            return
+        if path.startswith("/api/admin/auditoria-rotas"):
+            if not self._exigir(
+                "POST",
+                admin=True,
+                erro_admin="Somente administradores podem auditar rotas.",
+            ):
+                return
+            self._json(405, {"ok": False, "erro": "A auditoria de rotas é somente leitura."}, self._no_store())
             return
         if path != "/api/chatbot/gerar":
             if not self._exigir("POST"):

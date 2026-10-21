@@ -205,20 +205,20 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
     outro_dia = mapa.dificil_acesso("2026-10-13", "diurno")
     assert outro_dia["areas"][0]["programada"] is False
     assert outro_dia["areas"][0]["percentual"] is None
-    assert outro_dia["areas"][0]["fora_programacao"] is True
+    assert not outro_dia["areas"][0].get("fora_programacao")
     fora = next(item for item in outro_dia["veiculos"] if item["codigo"] == "CBT018")
-    trilhas = fora["trechos_por_area"][area["id"]]
-    assert trilhas
-    for linha in trilhas:
-        for lat, lon in linha:
-            ponto = Point(lon, lat)
-            assert anel_oficial.covers(ponto) or anel_oficial.distance(ponto) < 1e-8
+    assert area["id"] not in fora["trechos_por_area"]
+    assert fora["trechos_internos"] == []
 
     con = conectar()
     gravada = con.execute(
         "SELECT percentual FROM rota WHERE data = '2026-10-11' AND turno = 'diurno' AND codigo = '01AD'"
     ).fetchone()
     outras = con.execute("SELECT COUNT(*) FROM rota").fetchone()[0]
+    gps_fora = con.execute(
+        "SELECT COUNT(*) FROM ponto WHERE data = '2026-10-13' AND turno = 'diurno'"
+    ).fetchone()[0]
     con.close()
     assert gravada["percentual"] == 33.3
     assert outras == 1
+    assert gps_fora == len(pontos)

@@ -51,6 +51,29 @@ def test_gpkg_guarda_os_dias_e_filtra_sem_mexer_no_anel():
     noturno = anotar_programacao(areas, date(2026, 10, 12), "noturno", [])
     assert not any(area["programada"] for area in noturno)
 
+    def nomes_programados(dia, turno):
+        marcadas = anotar_programacao(areas, dia, turno, [])
+        return sorted(area["nome"] for area in marcadas if area["programada"])
+
+    assert nomes_programados(date(2026, 10, 21), "diurno") == []
+    assert nomes_programados(date(2026, 10, 22), "diurno") == ["TERRA DO SOL"]
+    assert nomes_programados(date(2026, 10, 23), "diurno") == sorted([
+        "CHACARA SAO PEDRO",
+        "CHACARA SAO PEDRO",
+        "SERRA DOURADA",
+        "SANTA LUZIA/ROSA DO SUL",
+        "GIRASSOIS",
+    ])
+    assert nomes_programados(date(2026, 10, 24), "diurno") == sorted([
+        "ALTO DA BOA VISTA",
+        "MADRE GERMANA",
+        "QUINTA DA BOA VISTA",
+        "JARDIM DOS IPES",
+        "BURITI SERENO",
+    ])
+    for dia in (21, 22, 23, 24):
+        assert nomes_programados(date(2026, 10, dia), "noturno") == []
+
     for original, marcado in zip(areas, segunda):
         assert marcado["poligonos"] == original["poligonos"]
         assert marcado["id"] == original["id"]
@@ -123,4 +146,13 @@ def test_api_marca_o_dia_e_mantem_trajetoria_fora_da_programacao(monkeypatch, tm
     cbt018 = next(item for item in pacote["veiculos"] if item["codigo"] == "CBT018")
     assert cbt018["trajeto"]
     assert cbt018["eventos"]
+    assert cbt018["trechos_internos"] == []
+    assert area["id"] not in cbt018["trechos_por_area"]
+    assert not pacote["areas"][0].get("fora_programacao")
     assert pacote["resumo"]["areas"] == 1
+    con = conectar()
+    gravados = con.execute(
+        "SELECT COUNT(*) FROM ponto WHERE data = '2026-10-14' AND turno = 'diurno'"
+    ).fetchone()[0]
+    con.close()
+    assert gravados == 2

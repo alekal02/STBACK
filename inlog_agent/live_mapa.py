@@ -553,15 +553,14 @@ def _trechos_por_area(
     serie: list[tuple[str, float, float]],
     areas: list[dict[str, Any]],
 ) -> dict[str, list[list[list[float]]]]:
-    """GPS do turno recortado em cada polígono. A frequência não apaga a geometria."""
+    """GPS do turno só no polígono programado. Fora da frequência, o ponto permanece no banco."""
     saida: dict[str, list[list[list[float]]]] = {}
     for area in areas:
-        linhas = trechos_internos_dificil(serie, [area])
-        if not linhas:
-            continue
-        saida[str(area.get("id") or "")] = linhas
         if not area.get("programada"):
-            area["fora_programacao"] = True
+            continue
+        linhas = trechos_internos_dificil(serie, [area])
+        if linhas:
+            saida[str(area.get("id") or "")] = linhas
     return saida
 
 

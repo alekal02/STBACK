@@ -145,6 +145,8 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
     from inlog_agent.live_db import conectar, inserir_pontos
 
     dificil._COBERTURA_AREA.clear()
+    dificil._ATIVIDADE_AREA.clear()
+    mapa._DIFICIL_OK.clear()
     oeste, sul, leste, norte = -49.300, -16.810, -49.290, -16.800
     anel = [
         [norte, oeste],
@@ -186,6 +188,8 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
 
     segunda = mapa.dificil_acesso("2026-10-12", "diurno")
     assert segunda["areas"][0]["programada"] is True
+    assert segunda["areas"][0]["atividade"] is True
+    assert segunda["areas"][0]["fora_programacao"] is False
     assert segunda["areas"][0]["percentual"] >= 95
     cbt = next(item for item in segunda["veiculos"] if item["codigo"] == "CBT018")
     linhas = cbt["trechos_por_area"][area["id"]]
@@ -199,16 +203,21 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
     sexta = mapa.dificil_acesso("2026-10-16", "diurno")
     assert sexta["areas"][0]["programada"] is True
     assert sexta["areas"][0]["percentual"] == 0
+    assert sexta["areas"][0]["atividade"] is False
+    assert sexta["areas"][0]["fora_programacao"] is False
 
     noturno = mapa.dificil_acesso("2026-10-12", "noturno")
     assert noturno["areas"][0]["percentual"] is None
+    assert noturno["areas"][0]["atividade"] is True
+    assert noturno["areas"][0]["fora_programacao"] is True
     outro_dia = mapa.dificil_acesso("2026-10-13", "diurno")
     assert outro_dia["areas"][0]["programada"] is False
     assert outro_dia["areas"][0]["percentual"] is None
-    assert not outro_dia["areas"][0].get("fora_programacao")
+    assert outro_dia["areas"][0]["atividade"] is True
+    assert outro_dia["areas"][0]["fora_programacao"] is True
     fora = next(item for item in outro_dia["veiculos"] if item["codigo"] == "CBT018")
-    assert area["id"] not in fora["trechos_por_area"]
-    assert fora["trechos_internos"] == []
+    assert area["id"] in fora["trechos_por_area"]
+    assert fora["trechos_internos"]
 
     con = conectar()
     gravada = con.execute(

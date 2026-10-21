@@ -8,6 +8,7 @@ da Fulltrack.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import threading
@@ -553,36 +554,49 @@ def _trechos_por_area(
     serie: list[tuple[str, float, float]],
     areas: list[dict[str, Any]],
 ) -> dict[str, list[list[list[float]]]]:
-    """GPS do turno só no polígono programado. Fora da frequência, o ponto permanece no banco."""
+    """GPS do turno recortado nos polígonos já escolhidos. O ponto fora deles permanece no banco."""
     saida: dict[str, list[list[list[float]]]] = {}
     for area in areas:
-        if not area.get("programada"):
-            continue
         linhas = trechos_internos_dificil(serie, [area])
         if linhas:
             saida[str(area.get("id") or "")] = linhas
     return saida
 
 
-def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
-    """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
-    from .dificil_acesso import (
-        BASCULANTES,
-        anotar_cobertura,
-        anotar_programacao,
-        codigo_da_frota,
-        eventos_nas_areas,
-        montar_trajetoria,
-        preparar_areas,
-        rotulo_operacional,
-    )
+_DIFICIL_OK: dict[tuple, dict[str, Any]] = {}
 
-    dia, pedido = _dia_turno(data, turno)
-    inicio = time.perf_counter()
+
+def _chave_dificil(dia: date, turno: str) -> tuple:
+    from .live_db import caminho_banco
+
+    return (str(caminho_banco()), dia.isoformat(), turno)
+
+
+def _marcar_indisponivel(guardado: dict[str, Any]) -> dict[str, Any]:
+    saida = copy.deepcopy(guardado)
+    saida["falha"] = True
+    saida["gps_indisponivel"] = True
+    return saida
+
+
+def _ler_pontos_basculante(dia: date, turno: str) -> tuple[dict[str, list[tuple[str, float, float]]], bool]:
+    """GPS já gravado pela integração Fulltrack. Não apaga ponto quando a consulta falha."""
+    from .dificil_acesso import BASCULANTES, codigo_da_frota, eh_basculante
+
+    bruto: dict[str, list[tuple[str, float, float]]] = {item["codigo"]: [] for item in BASCULANTES}
+    instavel = False
     con = conectar()
     try:
-        placas = _placas_basculante(con, dia.isoformat(), pedido)
-        bruto: dict[str, list[tuple[str, float, float]]] = {item["codigo"]: [] for item in BASCULANTES}
+        placas = _placas_basculante(con, dia.isoformat(), turno)
+        for row in con.execute(
+            "SELECT placa, veiculo, consulta_falha_em FROM placa WHERE data = ? AND turno = ?",
+            (dia.isoformat(), turno),
+        ):
+            if str(row["consulta_falha_em"] or "").strip() and eh_basculante(
+                str(row["placa"] or ""),
+                str(row["veiculo"] or ""),
+            ):
+                instavel = True
         if placas:
             marcas = list(placas)
             consulta = ",".join("?" for _ in marcas)
@@ -592,7 +606,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 WHERE data = ? AND turno = ? AND placa IN ({consulta})
                 ORDER BY placa, ts
                 """,
-                [dia.isoformat(), pedido, *marcas],
+                [dia.isoformat(), turno, *marcas],
             ).fetchall()
         else:
             rows = []
@@ -602,9 +616,55 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         codigo = placas.get(str(row["placa"] or ""))
         if not codigo:
             codigo = codigo_da_frota(str(row["placa"] or ""))
-        if not codigo:
+        if not codigo or codigo not in bruto:
             continue
         bruto[codigo].append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
+    return bruto, instavel
+
+
+def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
+    """Camada dos dois basculantes. Lê o GPS já gravado pela Fulltrack e não grava rota.
+
+    Polígono e trecho só entram com atividade comprovada na data e no turno.
+    Falha temporária da consulta devolve a última leitura válida.
+    """
+    from .dificil_acesso import (
+        BASCULANTES,
+        anotar_cobertura,
+        anotar_programacao,
+        eventos_nas_areas,
+        marcar_atividade,
+        montar_trajetoria,
+        preparar_areas,
+        rotulo_operacional,
+    )
+
+    dia, pedido = _dia_turno(data, turno)
+    chave = _chave_dificil(dia, pedido)
+    try:
+        bruto, instavel = _ler_pontos_basculante(dia, pedido)
+    except Exception as exc:
+        print(f"GPS de difícil acesso indisponível: {exc}", flush=True)
+        guardado = _DIFICIL_OK.get(chave)
+        if guardado:
+            return _marcar_indisponivel(guardado)
+        return {
+            "data": dia.isoformat(),
+            "turno": pedido,
+            "fonte": "live_sync",
+            "camada": "Áreas de difícil acesso",
+            "areas": [],
+            "veiculos": [],
+            "eventos": [],
+            "falha": True,
+            "gps_indisponivel": True,
+            "resumo": {},
+        }
+    if instavel and not any(bruto.values()):
+        guardado = _DIFICIL_OK.get(chave)
+        if guardado:
+            return _marcar_indisponivel(guardado)
+    inicio = time.perf_counter()
     setores = _setores_do_turno(dia, pedido)
 
     def contem(lat: float, lon: float) -> bool:
@@ -615,7 +675,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     areas = areas_dificil()
     areas_marcadas = anotar_programacao(areas, dia, pedido)
     anotar_cobertura(areas_marcadas, bruto)
-    programadas = [area for area in areas_marcadas if area.get("programada")]
+    marcar_atividade(areas_marcadas, bruto)
     from .live_sync import agora_brt
     from .live_turno import situacao_pelo_relogio
 
@@ -651,6 +711,11 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
         trechos_desloc += len(desenho["deslocamento"])
         trechos_dificil += len(desenho["dificil"])
         eventos.extend(presenca["eventos"])
+        minhas = [
+            area
+            for area in areas_marcadas
+            if item["codigo"] in (area.get("atividade_veiculos") or [])
+        ]
         veiculos.append(
             {
                 "codigo": item["codigo"],
@@ -665,8 +730,8 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "pulsos": desenho["pulsos"],
                 "pontos_fora": desenho["pontos_fora"],
                 "trajeto": desenho["trajeto"],
-                "trechos_internos": trechos_internos_dificil(serie, programadas),
-                "trechos_por_area": _trechos_por_area(serie, areas_marcadas),
+                "trechos_internos": trechos_internos_dificil(serie, minhas),
+                "trechos_por_area": _trechos_por_area(serie, minhas),
                 "na_rota": desenho["na_rota"],
                 "deslocamento": desenho["deslocamento"],
                 "dificil": desenho["dificil"],
@@ -679,7 +744,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "permanencias": presenca["permanencias"],
             }
         )
-    return {
+    pacote = {
         "data": dia.isoformat(),
         "turno": pedido,
         "fonte": "live_sync",
@@ -698,6 +763,16 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
             "ms": round((time.perf_counter() - inicio) * 1000, 1),
         },
     }
+    sem_gps = instavel and not any(bruto.values())
+    avaliacao_falhou = any(area.get("gps_indisponivel") for area in areas_marcadas) and not any(
+        area.get("atividade") for area in areas_marcadas
+    )
+    if sem_gps or avaliacao_falhou:
+        pacote["falha"] = True
+        pacote["gps_indisponivel"] = True
+        return pacote
+    _DIFICIL_OK[chave] = pacote
+    return pacote
 
 
 def _placas_basculante(con, data: str, turno: str) -> dict[str, str]:

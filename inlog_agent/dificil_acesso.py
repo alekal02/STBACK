@@ -629,3 +629,99 @@ def anotar_cobertura(
             _COBERTURA_AREA.clear()
         _COBERTURA_AREA[chave] = valor
         area["percentual"] = valor
+
+
+_ATIVIDADE_AREA: dict[tuple, bool] = {}
+
+
+def _pontos_da_serie(serie: list[tuple[str, float, float]]) -> list[dict[str, Any]]:
+    return [{"latitude": lat, "longitude": lon, "timestamp": ts} for ts, lat, lon in serie or []]
+
+
+def atividade_comprovada(
+    ruas: list[Any],
+    geom,
+    pontos: list[dict[str, Any]],
+) -> bool:
+    """Progressão homologada na via oficial, dentro do polígono.
+
+    Um ponto, a proximidade, a passagem de contorno e o GPS parado não contam.
+    Não grava percentual e não altera o motor das rotas.
+    """
+    if not ruas or geom is None or len(pontos) < 2:
+        return False
+    from .cobertura import (
+        _associar_percurso,
+        _mascara_interna,
+        _perto_das_vias,
+        _qualidade_trechos,
+        _rumo_segmento,
+        _segmentos_oficiais,
+        recortar_pontos,
+    )
+
+    segmentos = _segmentos_oficiais(ruas)
+    if not segmentos:
+        return False
+    recorte = recortar_pontos(pontos, geom, 90)
+    perto = _perto_das_vias(recorte, segmentos)
+    if len(perto) < 2:
+        return False
+    percorridos, _ambiguo, passos, info = _associar_percurso(perto, segmentos)
+    if not percorridos:
+        return False
+    interna = _mascara_interna(segmentos, geom)
+    rumos = [_rumo_segmento(segmento) for segmento in segmentos]
+    internos = {indice for indice in percorridos if 0 <= indice < len(interna) and interna[indice]}
+    if any(interna):
+        if not internos:
+            return False
+        return _qualidade_trechos(internos, passos, segmentos, rumos, info) == "execucao"
+    return _qualidade_trechos(set(percorridos), passos, segmentos, rumos, info) == "execucao"
+
+
+def marcar_atividade(
+    areas: list[dict[str, Any]],
+    series: dict[str, list[tuple[str, float, float]]],
+    malha: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Marca o polígono com atividade real. O percentual oficial permanece intocado."""
+    from .mapa_oficial import malha_areas_dificil
+
+    base = malha if malha is not None else malha_areas_dificil()
+    preparados: dict[str, list[dict[str, Any]]] = {}
+    ultimo: dict[str, str] = {}
+    for item in BASCULANTES:
+        codigo = item["codigo"]
+        pontos = _pontos_da_serie(series.get(codigo) or [])
+        preparados[codigo] = pontos
+        marcas = [str(ponto.get("timestamp") or "") for ponto in pontos]
+        ultimo[codigo] = max(marcas) if marcas else ""
+    for area in areas:
+        ident = str(area.get("id") or "")
+        info = base.get(ident) or {}
+        ruas = info.get("ruas") or []
+        geom = info.get("geom")
+        comprovados: list[str] = []
+        for item in BASCULANTES:
+            codigo = item["codigo"]
+            pontos = preparados[codigo]
+            chave = (ident, codigo, len(pontos), ultimo[codigo], len(ruas))
+            if chave in _ATIVIDADE_AREA:
+                if _ATIVIDADE_AREA[chave]:
+                    comprovados.append(codigo)
+                continue
+            try:
+                ok = atividade_comprovada(ruas, geom, pontos)
+            except Exception as exc:
+                print(f"Atividade de difícil acesso {area.get('nome') or ident}: {exc}", flush=True)
+                area["gps_indisponivel"] = True
+                continue
+            if len(_ATIVIDADE_AREA) > 800:
+                _ATIVIDADE_AREA.clear()
+            _ATIVIDADE_AREA[chave] = ok
+            if ok:
+                comprovados.append(codigo)
+        area["atividade_veiculos"] = comprovados
+        area["atividade"] = bool(comprovados)
+        area["fora_programacao"] = bool(area["atividade"] and not area.get("programada"))

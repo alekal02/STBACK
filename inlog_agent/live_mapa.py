@@ -549,6 +549,22 @@ def trilhas(
     }
 
 
+def _trechos_por_area(
+    serie: list[tuple[str, float, float]],
+    areas: list[dict[str, Any]],
+) -> dict[str, list[list[list[float]]]]:
+    """GPS do turno recortado em cada polígono. A frequência não apaga a geometria."""
+    saida: dict[str, list[list[list[float]]]] = {}
+    for area in areas:
+        linhas = trechos_internos_dificil(serie, [area])
+        if not linhas:
+            continue
+        saida[str(area.get("id") or "")] = linhas
+        if not area.get("programada"):
+            area["fora_programacao"] = True
+    return saida
+
+
 def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     """Camada dos dois basculantes. Lê o ponto já gravado e não grava rota."""
     from .dificil_acesso import (
@@ -651,11 +667,7 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
                 "pontos_fora": desenho["pontos_fora"],
                 "trajeto": desenho["trajeto"],
                 "trechos_internos": trechos_internos_dificil(serie, programadas),
-                "trechos_por_area": {
-                    str(area.get("id") or ""): linhas
-                    for area in programadas
-                    if (linhas := trechos_internos_dificil(serie, [area]))
-                },
+                "trechos_por_area": _trechos_por_area(serie, areas_marcadas),
                 "na_rota": desenho["na_rota"],
                 "deslocamento": desenho["deslocamento"],
                 "dificil": desenho["dificil"],

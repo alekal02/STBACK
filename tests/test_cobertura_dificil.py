@@ -1,11 +1,11 @@
 """Cobertura do setor de difícil acesso, separada das rotas dos compactadores."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from shapely.geometry import LineString, Point, Polygon, box
 
 from inlog_agent.cobertura import TO_UTM, TO_WGS
-from inlog_agent.dificil_acesso import cobertura_dos_basculantes
+from inlog_agent.dificil_acesso import anotar_programacao, cobertura_dos_basculantes
 from inlog_agent.mapa_oficial import carregar_areas_dificil, eh_area_dificil, malha_areas_dificil
 
 _X, _Y = TO_UTM.transform(-49.25, -16.82)
@@ -119,6 +119,23 @@ def test_malha_oficial_fica_dentro_do_poligono_e_fora_da_rota():
     assert mapa._MALHA_AREAS is malha
 
 
+def test_terra_do_sol_existe_e_quarta_nao_e_dia_programado():
+    areas = carregar_areas_dificil()
+    terra = [area for area in areas if area["nome"] == "TERRA DO SOL"]
+    assert len(terra) == 1
+    area = terra[0]
+    assert area["id"].startswith("TERRA DO SOL|")
+    assert area["frequencia"] == "QUI"
+    anel = area["poligonos"][0]
+    assert len(anel) >= 4
+    assert anel[0] == anel[-1]
+    quarta = anotar_programacao(areas, date(2026, 10, 21), "diurno", [])
+    marcada = next(item for item in quarta if item["nome"] == "TERRA DO SOL")
+    assert marcada["programada"] is False
+    assert marcada["poligonos"] == area["poligonos"]
+    assert len(quarta) == 11
+
+
 def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
     banco = tmp_path / "live.db"
     monkeypatch.setenv("SAGTRACK_LIVE_DB", str(banco))
@@ -188,7 +205,14 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
     outro_dia = mapa.dificil_acesso("2026-10-13", "diurno")
     assert outro_dia["areas"][0]["programada"] is False
     assert outro_dia["areas"][0]["percentual"] is None
-    assert all(not item["trechos_por_area"] for item in outro_dia["veiculos"])
+    assert outro_dia["areas"][0]["fora_programacao"] is True
+    fora = next(item for item in outro_dia["veiculos"] if item["codigo"] == "CBT018")
+    trilhas = fora["trechos_por_area"][area["id"]]
+    assert trilhas
+    for linha in trilhas:
+        for lat, lon in linha:
+            ponto = Point(lon, lat)
+            assert anel_oficial.covers(ponto) or anel_oficial.distance(ponto) < 1e-8
 
     con = conectar()
     gravada = con.execute(

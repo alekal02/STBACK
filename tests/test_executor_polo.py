@@ -274,7 +274,8 @@ def test_polo_industrial_atribui_sdj_e_respeita_o_filtro(monkeypatch, tmp_path):
     ficha = previa["rotas"]["POLO INDUSTRIAL"]
     assert ficha["placa"] == "SDJ-6C47"
     assert 70 <= ficha["percentual"] < 95
-    assert ficha["metros_cobertos"] > 20000
+    # As ruas de fora não somam mais metros.
+    assert ficha["metros_cobertos"] > 19000
     assert ficha["status"] == "Parcial"
 
     so_passagem = reprocessar_rotas_historicas(

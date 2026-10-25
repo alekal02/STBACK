@@ -2407,3 +2407,235 @@ def auditar_turno_leitura(data: str, turno: str) -> dict[str, Any]:
         con.close()
     relatorio["intacto"] = conferido == gravado
     return relatorio
+
+
+def realocar_pontos_pelo_horario(
+    output_dir: Path,
+    data: str,
+    *,
+    aplicar: bool = False,
+    usuario: str | None = None,
+) -> dict[str, Any]:
+    """Move pulsos gravados fora do turno do horário. Sem aplicar, a prévia faz rollback."""
+    from .config import parse_data
+    from .live_turno import _auditar, classificar_instante, montar_resumo
+
+    try:
+        dia = parse_data(data if isinstance(data, date) else str(data or ""))
+    except (TypeError, ValueError):
+        dia = None
+    if dia is None:
+        return {"ok": False, "aplicado": False, "erro": "Data inválida."}
+
+    ocupou = False
+    if aplicar:
+        if not _entrar():
+            return {
+                "ok": False,
+                "aplicado": False,
+                "erro": "Atualização ao vivo em andamento",
+            }
+        ocupou = True
+    con = None
+    try:
+        vespera = dia - timedelta(days=1)
+        ordem = (
+            (vespera.isoformat(), "noturno"),
+            (dia.isoformat(), "diurno"),
+            (dia.isoformat(), "noturno"),
+        )
+        janela = set(ordem)
+        con = conectar()
+        existentes = {
+            chave
+            for chave in ordem
+            if turno_existe(con, chave[0], chave[1])
+        }
+        veiculo_de = {}
+        for chave in ordem:
+            for placa in con.execute(
+                "SELECT placa, veiculo FROM placa WHERE data = ? AND turno = ?",
+                chave,
+            ):
+                veiculo_de[(chave[0], chave[1], str(placa["placa"]))] = str(placa["veiculo"] or "")
+        pontos = con.execute(
+            """
+            SELECT data, turno, placa, ts, lat, lon FROM ponto
+            WHERE (data = ? AND turno = ?)
+               OR (data = ? AND turno = ?)
+               OR (data = ? AND turno = ?)
+            ORDER BY ts, placa
+            """,
+            (*ordem[0], *ordem[1], *ordem[2]),
+        ).fetchall()
+        planos = []
+        fora: list[dict[str, str]] = []
+        sem_turno_destino = 0
+        for ponto in pontos:
+            origem = (str(ponto["data"]), str(ponto["turno"]))
+            placa = str(ponto["placa"])
+            ts = str(ponto["ts"])
+            momento = _parse_ts(ts)
+            classe = classificar_instante(momento) if momento is not None else None
+            if classe is None:
+                destino = None
+            else:
+                destino = (classe[0].isoformat(), classe[1])
+            if destino is None or destino not in janela:
+                fora.append({"data": origem[0], "turno": origem[1], "placa": placa, "ts": ts})
+                continue
+            if destino == origem:
+                continue
+            if destino not in existentes:
+                sem_turno_destino += 1
+                continue
+            planos.append(
+                {
+                    "de_data": origem[0],
+                    "de_turno": origem[1],
+                    "para_data": destino[0],
+                    "para_turno": destino[1],
+                    "placa": placa,
+                    "ts": ts,
+                    "lat": ponto["lat"],
+                    "lon": ponto["lon"],
+                }
+            )
+        afetados: set[tuple[str, str]] = set()
+        copiar: dict[tuple[str, str, str], str] = {}
+        for plano in planos:
+            con.execute(
+                """
+                INSERT OR IGNORE INTO ponto (data, turno, placa, ts, lat, lon)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plano["para_data"],
+                    plano["para_turno"],
+                    plano["placa"],
+                    plano["ts"],
+                    plano["lat"],
+                    plano["lon"],
+                ),
+            )
+            con.execute(
+                "DELETE FROM ponto WHERE data = ? AND turno = ? AND placa = ? AND ts = ?",
+                (plano["de_data"], plano["de_turno"], plano["placa"], plano["ts"]),
+            )
+            origem = (plano["de_data"], plano["de_turno"])
+            destino = (plano["para_data"], plano["para_turno"])
+            if origem in existentes:
+                afetados.add(origem)
+            if destino in existentes:
+                afetados.add(destino)
+            copiar[(destino[0], destino[1], plano["placa"])] = veiculo_de.get(
+                (origem[0], origem[1], plano["placa"]),
+                "",
+            )
+        for (data_iso, turno, placa), veiculo in copiar.items():
+            marcar_placa(con, data_iso, turno, placa, veiculo=veiculo)
+
+        def percentuais(data_iso: str, turno: str) -> dict[str, float]:
+            return {
+                str(row["codigo"]): float(row["percentual"] or 0)
+                for row in con.execute(
+                    "SELECT codigo, percentual FROM rota WHERE data = ? AND turno = ? ORDER BY codigo",
+                    (data_iso, turno),
+                )
+            }
+
+        turnos = []
+        quando = datetime.now().isoformat(timespec="seconds")
+        for data_iso, turno in ordem:
+            if (data_iso, turno) not in afetados:
+                continue
+            antes = percentuais(data_iso, turno)
+            codigos = list(antes)
+            if codigos:
+                calculadas = _recalcular_oficial(
+                    con,
+                    Path(output_dir),
+                    date.fromisoformat(data_iso),
+                    turno,
+                    codigos,
+                )
+                if calculadas:
+                    gravar_rotas(con, data_iso, turno, calculadas)
+            depois = percentuais(data_iso, turno)
+            cab = con.execute(
+                "SELECT situacao, fechado_em FROM turno WHERE data = ? AND turno = ?",
+                (data_iso, turno),
+            ).fetchone()
+            if cab is not None and str(cab["situacao"] or "") == "ENCERRADO":
+                resumo = montar_resumo(
+                    con,
+                    date.fromisoformat(data_iso),
+                    turno,
+                    str(cab["fechado_em"] or ""),
+                )
+                con.execute(
+                    "UPDATE turno SET resumo_json = ? WHERE data = ? AND turno = ?",
+                    (json.dumps(resumo, ensure_ascii=False), data_iso, turno),
+                )
+            if aplicar:
+                _auditar(
+                    con,
+                    date.fromisoformat(data_iso),
+                    turno,
+                    "REALOCACAO_HORARIO",
+                    "manual",
+                    json.dumps(antes, ensure_ascii=False),
+                    json.dumps(depois, ensure_ascii=False),
+                    quando,
+                    usuario,
+                )
+            turnos.append(
+                {
+                    "data": data_iso,
+                    "turno": turno,
+                    "rotas": {
+                        codigo: {
+                            "antes": antes.get(codigo, 0.0),
+                            "depois": depois.get(codigo, 0.0),
+                        }
+                        for codigo in sorted(set(antes) | set(depois))
+                    },
+                }
+            )
+        grupos: dict[tuple[str, str, str, str], int] = {}
+        por_placa_n: dict[str, int] = {}
+        for plano in planos:
+            chave = (plano["de_data"], plano["de_turno"], plano["para_data"], plano["para_turno"])
+            grupos[chave] = grupos.get(chave, 0) + 1
+            por_placa_n[plano["placa"]] = por_placa_n.get(plano["placa"], 0) + 1
+        resultado = {
+            "ok": True,
+            "aplicado": bool(aplicar and planos),
+            "previa": not aplicar,
+            "movidos": [
+                {
+                    "de": {"data": de_data, "turno": de_turno},
+                    "para": {"data": para_data, "turno": para_turno},
+                    "quantidade": quantidade,
+                }
+                for (de_data, de_turno, para_data, para_turno), quantidade in sorted(grupos.items())
+            ],
+            "por_placa": {placa: por_placa_n[placa] for placa in sorted(por_placa_n)},
+            "fora_de_turno": fora,
+            "sem_turno_destino": sem_turno_destino,
+            "turnos": turnos,
+        }
+        if aplicar:
+            con.commit()
+        else:
+            con.rollback()
+        return resultado
+    except Exception:
+        if con is not None:
+            con.rollback()
+        raise
+    finally:
+        if con is not None:
+            con.close()
+        if ocupou:
+            _sair()

@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -1065,21 +1065,58 @@ def _enviar_chatbot_apos_unificado(data: str | None, payload: dict[str, Any]) ->
         registrar_retorno_chatbot(aviso, erro=True)
 
 
+def _como_data(valor: Any) -> date | None:
+    if valor is None or valor == "":
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    return datetime.strptime(texto[:10], "%Y-%m-%d").date()
+
+
+def _janela_do_ciclo(data: Any, hora_inicio: Any, hora_fim: Any, data_fim: Any) -> tuple[str, str, date | None]:
+    """Troca a janela vazia ou a antiga 06:00→05:59 pelo ciclo do dia.
+
+    Qualquer outro intervalo escolhido à mão é respeitado.
+    """
+    from .live_turno import ciclo_operacional
+
+    dia = _como_data(data)
+    if dia is None:
+        raise ValueError("Informe a data do ciclo.")
+    inicio = str(hora_inicio or "").strip()
+    fim = str(hora_fim or "").strip()
+    if (inicio == "" and fim == "") or (inicio == "06:00" and fim == "05:59"):
+        hora_ini, hora_fim_ciclo, dia_fim = ciclo_operacional(dia)
+        return hora_ini, hora_fim_ciclo, dia_fim
+    return inicio, fim, _como_data(data_fim)
+
+
+def _confirmacao_de_realocacao(data: str, confirmacao: str) -> bool:
+    return str(confirmacao or "").strip() == f"REALOCAR {str(data or '').strip()}"
+
+
 def _executar_inspecao_job(payload: dict[str, Any]) -> None:
     from .config import aplicar_periodo, load_settings
     from .unificado import atualizar_gps_ciclo, inspecionar_rota
 
     codigo = str(payload.get("codigo") or "").strip().upper()
     data = str(payload.get("data") or "").strip()
-    hora_inicio = str(payload.get("hora_inicio") or "06:00").strip() or "06:00"
-    hora_fim = str(payload.get("hora_fim") or "05:59").strip() or "05:59"
-    data_fim = str(payload.get("data_fim") or "").strip() or None
     if not codigo:
         raise RuntimeError("Informe o código da rota.")
     if not data:
         raise RuntimeError("Informe a data do ciclo.")
     dia = datetime.strptime(data, "%Y-%m-%d").date()
-    fim = datetime.strptime(data_fim, "%Y-%m-%d").date() if data_fim else None
+    hora_inicio, hora_fim, fim = _janela_do_ciclo(
+        dia,
+        payload.get("hora_inicio"),
+        payload.get("hora_fim"),
+        payload.get("data_fim"),
+    )
     settings = aplicar_periodo(
         load_settings(),
         data=dia,
@@ -1863,9 +1900,6 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 codigo = (qs.get("codigo") or [""])[0].strip()
                 data = (qs.get("data") or [""])[0].strip()
-                hora_inicio = (qs.get("hora_inicio") or ["06:00"])[0].strip() or "06:00"
-                hora_fim = (qs.get("hora_fim") or ["05:59"])[0].strip() or "05:59"
-                data_fim = (qs.get("data_fim") or [""])[0].strip() or None
                 gerar_pdf = (qs.get("pdf") or ["1"])[0].strip().lower() not in {"0", "false", "nao", "não"}
                 if not codigo:
                     self._json(400, {"erro": "Informe o código da rota, por exemplo 16AD."})
@@ -1874,7 +1908,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(400, {"erro": "Informe a data do ciclo."})
                     return
                 dia = datetime.strptime(data, "%Y-%m-%d").date()
-                fim = datetime.strptime(data_fim, "%Y-%m-%d").date() if data_fim else None
+                hora_inicio, hora_fim, fim = _janela_do_ciclo(
+                    dia,
+                    (qs.get("hora_inicio") or [""])[0],
+                    (qs.get("hora_fim") or [""])[0],
+                    (qs.get("data_fim") or [""])[0],
+                )
                 gerado = inspecionar_rota(
                     load_settings().output_dir,
                     codigo,
@@ -1926,6 +1965,54 @@ class Handler(BaseHTTPRequestHandler):
             if not self._exigir("POST", admin=True):
                 return
             self._responder_admin_post(path, payload if isinstance(payload, dict) else {})
+            return
+        if path == "/api/admin/realocar-horario":
+            if not self._exigir(
+                "POST",
+                admin=True,
+                erro_admin="Somente administradores podem realocar pulsos pelo horário.",
+            ):
+                return
+            corpo = payload if isinstance(payload, dict) else {}
+            data_pedido = str(corpo.get("data") or "").strip()
+            aplicar = corpo.get("aplicar") is True or str(corpo.get("aplicar") or "").strip().lower() in {
+                "1",
+                "true",
+                "sim",
+                "yes",
+            }
+            if aplicar and not _confirmacao_de_realocacao(data_pedido, str(corpo.get("confirmacao") or "")):
+                self._json(
+                    400,
+                    {"ok": False, "erro": f"Confirme com REALOCAR {data_pedido}."},
+                    self._no_store(),
+                )
+                return
+            from .live_sync import realocar_pontos_pelo_horario
+
+            usuario = None
+            try:
+                from .acesso import resolver
+
+                sessao, _codigo = resolver(self._cookie_acesso(), ip=self._ip_acesso())
+                if sessao:
+                    usuario = str(sessao.get("login") or "") or None
+            except Exception:
+                usuario = None
+            try:
+                resultado = realocar_pontos_pelo_horario(
+                    load_settings().output_dir,
+                    data_pedido,
+                    aplicar=aplicar,
+                    usuario=usuario,
+                )
+            except Exception as exc:
+                self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
+                return
+            status = 200 if resultado.get("ok") else (
+                409 if resultado.get("erro") == "Atualização ao vivo em andamento" else 400
+            )
+            self._json(status, resultado, self._no_store())
             return
         if path.startswith("/api/admin/auditoria-rotas"):
             if not self._exigir(

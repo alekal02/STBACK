@@ -543,13 +543,52 @@ def test_contorno_percorrido_entra_no_percentual_sem_virar_apoio():
     beira = _veiculo("BBB2B22", _pontos(contorno, datetime(2026, 10, 19, 9, 0)))
     so_interna = cobertura_compartilhada([interna, contorno], [principal], geom)
     ambos = cobertura_compartilhada([interna, contorno], [principal, beira], geom)
-    assert ambos["percentual"] > so_interna["percentual"] + 15
+    assert so_interna["percentual"] == 100
+    assert so_interna["diagnostico"]["contorno_nao_percorrido_m"] > 700
+    assert ambos["percentual"] == 100
+    assert ambos["diagnostico"]["cobertura_geografica_m"] > so_interna["diagnostico"]["cobertura_geografica_m"] + 700
     papeis = {item["placa"]: item["papel"] for item in ambos["executores"]}
     assert papeis["AAA1A11"] == "principal"
     assert papeis["BBB2B22"] == "sobreposta"
     assert ambos["apoio"] == SEM_APOIO
     ficha = next(item for item in ambos["auditoria"] if item["placa"] == "BBB2B22")
     assert "contorno" in ficha["motivo"]
+
+
+def _cena_internas_e_divisa():
+    from shapely.geometry import Polygon
+
+    geom = Polygon([(_X - 50, _Y), (_X + 1600, _Y), (_X + 1600, _Y + 700), (_X - 50, _Y + 700)])
+    internas = [
+        _rua(100, 220, 900, 220),
+        _rua(100, 360, 900, 360),
+        _rua(100, 500, 900, 500),
+    ]
+    divisas = [
+        _rua(0, 6, 350, 6),
+        _rua(400, 6, 750, 6),
+        _rua(800, 6, 1150, 6),
+        _rua(1200, 6, 1550, 6),
+    ]
+    inicio = datetime(2026, 10, 19, 8, 0)
+    pontos = []
+    for indice, rua in enumerate(internas):
+        pontos.extend(_pontos(rua, inicio + timedelta(minutes=20 * indice)))
+    return internas + divisas, _veiculo("AAA1A11", pontos), geom
+
+
+def test_tres_internas_feitas_e_quatro_divisas_paradas_dao_cem():
+    ruas, caminhao, geom = _cena_internas_e_divisa()
+    resultado = cobertura_compartilhada(ruas, [caminhao], geom)
+    assert resultado["percentual"] == 100
+
+
+def test_contorno_obrigatorio_deixa_o_percentual_abaixo_de_70(monkeypatch):
+    monkeypatch.setenv("COBERTURA_CONTORNO", "obrigatorio")
+    ruas, caminhao, geom = _cena_internas_e_divisa()
+    resultado = cobertura_compartilhada(ruas, [caminhao], geom)
+    assert resultado["percentual"] < 70
+    assert resultado["diagnostico"]["contorno_nao_percorrido_m"] == 0
 
 
 def test_exclusiva_interna_curta_continua_apoio():

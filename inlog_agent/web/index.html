@@ -546,7 +546,7 @@
           </div>
         </div>
         <span id="badge" class="badge ok">parado</span>
-        <small>Diurno 06:00–18:59 · Noturno 19:00–05:59</small>
+        <small>Diurno 06:00–18:59 · Noturno 19:00–05:59. Sábado: 05:00–14:59 e 15:00–01:59.</small>
         <details class="chatbot-box" id="chatbot-box">
           <summary>Chatbot WhatsApp</summary>
           <img id="chatbot-qr" alt="QR do WhatsApp" />
@@ -568,7 +568,7 @@
           <p class="kicker" id="kicker-pagina">Relatório</p>
           <h1 id="titulo-pagina">Relatório do dia</h1>
           <p class="desc" id="desc-pagina">Escolha o dia e gere o relatório diurno ou o noturno.</p>
-          <p class="hint" id="hint-ciclo-uni">Diurno 06:00–18:59. Noturno a partir das 19:00 até 05:59, com os polígonos do dia e a trajetória dentro deles.</p>
+          <p class="hint" id="hint-ciclo-uni">Diurno 06:00–18:59 e noturno 19:00–05:59. No sábado, diurno 05:00–14:59 e noturno 15:00–01:59.</p>
         </div>
         <div class="topbar-lado">
           <div class="ciclo">
@@ -579,7 +579,7 @@
               </div>
             </div>
             <details class="ciclo-avancado">
-              <summary>Horário (6h → 5h59)</summary>
+              <summary id="rotulo-horario-ciclo">Horário (06:00 → 05:59)</summary>
               <div class="linha" style="margin-top:8px">
                 <input class="campo hora" id="hora-ini-uni" type="time" value="06:00" step="60" title="Hora inicial" />
                 <span class="hora-lbl ate">até</span>
@@ -590,8 +590,8 @@
           </div>
           <div class="topbar-acoes barra-uni">
             <label class="chk"><input type="checkbox" id="chk-so-gps" /> Já tenho o GPS</label>
-            <button type="button" class="principal acao-job" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'diurno')" title="06:00 até 18:59, polígonos diurnos do dia">Relatório diurno</button>
-            <button type="button" class="principal noturno acao-job" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'noturno')" title="19:00 até 05:59, polígonos noturnos do dia">Relatório noturno</button>
+            <button type="button" class="principal acao-job" id="btn-rel-diurno" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'diurno')" title="06:00 até 18:59, polígonos diurnos do dia">Relatório diurno</button>
+            <button type="button" class="principal noturno acao-job" id="btn-rel-noturno" onclick="rodarUnificado(!document.getElementById('chk-so-gps').checked, 'noturno')" title="19:00 até 05:59, polígonos noturnos do dia">Relatório noturno</button>
             <div class="menu">
               <button type="button" class="sec acao-job" onclick="toggleMenu(this)">Baixar</button>
               <div class="menu-lista">
@@ -953,14 +953,57 @@
       }).format(new Date());
     }
 
+    function diaDaSemana(iso) {
+      const [y, m, d] = String(iso || "").split("-").map(Number);
+      return new Date(y, m - 1, d).getDay();
+    }
+
+    function cicloDoDia(iso) {
+      const data = iso || hojeIso();
+      const semana = diaDaSemana(data);
+      if (semana === 6) {
+        return { data, data_fim: somarDia(data, 1), hora_inicio: "05:00", hora_fim: "01:59" };
+      }
+      if (semana === 5) {
+        return { data, data_fim: somarDia(data, 1), hora_inicio: "06:00", hora_fim: "04:59" };
+      }
+      return { data, data_fim: somarDia(data, 1), hora_inicio: "06:00", hora_fim: "05:59" };
+    }
+
     function cicloDiario(ref) {
-      const data = ref ? isoDia(ref) : hojeIso();
-      return {
-        data,
-        data_fim: somarDia(data, 1),
-        hora_inicio: "06:00",
-        hora_fim: "05:59",
-      };
+      return cicloDoDia(ref ? isoDia(ref) : hojeIso());
+    }
+
+    function janelaTurno(turno, data) {
+      const semana = diaDaSemana(data);
+      if (turno === "noturno") {
+        if (semana === 6) {
+          return { data, data_fim: somarDia(data, 1), hora_inicio: "15:00", hora_fim: "01:59", turno: "noturno" };
+        }
+        if (semana === 5) {
+          return { data, data_fim: somarDia(data, 1), hora_inicio: "19:00", hora_fim: "04:59", turno: "noturno" };
+        }
+        return { data, data_fim: somarDia(data, 1), hora_inicio: "19:00", hora_fim: "05:59", turno: "noturno" };
+      }
+      if (turno === "diurno") {
+        if (semana === 6) {
+          return { data, data_fim: data, hora_inicio: "05:00", hora_fim: "14:59", turno: "diurno" };
+        }
+        return { data, data_fim: data, hora_inicio: "06:00", hora_fim: "18:59", turno: "diurno" };
+      }
+      return null;
+    }
+
+    function atualizarRotulosTurno(data) {
+      const diurno = janelaTurno("diurno", data);
+      const noturno = janelaTurno("noturno", data);
+      const ciclo = cicloDoDia(data);
+      const btnD = $("btn-rel-diurno");
+      const btnN = $("btn-rel-noturno");
+      const rotulo = $("rotulo-horario-ciclo");
+      if (btnD && diurno) btnD.title = diurno.hora_inicio + " até " + diurno.hora_fim + ", polígonos diurnos do dia";
+      if (btnN && noturno) btnN.title = noturno.hora_inicio + " até " + noturno.hora_fim + ", polígonos noturnos do dia";
+      if (rotulo && ciclo) rotulo.textContent = "Horário (" + ciclo.hora_inicio + " → " + ciclo.hora_fim + ")";
     }
 
     function atualizarHintCiclo(p) {
@@ -1002,6 +1045,11 @@
       if ((!isoFim || isoFim === iso) && inicio === "00:00" && final === "23:59") return fmtDia(iso);
       if (!isoFim || isoFim === iso) return fmtDia(iso) + " · " + inicio + "–" + final;
       return fmtDia(iso) + " " + inicio + " → " + fmtDia(isoFim) + " " + final;
+    }
+
+    function rotuloCicloAberto() {
+      const p = periodoDe("uni");
+      return (p.hora_inicio || "06:00") + " → " + (p.hora_fim || "05:59");
     }
 
     function periodoDe(prefix) {
@@ -1048,6 +1096,7 @@
         hora_inicio: iniH,
         hora_fim: fimH,
       });
+      atualizarRotulosTurno(p.data || $("data-uni").value);
     }
 
     async function fetchGeracao(url) {
@@ -1085,7 +1134,7 @@
     }
 
     const paginas = {
-      uni: ["Relatório", "Relatório do dia", "Diurno: 06:00–18:59. Noturno: a partir das 19:00 até 05:59. Cada um traz os polígonos do dia e desenha a trajetória dentro deles."],
+      uni: ["Relatório", "Relatório do dia", "Diurno 06:00–18:59 e noturno 19:00–05:59. No sábado, diurno 05:00–14:59 e noturno 15:00–01:59. A sexta à noite fecha às 04:59."],
       segtrack: ["GPS", "SEGTRACK", "Busca o GPS da SEGTRACK, no dia escolhido no topo."],
       auditoria: ["Auditoria", "Auditoria de rotas", "Confere o percentual da tabela, do detalhe e do PDF com o snapshot gravado. Não recalcula turno encerrado."],
     };
@@ -1510,13 +1559,16 @@
           "O painel responde nesta caixa: aviso enviado, PDF enviado ou o erro.",
           { seguir: true }
         );
+        const diaEnvio = p.data || ($("data-uni") && $("data-uni").value) || hojeIso();
+        const ciclo = cicloDoDia(diaEnvio);
         const r = await api("/api/chatbot-enviar", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            data: p.data || ($("data-uni") && $("data-uni").value) || "",
-            hora_inicio: "06:00",
-            hora_fim: "05:59",
+            data: ciclo.data,
+            data_fim: ciclo.data_fim,
+            hora_inicio: ciclo.hora_inicio,
+            hora_fim: ciclo.hora_fim,
             grupo_jid: grupo,
           }),
         });
@@ -1673,7 +1725,7 @@
       inspecaoRota = info.codigo || codigo;
       pintarCaminhoesRota(info);
       if ($("legenda-uni")) {
-        $("legenda-uni").textContent = (info.codigo || codigo) + " — polígono oficial e trajetórias do ciclo 06:00 → 05:59.";
+        $("legenda-uni").textContent = (info.codigo || codigo) + " — polígono oficial e trajetórias do ciclo " + rotuloCicloAberto() + ".";
       }
       mostrarIframe("unificado-mapa", info.mapa_url, Date.now(), "Sem trajetória nesta rota.");
       const linkU = $("unificado-mapa-link");
@@ -1690,7 +1742,7 @@
         }
         if (querPdf) window.open(pdfHref, "_blank", "noopener");
         $("rota-info").textContent =
-          (info.codigo || codigo) + " · " + (info.percentual || 0) + "% · PDF do ciclo 06:00 → 05:59.";
+          (info.codigo || codigo) + " · " + (info.percentual || 0) + "% · PDF do ciclo " + rotuloCicloAberto() + ".";
       }
     }
 
@@ -1704,7 +1756,7 @@
       $("btn-mapa-dia").hidden = false;
       const querPdf = comPdf === true;
       $("rota-info").textContent = querPdf
-        ? "Consultando pulsos e gerando o PDF do ciclo 06:00 → 05:59..."
+        ? "Consultando pulsos e gerando o PDF do ciclo " + rotuloCicloAberto() + "..."
         : "Consultando pulsos e montando a trajetória dentro da rota...";
       $("rota-caminhoes").innerHTML = "";
       const linkPdf = $("rota-pdf-link");
@@ -2103,16 +2155,6 @@
       }
     }
 
-    function janelaTurno(turno, data) {
-      if (turno === "noturno") {
-        return { data, data_fim: somarDia(data, 1), hora_inicio: "19:00", hora_fim: "05:59", turno: "noturno" };
-      }
-      if (turno === "diurno") {
-        return { data, data_fim: data, hora_inicio: "06:00", hora_fim: "18:59", turno: "diurno" };
-      }
-      return null;
-    }
-
     async function rodarUnificado(extrair, turno) {
       const data = $("data-uni").value;
       const p = janelaTurno(turno, data) || periodoDe("uni");
@@ -2421,12 +2463,7 @@
       $("btn-mapa-dia").hidden = true;
       $("rota-info").textContent = "";
       $("rota-caminhoes").innerHTML = "";
-      aplicarPeriodo({
-        data: $("data-uni").value,
-        data_fim: somarDia($("data-uni").value, 1),
-        hora_inicio: horaDe("hora-ini-uni", "06:00"),
-        hora_fim: horaDe("hora-fim-uni", "05:59"),
-      });
+      aplicarPeriodo(cicloDoDia($("data-uni").value));
       carregarRotasDoDia();
       atualizar();
     });
@@ -2436,34 +2473,19 @@
     $("dias").addEventListener("click", (ev) => {
       const btn = ev.target.closest("button[data-dia]");
       if (!btn) return;
-      aplicarPeriodo({
-        data: btn.dataset.dia,
-        data_fim: somarDia(btn.dataset.dia, 1),
-        hora_inicio: horaDe("hora-ini-uni", "06:00"),
-        hora_fim: horaDe("hora-fim-uni", "05:59"),
-      });
+      aplicarPeriodo(cicloDoDia(btn.dataset.dia));
       carregarDia(true);
     });
     $("dias-argos").addEventListener("click", (ev) => {
       const btn = ev.target.closest("button[data-dia]");
       if (!btn) return;
-      aplicarPeriodo({
-        data: btn.dataset.dia,
-        data_fim: somarDia(btn.dataset.dia, 1),
-        hora_inicio: horaDe("hora-ini-uni", "06:00"),
-        hora_fim: horaDe("hora-fim-uni", "05:59"),
-      });
+      aplicarPeriodo(cicloDoDia(btn.dataset.dia));
       carregarDiaArgos(true);
     });
     $("dias-segtrack").addEventListener("click", (ev) => {
       const btn = ev.target.closest("button[data-dia]");
       if (!btn) return;
-      aplicarPeriodo({
-        data: btn.dataset.dia,
-        data_fim: somarDia(btn.dataset.dia, 1),
-        hora_inicio: horaDe("hora-ini-uni", "06:00"),
-        hora_fim: horaDe("hora-fim-uni", "05:59"),
-      });
+      aplicarPeriodo(cicloDoDia(btn.dataset.dia));
       carregarDiaSegtrack(true);
     });
     $("dias-uni").addEventListener("click", (ev) => {
@@ -2473,12 +2495,7 @@
       $("btn-mapa-dia").hidden = true;
       $("rota-info").textContent = "";
       $("rota-caminhoes").innerHTML = "";
-      aplicarPeriodo({
-        data: btn.dataset.dia,
-        data_fim: somarDia(btn.dataset.dia, 1),
-        hora_inicio: "06:00",
-        hora_fim: "05:59",
-      });
+      aplicarPeriodo(cicloDoDia(btn.dataset.dia));
       atualizar();
       carregarRotasDoDia();
     });

@@ -1702,6 +1702,10 @@ def gerar_relatorio_unificado(
             on_progress(msg)
 
     pedido = (turno or "").strip().lower()
+    if pedido in {"diurno", "noturno"}:
+        from .live_turno import periodo_coleta
+
+        hora_inicio, hora_fim, data_fim = periodo_coleta(dia, pedido)
     nome = {"diurno": "diurna", "noturno": "noturna"}.get(pedido, "")
     progress("5/7 — Lendo o GPS da SEGTRACK...")
     caminhoes, fontes = carregar_caminhoes(output_dir, dia, hora_inicio, hora_fim, data_fim)
@@ -1805,6 +1809,13 @@ def executar_coleta_do_dia(
     turno: str | None = None,
 ) -> dict[str, Any]:
     """Consulta a SEGTRACK, puxa a trajetória e monta mapa + relatório de conclusão."""
+    pedido_turno = (turno or "").strip().lower()
+    if pedido_turno in {"diurno", "noturno"}:
+        from .config import aplicar_periodo
+        from .live_turno import periodo_coleta
+
+        inicio, fim, dia_fim = periodo_coleta(settings.data_rota, pedido_turno)
+        settings = aplicar_periodo(settings, hora_inicio=inicio, hora_fim=fim, data_fim=dia_fim)
     dia = settings.data_rota
 
     def progress(msg: str) -> None:
@@ -1819,12 +1830,12 @@ def executar_coleta_do_dia(
         pedido = (turno or "").strip().lower()
         if pedido == "noturno":
             progress(
-                "2/7 — Turno noturno, a partir das 19:00 até 05:59. "
+                f"2/7 — Turno noturno, {settings.hora_inicio} até {settings.hora_fim}. "
                 "Polígonos noturnos do dia; a trajetória fica dentro de cada um."
             )
         elif pedido == "diurno":
             progress(
-                "2/7 — Turno diurno, 06:00 até 18:59. "
+                f"2/7 — Turno diurno, {settings.hora_inicio} até {settings.hora_fim}. "
                 "Polígonos diurnos do dia; a trajetória fica dentro de cada um."
             )
         else:
@@ -2170,10 +2181,16 @@ def _html(
         intro = "Grade do mapa oficial. Só rota e % — mapas e trajetórias no PDF."
     elif pedido == "noturno":
         titulo = f"Coleta noturna — {periodo}"
-        intro = "Polígonos noturnos do dia, a partir das 19:00. A trajetória do GPS fica dentro de cada polígono."
+        intro = (
+            f"Polígonos noturnos do dia, a partir das {hora_inicio}. "
+            "A trajetória do GPS fica dentro de cada polígono."
+        )
     elif pedido == "diurno":
         titulo = f"Coleta diurna — {periodo}"
-        intro = "Polígonos diurnos do dia, das 06:00 às 18:59. A trajetória do GPS fica dentro de cada polígono."
+        intro = (
+            f"Polígonos diurnos do dia, das {hora_inicio} às {hora_fim}. "
+            "A trajetória do GPS fica dentro de cada polígono."
+        )
     else:
         titulo = f"Coleta do dia — {periodo}"
         intro = "GPS da SEGTRACK. Só rota e % — mapas e trajetórias no PDF."

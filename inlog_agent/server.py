@@ -578,6 +578,18 @@ def _executar_job(nome: str, payload: dict[str, Any]) -> None:
             JOB.append("Concluído.")
             return
         cmd = [sys.executable, "-u", "-m", "inlog_agent", nome]
+        if nome == "unificado":
+            turno_pedido = str(payload.get("turno") or "").strip().lower()
+            if turno_pedido in {"diurno", "noturno"} and data:
+                try:
+                    dia_pedido = datetime.strptime(data, "%Y-%m-%d").date()
+                except ValueError:
+                    dia_pedido = None
+                if dia_pedido is not None:
+                    from .live_turno import periodo_coleta
+
+                    hora_inicio, hora_fim, dia_fim = periodo_coleta(dia_pedido, turno_pedido)
+                    data_fim = dia_fim.isoformat()
         if nome in {"rotas", "argos-rotas", "segtrack-rotas", "unificado"}:
             if data:
                 cmd.extend(["--data", data])
@@ -1097,8 +1109,8 @@ def _executar_inspecao_job(payload: dict[str, Any]) -> None:
 
 def _tentar_disparo_2h() -> None:
     from .chatbot import (
+        agora_brt,
         carregar_config,
-        ciclo_hoje,
         marcar_ultimo_disparo,
         passou_intervalo,
         status_sessao,
@@ -1118,17 +1130,20 @@ def _tentar_disparo_2h() -> None:
             return
     except Exception:
         return
-    dia, data_fim = ciclo_hoje()
+    from .live_turno import ciclo_operacional
+
+    dia_op = agora_brt().date()
+    hora_inicio, hora_fim, dia_fim = ciclo_operacional(dia_op)
     try:
         grupo = str(cfg.get("grupo_jid") or "")
-        marcar_envio_chatbot(grupo, dia)
+        marcar_envio_chatbot(grupo, dia_op.isoformat())
         iniciar_job(
             "unificado",
             {
-                "data": dia,
-                "data_fim": data_fim,
-                "hora_inicio": "06:00",
-                "hora_fim": "05:59",
+                "data": dia_op.isoformat(),
+                "data_fim": dia_fim.isoformat(),
+                "hora_inicio": hora_inicio,
+                "hora_fim": hora_fim,
                 "extrair": True,
                 "enviar_chatbot": True,
                 "grupo_jid": grupo,
@@ -2030,13 +2045,12 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("Clique em Conectar WhatsApp e escaneie o QR.")
                 dia = str(body.get("data") or "").strip()
                 if not dia:
-                    dia, data_fim = ciclo_hoje()
-                else:
-                    data_fim = str(body.get("data_fim") or "").strip()
-                    if not data_fim or data_fim == dia:
-                        data_fim = (datetime.strptime(dia, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-                hora_inicio = str(body.get("hora_inicio") or "06:00").strip() or "06:00"
-                hora_fim = str(body.get("hora_fim") or "05:59").strip() or "05:59"
+                    dia = ciclo_hoje()[0]
+                from .live_turno import ciclo_operacional
+
+                dia_op = datetime.strptime(dia, "%Y-%m-%d").date()
+                hora_inicio, hora_fim, dia_fim = ciclo_operacional(dia_op)
+                data_fim = dia_fim.isoformat()
                 salvar_config({"grupo_jid": grupo, "sessao_ativa": True})
                 marcar_envio_chatbot(grupo, dia)
                 print(f"Chatbot: pedido recebido. Gerando relatorio {dia} e PDF no grupo.", flush=True)

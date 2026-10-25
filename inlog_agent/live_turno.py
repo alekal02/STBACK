@@ -2,6 +2,12 @@
 
 Horários em Brasília. A data do noturno é o dia em que ele começa.
 ABERTO e FINALIZANDO mantêm aberto = 1. ENCERRADO grava aberto = 0.
+
+Nos demais dias o diurno vai de 06:00 a 18:59 e o noturno de 19:00 a 05:59
+do dia seguinte. No sábado o diurno começa às 05:00 e termina às 14:59;
+o noturno começa às 15:00 e termina às 01:59 de domingo. Por isso o noturno
+de sexta fecha às 04:59 de sábado: sem esse corte, 05:00–05:59 cairia nos
+dois turnos. O diurno de domingo continua às 06:00.
 """
 
 from __future__ import annotations
@@ -22,20 +28,91 @@ def agora_operacional(agora: datetime | None = None) -> datetime:
     return agora_brt()
 
 
+def horarios_do_turno(dia: date, turno: str) -> tuple[str, str]:
+    """Início e fim inclusivos, HH:MM. A data operacional é o dia em que o turno começa."""
+    pedido = (turno or "").strip().lower()
+    if pedido not in {"diurno", "noturno"}:
+        raise ValueError("Turno inválido. Use diurno ou noturno.")
+    if dia.weekday() == 5:
+        if pedido == "noturno":
+            return "15:00", "01:59"
+        return "05:00", "14:59"
+    if pedido == "noturno" and dia.weekday() == 4:
+        return "19:00", "04:59"
+    if pedido == "noturno":
+        return "19:00", "05:59"
+    return "06:00", "18:59"
+
+
+def _relogio(texto: str, segundo: int) -> hora:
+    hora_txt, minuto_txt = texto.split(":")
+    return hora(int(hora_txt), int(minuto_txt), segundo)
+
+
 def inicio_operacional(dia: date, turno: str) -> datetime:
-    if turno == "noturno":
-        return datetime.combine(dia, hora(19, 0, 0))
-    return datetime.combine(dia, hora(6, 0, 0))
+    inicio, _fim = horarios_do_turno(dia, turno)
+    return datetime.combine(dia, _relogio(inicio, 0))
 
 
 def fim_operacional(dia: date, turno: str) -> datetime:
-    if turno == "noturno":
-        return datetime.combine(dia + timedelta(days=1), hora(5, 59, 59))
-    return datetime.combine(dia, hora(18, 59, 59))
+    _inicio, fim = horarios_do_turno(dia, turno)
+    pedido = (turno or "").strip().lower()
+    dia_fim = dia + timedelta(days=1) if pedido == "noturno" else dia
+    return datetime.combine(dia_fim, _relogio(fim, 59))
+
+
+def data_fim_operacional(dia: date, turno: str) -> date:
+    return fim_operacional(dia, turno).date()
+
+
+def periodo_coleta(dia: date, turno: str) -> tuple[str, str, date]:
+    """Janela usada pela Fulltrack, pelo histórico GPS, pela cobertura e pelo relatório."""
+    inicio, fim = horarios_do_turno(dia, turno)
+    return inicio, fim, data_fim_operacional(dia, turno)
+
+
+def ciclo_operacional(dia: date) -> tuple[str, str, date]:
+    """Do início do diurno ao fim do noturno da mesma data, sem turno nomeado.
+
+    Nos demais dias continua 06:00 → 05:59. Na sexta o fim é 04:59, porque o
+    diurno de sábado começa às 05:00. No sábado o ciclo é 05:00 → 01:59.
+    """
+    inicio, _fim_diurno = horarios_do_turno(dia, "diurno")
+    _inicio_noturno, fim = horarios_do_turno(dia, "noturno")
+    return inicio, fim, data_fim_operacional(dia, "noturno")
+
+
+def campos_de_horario(dia: date, turno: str) -> dict[str, str]:
+    inicio, fim, dia_fim = periodo_coleta(dia, turno)
+    return {
+        "hora_inicio": inicio,
+        "hora_fim": fim,
+        "data_fim": "" if dia_fim == dia else dia_fim.isoformat(),
+    }
+
+
+def _contem(momento: datetime, dia: date, turno: str) -> bool:
+    inicio = inicio_operacional(dia, turno)
+    limite = fim_operacional(dia, turno) + timedelta(seconds=1)
+    return inicio <= momento < limite
+
+
+def classificar_instante(momento: datetime) -> tuple[date, str] | None:
+    """Turno que possui o instante. None no vão de domingo, das 02:00 às 05:59."""
+    lido = momento.replace(tzinfo=None)
+    dia = lido.date()
+    for candidato in (
+        (dia, "diurno"),
+        (dia, "noturno"),
+        (dia - timedelta(days=1), "noturno"),
+    ):
+        if _contem(lido, candidato[0], candidato[1]):
+            return candidato
+    return None
 
 
 def consolidar_ate(dia: date, turno: str) -> datetime:
-    """19:20:00 e 06:20:00. Nesse instante o turno já está encerrado."""
+    """20 minutos depois do fim. Nesse instante o turno já está encerrado."""
     return fim_operacional(dia, turno) + JANELA + timedelta(seconds=1)
 
 
@@ -44,7 +121,7 @@ def situacao_pelo_relogio(dia: date, turno: str, agora: datetime | None = None) 
     inicio = inicio_operacional(dia, turno)
     if momento < inicio:
         return ""
-    if momento <= fim_operacional(dia, turno):
+    if _contem(momento, dia, turno):
         return "ABERTO"
     if momento < consolidar_ate(dia, turno):
         return "FINALIZANDO"
@@ -52,7 +129,7 @@ def situacao_pelo_relogio(dia: date, turno: str, agora: datetime | None = None) 
 
 
 def fim_da_consulta(dia: date, turno: str, agora: datetime | None = None) -> datetime:
-    """Teto dos GPS. Finalizando às 19:10 ainda corta em 18:59:59."""
+    """Teto dos GPS. Na finalização o corte continua no fim operacional."""
     momento = agora_operacional(agora)
     return min(momento, fim_operacional(dia, turno))
 
@@ -67,7 +144,7 @@ def ponto_pertence(texto: str, dia: date, turno: str) -> bool:
     lido = instante_do_ponto(texto)
     if lido is None:
         return False
-    return inicio_operacional(dia, turno) <= lido <= fim_operacional(dia, turno)
+    return _contem(lido, dia, turno)
 
 
 def confirmacao_esperada(dia: date, turno: str) -> str:
@@ -84,7 +161,9 @@ def candidatos(agora: datetime | None = None) -> list[tuple[str, date, str]]:
 
     momento = agora_operacional(agora)
     dia, turno = turno_operacional(momento)
-    fila = [("ABERTO", dia, turno)]
+    fila = []
+    if situacao_pelo_relogio(dia, turno, momento) == "ABERTO":
+        fila.append(("ABERTO", dia, turno))
     if turno == "noturno":
         anterior = (dia, "diurno")
     else:

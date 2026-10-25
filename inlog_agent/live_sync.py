@@ -12,11 +12,10 @@ import math
 import os
 import threading
 import time
-from datetime import date, datetime, time as hora, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import janela_datetime
 from .live_db import (
     atualizar_turno,
     conectar,
@@ -131,21 +130,21 @@ def espera_reconstrucao(tentativas: int) -> int:
 
 
 def turno_operacional(agora: datetime | None = None) -> tuple[date, str]:
-    momento = agora or agora_brt()
-    if momento.hour >= 19:
-        return momento.date(), "noturno"
-    if momento.hour < 6:
-        return momento.date() - timedelta(days=1), "noturno"
+    """Turno que contém o relógio. No vão de domingo, devolve o diurno que ainda vai abrir."""
+    momento = (agora or agora_brt()).replace(tzinfo=None)
+    from .live_turno import classificar_instante
+
+    achado = classificar_instante(momento)
+    if achado is not None:
+        return achado
     return momento.date(), "diurno"
 
 
 def janela_ainda_aberta(dia: date, turno: str, agora: datetime | None = None) -> bool:
-    momento = agora or agora_brt()
-    if turno == "noturno":
-        fim = datetime.combine(dia + timedelta(days=1), hora(5, 59, 59))
-    else:
-        fim = datetime.combine(dia, hora(18, 59, 59))
-    return momento <= fim
+    from .live_turno import fim_operacional
+
+    momento = (agora or agora_brt()).replace(tzinfo=None)
+    return momento < fim_operacional(dia, turno) + timedelta(seconds=1)
 
 
 def inicio_da_consulta(
@@ -369,6 +368,7 @@ def ler_painel(
 
 def _painel_sem_persistencia(dia: date, pedido: str, texto: str) -> dict[str, Any]:
     from .live_report import _periodo_padrao, _resumo
+    from .live_turno import campos_de_horario
 
     return {
         "ok": False,
@@ -378,9 +378,7 @@ def _painel_sem_persistencia(dia: date, pedido: str, texto: str) -> dict[str, An
         "data": dia.isoformat(),
         "turno": pedido,
         "periodo": _periodo_padrao(dia, pedido),
-        "hora_inicio": "19:00" if pedido == "noturno" else "06:00",
-        "hora_fim": "05:59" if pedido == "noturno" else "18:59",
-        "data_fim": "",
+        **campos_de_horario(dia, pedido),
         "atualizado_em": "",
         "atualizado_hora": "",
         "atualizando": False,
@@ -526,6 +524,7 @@ def ciclo_gps(
         _importar_json_se_vazio(con, output_dir, dia, pedido)
         if not turno_existe(con, dia.isoformat(), pedido):
             from .live_report import _periodo_padrao
+            from .live_turno import campos_de_horario
 
             gravar_turno(
                 con,
@@ -534,14 +533,13 @@ def ciclo_gps(
                     "turno": pedido,
                     "aberto": 1,
                     "periodo": _periodo_padrao(dia, pedido),
-                    "hora_inicio": "19:00" if pedido == "noturno" else "06:00",
-                    "hora_fim": "05:59" if pedido == "noturno" else "18:59",
+                    **campos_de_horario(dia, pedido),
                     "falha": "Sem JSON do turno. A primeira sincronização busca o GPS na Fulltrack.",
                     "atualizado_em": momento.isoformat(timespec="seconds"),
                 },
             )
             con.commit()
-        from .live_turno import aplicar_relogio, fim_da_consulta, ponto_pertence, turno_aceita_sync
+        from .live_turno import aplicar_relogio, fim_da_consulta, inicio_operacional, ponto_pertence, turno_aceita_sync
 
         aplicar_relogio(con, dia, pedido, momento)
         con.commit()
@@ -554,11 +552,7 @@ def ciclo_gps(
         if situacao is not None and str(situacao["situacao"] or "") == "ABERTO":
             reconciliar_rotas_previstas(con, dia, pedido)
             con.commit()
-        inicio_turno, _fim = janela_datetime(
-            dia,
-            "19:00" if pedido == "noturno" else "06:00",
-            "05:59" if pedido == "noturno" else "18:59",
-        )
+        inicio_turno = inicio_operacional(dia, pedido)
         limite = fim_da_consulta(dia, pedido, momento)
         placas = ler_placas(con, dia.isoformat(), pedido)
         pesada = _turno_sem_estado(placas)

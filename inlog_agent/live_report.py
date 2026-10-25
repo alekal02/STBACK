@@ -63,8 +63,11 @@ def montar_estado(
     pedido = (turno or "").strip().lower()
     if pedido not in {"diurno", "noturno"}:
         raise ValueError("Turno inválido. Use diurno ou noturno.")
+    from .live_turno import campos_de_horario
+
     dia = parse_data(data) or date.today()
     pasta, diario, meta, falha = _ler_pasta(Path(output_dir), dia, pedido)
+    padrao = campos_de_horario(dia, pedido)
     periodo = str((diario or meta or {}).get("periodo") or "") or _periodo_padrao(dia, pedido)
     atualizado = _atualizado(pasta, diario or {}, meta or {})
     rotas = [_rota(linha) for linha in ((diario or {}).get("linhas") or [])]
@@ -81,9 +84,9 @@ def montar_estado(
         "data": dia.isoformat(),
         "turno": pedido,
         "periodo": periodo,
-        "hora_inicio": str((diario or meta or {}).get("hora_inicio") or ("19:00" if pedido == "noturno" else "06:00")),
-        "hora_fim": str((diario or meta or {}).get("hora_fim") or ("05:59" if pedido == "noturno" else "18:59")),
-        "data_fim": str((diario or meta or {}).get("data_fim") or ""),
+        "hora_inicio": str((diario or meta or {}).get("hora_inicio") or padrao["hora_inicio"]),
+        "hora_fim": str((diario or meta or {}).get("hora_fim") or padrao["hora_fim"]),
+        "data_fim": str((diario or meta or {}).get("data_fim") or padrao["data_fim"]),
         "atualizado_em": atualizado,
         "atualizado_hora": _hora_curta(atualizado),
         "atualizando": False,
@@ -96,9 +99,10 @@ def montar_estado(
 
 
 def _periodo_padrao(dia: date, turno: str) -> str:
-    if turno == "noturno":
-        return rotulo_periodo(dia, "19:00", "05:59")
-    return rotulo_periodo(dia, "06:00", "18:59")
+    from .live_turno import horarios_do_turno
+
+    inicio, fim = horarios_do_turno(dia, turno)
+    return rotulo_periodo(dia, inicio, fim)
 
 
 def _ler_pasta(

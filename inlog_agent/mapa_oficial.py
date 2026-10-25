@@ -19,6 +19,11 @@ ENVELOPE = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
 ALIAS_DIA = {0: "SEG", 1: "TER", 2: "QUA", 3: "QUI", 4: "SEX", 5: "SAB", 6: "DOM"}
 TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
 TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
+# Buffer de 20 m recortava a malha para fora do polígono. Entrava rua do setor
+# vizinho, paralela e avenida da divisa, e o total de metros inflava: a 62DNC
+# tinha 6,8 km de malha para 5,2 km oficiais e não passava de ~48%. 58 de 71
+# rotas sofriam o mesmo efeito.
+FOLGA_RECORTE_M = 3.0
 _CODIGO = re.compile(r"\b(\d{2}[A-Z]{2,4})\b")
 
 
@@ -232,7 +237,7 @@ def _anexar_vias(setores: list[dict[str, Any]]) -> None:
             setor["ruas"] = []
             setor["vias"] = []
             continue
-        zona = geom.buffer(20)
+        zona = geom.buffer(FOLGA_RECORTE_M)
         recorte = []
         try:
             indices = list(arvore.query(zona, predicate="intersects"))

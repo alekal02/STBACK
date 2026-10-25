@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -20,6 +21,8 @@ PASSO_M = 40.0
 SALTO_GPS_M = 160.0
 FEITA_MIN = 90.0
 PARCIAL_MIN = 45.0
+# Rua deitada sobre a divisa do polígono; se for percorrida, entra no percentual; se não for, não conta como pendência.
+CONTORNO_M = 15.0
 
 
 def _xy(ponto: dict[str, Any] | tuple[float, float]) -> tuple[float, float] | None:
@@ -902,6 +905,27 @@ def _associar_percurso(
     return comprovados, ambiguo, passos, info
 
 
+def _mascara_contorno(segmentos: list[LineString], geom) -> list[bool]:
+    """Início, meio e fim a até CONTORNO_M da borda. Sem polígono, nada é contorno."""
+    if geom is None or os.environ.get("COBERTURA_CONTORNO") == "obrigatorio":
+        return [False] * len(segmentos)
+    borda = geom.boundary
+    mascara: list[bool] = []
+    for segmento in segmentos:
+        if segmento.is_empty or segmento.length <= 0:
+            mascara.append(False)
+            continue
+        inicio = segmento.interpolate(0.0)
+        meio = segmento.interpolate(0.5, normalized=True)
+        fim = segmento.interpolate(1.0, normalized=True)
+        mascara.append(
+            borda.distance(inicio) <= CONTORNO_M
+            and borda.distance(meio) <= CONTORNO_M
+            and borda.distance(fim) <= CONTORNO_M
+        )
+    return mascara
+
+
 def _mascara_interna(segmentos: list[LineString], geom) -> list[bool]:
     """Rua interna fica além do raio de 45 m da borda. Sem polígono, não há contorno."""
     if geom is None:
@@ -1333,7 +1357,8 @@ def cobertura_compartilhada(
     não troca o caminhão por ruído. Apoio efetivo exige exclusiva interna com
     progressão de coleta: uma corrida seguida na sequência do GPS, não um par
     de passos nem duas visitas separadas. Via de contorno percorrida entra no
-    percentual e não cria apoio. Exclusiva sem essa progressão fica não
+    percentual e não cria apoio. Divisa não percorrida não conta como pendência.
+    Exclusiva sem essa progressão fica não
     confirmada, e não vira cobertura sobreposta. A união não soma duas vezes.
     """
     segmentos = _segmentos_oficiais(ruas)
@@ -1412,8 +1437,9 @@ def cobertura_compartilhada(
             }
         )
 
+    contorno = _mascara_contorno(segmentos, geom_setor)
     if not avaliados:
-        faltando = _fundir(segmentos)
+        faltando = _fundir([segmentos[i] for i in range(len(segmentos)) if not contorno[i]])
         return _pacote_cobertura(
             0.0, [], faltando, vazio_exec, passagens, 0.0, nao_confirmados, auditoria
         )
@@ -1423,7 +1449,8 @@ def cobertura_compartilhada(
         uniao |= item["indices"]
     todos = set(range(len(segmentos)))
     feitos_idx = sorted(uniao)
-    falta_idx = sorted(todos - uniao)
+    falta_idx = sorted(i for i in todos - uniao if not contorno[i])
+    contorno_livre_m = sum(segmentos[i].length for i in range(len(segmentos)) if contorno[i] and i not in uniao)
     feitos = _fundir([segmentos[i] for i in feitos_idx])
     faltando = _fundir([segmentos[i] for i in falta_idx])
     metros_feitos = _metros_wgs(feitos)
@@ -1546,6 +1573,7 @@ def cobertura_compartilhada(
         "metros_somente_geograficos": round(somente_geograficos, 1),
         "evidencia_operacional_m": round(evidencia_m, 1),
         "evidencia_operacional_pct": percentual_das_vias(evidencia_m, metros_falta + somente_geograficos),
+        "contorno_nao_percorrido_m": round(contorno_livre_m, 1),
     }
     return _pacote_cobertura(
         percentual,

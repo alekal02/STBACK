@@ -2470,6 +2470,7 @@ def realocar_pontos_pelo_horario(
         ).fetchall()
         planos = []
         fora: list[dict[str, str]] = []
+        sem_turno_destino = 0
         for ponto in pontos:
             origem = (str(ponto["data"]), str(ponto["turno"]))
             placa = str(ponto["placa"])
@@ -2483,7 +2484,10 @@ def realocar_pontos_pelo_horario(
             if destino is None or destino not in janela:
                 fora.append({"data": origem[0], "turno": origem[1], "placa": placa, "ts": ts})
                 continue
-            if destino == origem or destino not in existentes:
+            if destino == origem:
+                continue
+            if destino not in existentes:
+                sem_turno_destino += 1
                 continue
             planos.append(
                 {
@@ -2618,6 +2622,7 @@ def realocar_pontos_pelo_horario(
             ],
             "por_placa": {placa: por_placa_n[placa] for placa in sorted(por_placa_n)},
             "fora_de_turno": fora,
+            "sem_turno_destino": sem_turno_destino,
             "turnos": turnos,
         }
         if aplicar:

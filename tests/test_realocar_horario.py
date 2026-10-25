@@ -183,6 +183,7 @@ def test_previa_nao_grava_e_aplicar_move_os_pulsos(monkeypatch, tmp_path):
     assert previa["previa"] is True
     assert previa["por_placa"] == {PLACA: 5}
     assert previa["fora_de_turno"] == []
+    assert previa["sem_turno_destino"] == 0
     assert _qtd(previa["movidos"], {"data": SEXTA, "turno": "noturno"}, {"data": SABADO, "turno": "diurno"}) == 2
     assert _qtd(previa["movidos"], {"data": SABADO, "turno": "diurno"}, {"data": SABADO, "turno": "noturno"}) == 3
     assert _rota(previa, SEXTA, "noturno") == {"antes": 0, "depois": 10}
@@ -196,6 +197,7 @@ def test_previa_nao_grava_e_aplicar_move_os_pulsos(monkeypatch, tmp_path):
     aplicado = realocar(tmp_path, SABADO, aplicar=True, usuario="auditor")
     assert aplicado["aplicado"] is True
     assert aplicado["por_placa"] == {PLACA: 5}
+    assert aplicado["sem_turno_destino"] == 0
     assert _rota(aplicado, SEXTA, "noturno")["depois"] == 10
     assert _rota(aplicado, SABADO, "diurno")["depois"] == 40
     assert _rota(aplicado, SABADO, "noturno")["depois"] == 30
@@ -249,6 +251,7 @@ def test_previa_nao_grava_e_aplicar_move_os_pulsos(monkeypatch, tmp_path):
     assert de_novo["movidos"] == []
     assert de_novo["por_placa"] == {}
     assert de_novo["fora_de_turno"] == []
+    assert de_novo["sem_turno_destino"] == 0
     assert de_novo["turnos"] == []
     con = _ler()
     assert _horas(con, SEXTA, "noturno") == ["04:30"]
@@ -281,6 +284,47 @@ def test_pulso_fora_de_turno_permanece(monkeypatch, tmp_path):
     con = _ler()
     assert _horas(con, SABADO, "diurno") == ["03:00"]
     assert _horas(con, SABADO, "noturno") == ["15:00"]
+    con.close()
+
+
+def test_pulso_sem_turno_destino_nao_e_movido(monkeypatch, tmp_path):
+    live_sync = _banco(monkeypatch, tmp_path)
+    from inlog_agent.live_db import conectar, inserir_pontos, marcar_placa
+
+    con = conectar()
+    _turno(con, SABADO, "diurno", "ABERTO")
+    inserir_pontos(
+        con,
+        SABADO,
+        "diurno",
+        PLACA,
+        [
+            _pulso("2026-10-24T07:00:00"),
+            _pulso("2026-10-24T15:00:00"),
+            _pulso("2026-10-24T16:30:00"),
+        ],
+    )
+    marcar_placa(con, SABADO, "diurno", PLACA, veiculo=VEICULO)
+    con.commit()
+    con.close()
+
+    previa = live_sync.realocar_pontos_pelo_horario(tmp_path, SABADO, aplicar=False)
+    assert previa["sem_turno_destino"] == 2
+    assert previa["movidos"] == []
+    assert previa["fora_de_turno"] == []
+    assert previa["aplicado"] is False
+
+    aplicado = live_sync.realocar_pontos_pelo_horario(tmp_path, SABADO, aplicar=True)
+    assert aplicado["sem_turno_destino"] == 2
+    assert aplicado["movidos"] == []
+    con = _ler()
+    assert _horas(con, SABADO, "diurno") == ["07:00", "15:00", "16:30"]
+    assert _horas(con, SABADO, "noturno") == []
+    assert con.execute(
+        "SELECT COUNT(*) FROM turno WHERE data = ? AND turno = 'noturno'",
+        (SABADO,),
+    ).fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM turno_evento").fetchone()[0] == 0
     con.close()
 
 

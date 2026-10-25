@@ -138,6 +138,19 @@ def cmd_criar_admin() -> None:
     print("O login passa a ser exigido porque já existe um administrador ativo.", flush=True)
 
 
+def cmd_realocar_horario(data: str, aplicar: bool) -> None:
+    import json
+
+    from .live_sync import realocar_pontos_pelo_horario
+
+    resultado = realocar_pontos_pelo_horario(
+        load_settings().output_dir,
+        data,
+        aplicar=bool(aplicar),
+    )
+    print(json.dumps(resultado, ensure_ascii=False, default=str), flush=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="inlog_agent",
@@ -200,6 +213,16 @@ def build_parser() -> argparse.ArgumentParser:
         "criar-admin",
         help="Cria o primeiro administrador. A senha vem de AUTH_ADMIN_SENHA ou é digitada, nunca de um argumento.",
     )
+    realocar = sub.add_parser(
+        "realocar-horario",
+        help="Mostra ou grava a realocação dos pulsos para o turno do horário",
+    )
+    realocar.add_argument("--data", required=True, help="Data operacional YYYY-MM-DD")
+    realocar.add_argument(
+        "--aplicar",
+        action="store_true",
+        help="Grava a realocação. Sem esta opção, só mostra a prévia.",
+    )
     return parser
 
 
@@ -223,6 +246,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.comando == "criar-admin":
         cmd_criar_admin()
+        return
+    if args.comando == "realocar-horario":
+        cmd_realocar_horario(args.data, bool(args.aplicar))
         return
     if args.comando == "pdf":
         from .pdf import gerar_pdf_dia

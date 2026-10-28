@@ -1621,6 +1621,7 @@ class Handler(BaseHTTPRequestHandler):
         from .frota import (
             ao_vivo,
             catalogo_veiculos,
+            consultar_eventos,
             consultar_paradas,
             consultar_telemetria,
             consultar_trajeto,
@@ -1666,6 +1667,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/frota/telemetria":
                 self._json(200, consultar_telemetria(qs), self._no_store())
+                return
+            if path == "/api/frota/eventos":
+                self._json(200, consultar_eventos(qs), self._no_store())
                 return
             if path == "/api/frota/trajeto":
                 self._json(200, consultar_trajeto(qs), self._no_store())

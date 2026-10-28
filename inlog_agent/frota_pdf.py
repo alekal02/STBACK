@@ -24,6 +24,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .conducao import AVISO_ESTIMADO
 from .frota import (
     _agora_brt,
     _fmt_placa,
@@ -220,6 +221,7 @@ def _descricoes(qs: dict[str, list[str]]) -> dict[str, str]:
 def _telemetria(qs: dict[str, list[str]], placa: str) -> dict[str, Any]:
     pedido = {chave: list(valor) for chave, valor in qs.items()}
     pedido["placa"] = [placa]
+    pedido["sem_geo_eventos"] = ["1"]
     try:
         return consultar_telemetria(pedido)
     except Exception:
@@ -283,6 +285,7 @@ def _secao(cam: dict[str, Any], pacote: dict[str, Any], estilo, negrito, miudo, 
         Paragraph(_texto_telemetria(tele), miudo),
         Spacer(1, 2 * mm),
     ]
+    blocos.extend(_bloco_conducao(tele, negrito, miudo))
     paradas = cam["paradas"]
     if not paradas:
         blocos.append(
@@ -346,6 +349,61 @@ def _texto_telemetria(tele: dict[str, Any]) -> str:
         f"Primeiro pulso {_hora_curta(tele.get('primeiro_pulso'))} · "
         f"último {_hora_curta(tele.get('ultimo_pulso'))} · "
         f"excessos &gt; 60 km/h: {tele.get('pulsos_acima_60') if tele.get('pulsos_acima_60') is not None else '—'}"
+    )
+
+
+def _bloco_conducao(tele: dict[str, Any], negrito, miudo) -> list[Any]:
+    if not tele or tele.get("contagem") is None:
+        return []
+    contagem = tele.get("contagem") or {}
+    ocioso = tele.get("ocioso") or {}
+    linhas = [
+        Spacer(1, 1.5 * mm),
+        Paragraph("Condução", negrito),
+        Paragraph(_texto_contagem(contagem), miudo),
+    ]
+    excessos = [item for item in tele.get("eventos") or [] if item.get("tipo") == "excesso_velocidade"]
+    if excessos:
+        linhas.append(Paragraph("Excessos: " + " · ".join(_texto_excesso(item) for item in excessos), miudo))
+    else:
+        linhas.append(Paragraph("Excessos: nenhum", miudo))
+    linhas.append(Paragraph(_texto_ocioso(ocioso), miudo))
+    if tele.get("alerta_ignicao"):
+        linhas.append(Paragraph(escape(str(tele["alerta_ignicao"])), miudo))
+    linhas.append(Paragraph(escape(AVISO_ESTIMADO), miudo))
+    linhas.append(Spacer(1, 2 * mm))
+    return linhas
+
+
+def _texto_contagem(contagem: dict[str, Any]) -> str:
+    pares = (
+        ("frenagem_brusca", "Frenagem brusca"),
+        ("aceleracao_brusca", "Aceleração brusca"),
+        ("curva_brusca_esquerda", "Curva à esquerda"),
+        ("curva_brusca_direita", "Curva à direita"),
+        ("excesso_velocidade", "Excessos"),
+        ("motor_ocioso", "Ocioso"),
+    )
+    return " · ".join(f"{rotulo}: {int(contagem.get(chave) or 0)}" for chave, rotulo in pares)
+
+
+def _texto_excesso(item: dict[str, Any]) -> str:
+    return (
+        f"{escape(_hora_curta(item.get('data_hora')))}–{escape(_hora_curta(item.get('fim')))}, "
+        f"máx. {escape(_kmh(item.get('velocidade')))} ({escape(_duracao(item.get('duracao_min')))})"
+    )
+
+
+def _texto_ocioso(ocioso: dict[str, Any]) -> str:
+    if ocioso.get("origem") == "api":
+        origem = "no dia"
+    else:
+        origem = "estimado no turno"
+    percentual = ocioso.get("percentual")
+    pct = "—" if percentual is None else f"{_decimal(percentual)}% do tempo ligado"
+    return (
+        f"Ocioso {origem}: {_duracao(ocioso.get('tempo_min'))} ({pct}) · "
+        f"episódios estimados: {int(ocioso.get('episodios') or 0)}"
     )
 
 

@@ -122,6 +122,44 @@ def historico_veiculo(
     return [item for item in (data or []) if isinstance(item, dict)]
 
 
+def consolidado_veiculo(
+    settings: Settings,
+    vehicle_id: str,
+    dia: date,
+    token: str | None = None,
+) -> dict[str, Any] | None:
+    """Totais do dia civil. Sem série, devolve None."""
+    at = token or login(settings)
+    iso = dia.isoformat()
+    path = f"/consolidatedevents/vehicle/id/{vehicle_id}/initial/{iso}/final/{iso}"
+    try:
+        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=25)
+    except (FulltrackSemDados, RuntimeError):
+        return None
+    data = corpo.get("data") if isinstance(corpo, dict) else corpo
+    if isinstance(data, list):
+        return data[0] if data and isinstance(data[0], dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def alertas_periodo(
+    settings: Settings,
+    inicio: datetime,
+    fim: datetime,
+    token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Alertas prontos da conta. Conta sem alerta devolve lista vazia."""
+    at = token or login(settings)
+    begin, end = _unix(inicio), _unix(fim)
+    path = f"/alerts/period/initial/{begin}/final/{end}"
+    try:
+        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=25)
+    except (FulltrackSemDados, RuntimeError):
+        return []
+    data = corpo.get("data") if isinstance(corpo, dict) else corpo
+    return [item for item in (data or []) if isinstance(item, dict)]
+
+
 def _ponto(evento: dict[str, Any], veiculo: str) -> dict[str, Any] | None:
     try:
         lat = float(evento.get("ras_eve_latitude"))

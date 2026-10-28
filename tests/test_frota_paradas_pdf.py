@@ -131,6 +131,8 @@ def test_pdf_de_um_caminhao_com_paradas(tmp_path, monkeypatch):
     assert "10 min" in texto
     assert any(link.startswith("https://www.google.com/maps?q=-16.9") for link in links)
     assert "Página 1 de" in texto
+    assert "Condução" in texto
+    assert "valores estimados pelo GPS" in texto
 
 
 def test_pdf_de_um_caminhao_sem_paradas(tmp_path, monkeypatch):

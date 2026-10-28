@@ -18,6 +18,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .config import ROOT, load_settings
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+_JSON_RUIM = object()
+_FROTA_OPERACAO = re.compile(r"^/api/frota/operacoes/(\d+)$")
+_FROTA_PLACAS = re.compile(r"^/api/frota/operacoes/(\d+)/placas$")
+_FROTA_PLACA = re.compile(r"^/api/frota/operacoes/(\d+)/placas/([^/]+)$")
 mimetypes.add_type(
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".docx",
@@ -1248,7 +1252,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", origem.rstrip("/"))
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Credentials", "true")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type, X-Chatbot-Secret, X-Webhook-Secret, token, If-None-Match, X-CSRF-Token",
@@ -1441,7 +1445,10 @@ class Handler(BaseHTTPRequestHandler):
             extra = self._apagar_cookie() if codigo in {"expirada", "revogada", "bloqueado"} else self._no_store()
             self._json(401, {"ok": False, "erro": mensagem_sessao(codigo)}, extra)
             return False
-        if method == "POST" and not csrf_confere(str(usuario.get("csrf") or ""), self.headers.get("X-CSRF-Token") or ""):
+        if method in {"POST", "PUT", "DELETE"} and not csrf_confere(
+            str(usuario.get("csrf") or ""),
+            self.headers.get("X-CSRF-Token") or "",
+        ):
             self._json(
                 403,
                 {"ok": False, "erro": "Não foi possível confirmar o envio. Atualize a página e tente de novo."},
@@ -1611,11 +1618,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"ok": False, "erro": "Não foi possível ler a auditoria."}, self._no_store())
 
     def _responder_frota(self, path: str, qs: dict[str, list[str]]) -> None:
-        from .frota import consultar_paradas, consultar_telemetria, consultar_trajeto, ao_vivo, paradas_csv
+        from .frota import (
+            ao_vivo,
+            catalogo_veiculos,
+            consultar_paradas,
+            consultar_telemetria,
+            consultar_trajeto,
+            listar_operacoes,
+            paradas_csv,
+        )
 
         try:
+            if path == "/api/frota/operacoes":
+                self._json(200, listar_operacoes(), self._no_store())
+                return
+            if path == "/api/frota/veiculos":
+                self._json(200, catalogo_veiculos(qs), self._no_store())
+                return
             if path == "/api/frota/ao-vivo":
-                self._json(200, ao_vivo(), self._no_store())
+                self._json(200, ao_vivo(qs), self._no_store())
                 return
             if path == "/api/frota/paradas":
                 self._json(200, consultar_paradas(qs), self._no_store())
@@ -1636,6 +1657,63 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             print(f"Frota: {exc}", flush=True)
             self._json(500, {"ok": False, "erro": "Não foi possível consultar a frota."}, self._no_store())
+
+    def _responder_frota_escrita(self, method: str, path: str, payload: dict[str, Any]) -> None:
+        from .frota import apagar_operacao, atualizar_operacao, criar_operacao, desafixar_placa, fixar_placa
+
+        try:
+            if method == "POST" and path == "/api/frota/operacoes":
+                self._json(200, criar_operacao(payload), self._no_store())
+                return
+            operacao = _FROTA_OPERACAO.fullmatch(path)
+            if operacao and method == "PUT":
+                self._json(200, atualizar_operacao(int(operacao.group(1)), payload), self._no_store())
+                return
+            if operacao and method == "DELETE":
+                self._json(200, apagar_operacao(int(operacao.group(1))), self._no_store())
+                return
+            placas = _FROTA_PLACAS.fullmatch(path)
+            if placas and method == "POST":
+                self._json(200, fixar_placa(int(placas.group(1)), str(payload.get("placa") or "")), self._no_store())
+                return
+            placa = _FROTA_PLACA.fullmatch(path)
+            if placa and method == "DELETE":
+                self._json(200, desafixar_placa(int(placa.group(1)), placa.group(2)), self._no_store())
+                return
+            self._json(405, {"ok": False, "erro": "A frota é somente leitura."}, self._no_store())
+        except ValueError as exc:
+            self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
+        except Exception as exc:
+            print(f"Frota: {exc}", flush=True)
+            self._json(500, {"ok": False, "erro": "Não foi possível gravar a operação."}, self._no_store())
+
+    def _json_pedido(self) -> Any:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        if not raw.strip():
+            return {}
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            return _JSON_RUIM
+
+    def _mutar_frota(self, method: str) -> None:
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path != "/api/frota" and not path.startswith("/api/frota/"):
+            self._json(404, {"ok": False, "erro": "Rota não encontrada."}, self._no_store())
+            return
+        if not self._exigir(
+            method,
+            admin=True,
+            erro_admin="Somente administradores podem acessar a frota.",
+        ):
+            return
+        payload = self._json_pedido()
+        if payload is _JSON_RUIM:
+            self._json(400, {"erro": "JSON inválido."}, self._no_store())
+            return
+        self._responder_frota_escrita(method, path, payload if isinstance(payload, dict) else {})
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -2066,7 +2144,11 @@ class Handler(BaseHTTPRequestHandler):
                 erro_admin="Somente administradores podem acessar a frota.",
             ):
                 return
-            self._json(405, {"ok": False, "erro": "A frota é somente leitura."}, self._no_store())
+            self._responder_frota_escrita(
+                "POST",
+                unquote(path),
+                payload if isinstance(payload, dict) else {},
+            )
             return
         if path != "/api/chatbot/gerar":
             if not self._exigir("POST"):
@@ -2286,6 +2368,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(202, iniciar_job(acao, payload if isinstance(payload, dict) else {}))
         except Exception as exc:
             self._json(409, {"erro": str(exc)})
+
+    def do_PUT(self) -> None:
+        self._mutar_frota("PUT")
+
+    def do_DELETE(self) -> None:
+        self._mutar_frota("DELETE")
 
 
 class SalaHTTPServer(ThreadingHTTPServer):

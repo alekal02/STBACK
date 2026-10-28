@@ -316,7 +316,7 @@ def _entrar(base, login, senha):
 
 
 def test_operador_recebe_403_na_frota(ambiente, monkeypatch):
-    monkeypatch.setattr("inlog_agent.frota.ao_vivo", lambda: {"ok": True, "veiculos": []})
+    monkeypatch.setattr("inlog_agent.frota.ao_vivo", lambda qs=None: {"ok": True, "veiculos": []})
     monkeypatch.setattr("inlog_agent.frota.consultar_paradas", lambda qs: {"ok": True, "paradas": []})
     monkeypatch.setattr("inlog_agent.frota.consultar_telemetria", lambda qs: {"ok": True})
     monkeypatch.setattr("inlog_agent.frota.consultar_trajeto", lambda qs: {"ok": True, "pontos": []})

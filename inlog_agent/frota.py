@@ -1,8 +1,9 @@
-"""Frota ao vivo, paradas e telemetria. Somente leitura da Fulltrack.
+"""Frota ao vivo, paradas, telemetria e operações por região.
 
 O km é a soma haversine. /events/all traz ras_eve_ignicao (0/1) e
 ras_eve_hodometro; a ignição entra na parada, o hodômetro não entra no km.
 O banco fica no mesmo disco de live_db.caminho_banco, em tabelas próprias.
+Sem ?operacao=, a consulta usa a operação padrão. operacao=todas devolve a conta inteira.
 """
 
 from __future__ import annotations
@@ -23,7 +24,10 @@ from urllib.request import Request, urlopen
 
 from .config import load_settings
 from .fulltrack_api import (
+    APARECIDA_LAT,
+    APARECIDA_LON,
     FulltrackSemDados,
+    _em_aparecida,
     _eventos_atuais,
     _fmt_placa,
     _norm_placa,
@@ -43,11 +47,12 @@ SALTO_S = 30.0
 BLOCO_H = 24
 CACHE_S = 30.0
 _NOMINATIM = "https://nominatim.openstreetmap.org/reverse"
+_NOMINATIM_BUSCA = "https://nominatim.openstreetmap.org/search"
 _AUSENTE = object()
 
 _IO = threading.Lock()
 _CACHE_LOCK = threading.Lock()
-_CACHE: dict[str, Any] = {"expira": 0.0, "corpo": None}
+_CACHE: dict[str, Any] = {"chave": "", "expira": 0.0, "corpo": None}
 _GEO = threading.Lock()
 _GEO_ULTIMO = 0.0
 _GEO_AVISO = False
@@ -73,6 +78,22 @@ CREATE TABLE IF NOT EXISTS frota_janela (
     inicio TEXT NOT NULL,
     fim TEXT NOT NULL,
     PRIMARY KEY (placa, inicio, fim)
+);
+CREATE TABLE IF NOT EXISTS frota_operacao (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    lat_min REAL NOT NULL,
+    lat_max REAL NOT NULL,
+    lon_min REAL NOT NULL,
+    lon_max REAL NOT NULL,
+    ativa INTEGER NOT NULL DEFAULT 1,
+    padrao INTEGER NOT NULL DEFAULT 0,
+    criado_em TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS frota_operacao_placa (
+    operacao_id INTEGER NOT NULL,
+    placa TEXT NOT NULL,
+    PRIMARY KEY (operacao_id, placa)
 );
 """
 
@@ -123,14 +144,39 @@ def resolver_periodo(
     return ini, end, dia, pedido
 
 
-def ao_vivo() -> dict[str, Any]:
-    """Posição atual da frota. O resultado fica 30 s em memória."""
+def ao_vivo(qs: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Posição atual. O cache de 30 s guarda a conta inteira; o filtro vem depois."""
+    op = _operacao_efetiva(qs)
+    base = _ao_vivo_completo()
+    if op is None:
+        veiculos = [_publico_vivo(item) for item in base["veiculos"]]
+        return {
+            "ok": True,
+            "atualizado_em": base["atualizado_em"],
+            "qtd": len(veiculos),
+            "veiculos": veiculos,
+        }
+    placas = _com_banco(lambda con: _fixadas_fmt(con, int(op["id"])))
+    veiculos = _veiculos_da_operacao(base["veiculos"], op, placas)
+    return {
+        "ok": True,
+        "atualizado_em": base["atualizado_em"],
+        "qtd": len(veiculos),
+        "veiculos": veiculos,
+    }
+
+
+def _ao_vivo_completo() -> dict[str, Any]:
+    from .live_db import caminho_banco
+
+    chave = str(caminho_banco())
     agora = time.monotonic()
     with _CACHE_LOCK:
         corpo = _CACHE["corpo"]
-        if corpo is not None and agora < float(_CACHE["expira"]):
+        if corpo is not None and _CACHE.get("chave") == chave and agora < float(_CACHE["expira"]):
             return corpo
         fresco = _buscar_ao_vivo()
+        _CACHE["chave"] = chave
         _CACHE["corpo"] = fresco
         _CACHE["expira"] = time.monotonic() + CACHE_S
         return fresco
@@ -271,13 +317,17 @@ def endereco(lat: Any, lon: Any) -> str:
 
 
 def consultar_paradas(qs: dict[str, list[str]]) -> dict[str, Any]:
+    op = _operacao_efetiva(qs)
     inicio, fim, dia, turno, minimo, maximo, placa = _filtros(qs)
     avisos: list[str] = []
     if placa:
+        if op is not None:
+            _recusar_fora(placa, op)
         blocos = [historico(placa, inicio, fim)]
         placa_fmt = _fmt_placa(placa)
     else:
-        blocos = _historico_frota(inicio, fim, avisos)
+        placas = None if op is None else _placas_operacao(op)
+        blocos = _historico_frota(inicio, fim, avisos, placas=placas)
         placa_fmt = ""
     paradas: list[dict[str, Any]] = []
     for pontos in blocos:
@@ -337,12 +387,18 @@ def paradas_csv(qs: dict[str, list[str]]) -> tuple[bytes, str]:
 
 
 def consultar_telemetria(qs: dict[str, list[str]]) -> dict[str, Any]:
+    op = _operacao_efetiva(qs)
     inicio, fim, _dia, _turno, _minimo, _maximo, placa = _filtros(qs, exigir_placa=True)
+    if op is not None:
+        _recusar_fora(placa, op)
     return telemetria(placa, inicio, fim)
 
 
 def consultar_trajeto(qs: dict[str, list[str]]) -> dict[str, Any]:
+    op = _operacao_efetiva(qs)
     inicio, fim, _dia, _turno, _minimo, _maximo, placa = _filtros(qs, exigir_placa=True)
+    if op is not None:
+        _recusar_fora(placa, op)
     pontos = historico(placa, inicio, fim)
     return {
         "ok": True,
@@ -477,7 +533,27 @@ def _posicao(item: dict[str, Any], ev: dict[str, Any] | None, agora: datetime, p
         "data_gps": data_gps,
         "minutos": minutos,
         "status": _status(vel, minutos),
+        "cidade": _cidade_evento(ev),
     }
+
+
+def _cidade_evento(ev: dict[str, Any] | None) -> str:
+    if not ev:
+        return ""
+    for chave in (
+        "ras_eve_cidade",
+        "cidade",
+        "ras_eve_municipio",
+        "municipio",
+        "ras_eve_endereco",
+        "endereco",
+        "ras_eve_localizacao",
+        "localizacao",
+    ):
+        texto = str(ev.get(chave) or "").strip()
+        if texto:
+            return texto
+    return ""
 
 
 def _status(vel: float | None, minutos: float | None) -> str:
@@ -490,19 +566,41 @@ def _status(vel: float | None, minutos: float | None) -> str:
     return "parado"
 
 
-def _historico_frota(inicio: datetime, fim: datetime, avisos: list[str]) -> list[list[dict[str, Any]]]:
+def _historico_frota(
+    inicio: datetime,
+    fim: datetime,
+    avisos: list[str],
+    placas: set[str] | None = None,
+) -> list[list[dict[str, Any]]]:
+    if placas is not None and not placas:
+        return []
     settings = load_settings()
     token = login(settings)
     mapa = _mapa_veiculos(settings, token)
-    placas = sorted({_fmt_placa(str(item.get("ras_vei_placa") or "")) for item in mapa.values()})
-    placas = [placa for placa in placas if _norm_placa(placa)]
-    if not placas:
+    if placas is None:
+        alvos = sorted({_fmt_placa(str(item.get("ras_vei_placa") or "")) for item in mapa.values()})
+        alvos = [placa for placa in alvos if _norm_placa(placa)]
+    else:
+        quer = {_norm_placa(placa) for placa in placas}
+        alvos = sorted(
+            {
+                _fmt_placa(str(item.get("ras_vei_placa") or ""))
+                for item in mapa.values()
+                if _norm_placa(str(item.get("ras_vei_placa") or "")) in quer
+            }
+        )
+        alvos = [placa for placa in alvos if _norm_placa(placa)]
+        achadas = {_norm_placa(placa) for placa in alvos}
+        for placa in sorted(placas):
+            if _norm_placa(placa) not in achadas:
+                avisos.append(f"{placa}: Placa {placa} não encontrada na frota.")
+    if not alvos:
         return []
     blocos: dict[str, list[dict[str, Any]]] = {}
-    with ThreadPoolExecutor(max_workers=min(4, len(placas))) as pool:
+    with ThreadPoolExecutor(max_workers=min(4, len(alvos))) as pool:
         futuros = {
             pool.submit(historico, placa, inicio, fim, settings=settings, token=token, veiculos=mapa): placa
-            for placa in placas
+            for placa in alvos
         }
         for fut in as_completed(futuros):
             placa = futuros[fut]
@@ -510,7 +608,7 @@ def _historico_frota(inicio: datetime, fim: datetime, avisos: list[str]) -> list
                 blocos[placa] = fut.result()
             except Exception as exc:
                 avisos.append(f"{placa}: {exc}")
-    return [blocos[placa] for placa in placas if placa in blocos]
+    return [blocos[placa] for placa in alvos if placa in blocos]
 
 
 def _mapa_veiculos(settings: Any, token: str) -> dict[str, dict[str, Any]]:
@@ -737,16 +835,21 @@ def _tempos(lista: list[dict[str, Any]]) -> tuple[float, float]:
     return mov, par
 
 
-def _nominatim(lat: str, lon: str) -> str:
+def _esperar_nominatim() -> None:
+    """No máximo uma consulta ao Nominatim por segundo. Chamar com _GEO preso."""
     global _GEO_ULTIMO
+    espera = 1.0 - (time.monotonic() - _GEO_ULTIMO)
+    if _GEO_ULTIMO and espera > 0:
+        time.sleep(espera)
+    _GEO_ULTIMO = time.monotonic()
+
+
+def _nominatim(lat: str, lon: str) -> str:
     with _GEO:
         guardado = _com_banco(lambda con: _geo_ler(con, lat, lon))
         if guardado is not _AUSENTE:
             return str(guardado)
-        espera = 1.0 - (time.monotonic() - _GEO_ULTIMO)
-        if _GEO_ULTIMO and espera > 0:
-            time.sleep(espera)
-        _GEO_ULTIMO = time.monotonic()
+        _esperar_nominatim()
         query = urlencode({"format": "jsonv2", "lat": lat, "lon": lon, "zoom": "18"})
         pedido = Request(
             _NOMINATIM + "?" + query,
@@ -906,6 +1009,435 @@ def _buracos(
     return faltam
 
 
+def listar_operacoes() -> dict[str, Any]:
+    ops = _com_banco(_listar_rows)
+    vivo = _ao_vivo_completo()
+    for op in ops:
+        op["qtd"] = len(_veiculos_da_operacao(vivo["veiculos"], op, list(op["placas"])))
+    return {"ok": True, "operacoes": ops}
+
+
+def criar_operacao(corpo: dict[str, Any]) -> dict[str, Any]:
+    nome, limites = _dados_novos(corpo)
+    lat_min, lat_max, lon_min, lon_max = limites
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        cur = con.execute(
+            """
+            INSERT INTO frota_operacao (
+                nome, lat_min, lat_max, lon_min, lon_max, ativa, padrao, criado_em
+            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+            """,
+            (nome, lat_min, lat_max, lon_min, lon_max, _iso(_agora_brt())),
+        )
+        op = _op_de(con, int(cur.lastrowid))
+        if op is None:
+            raise ValueError("Não foi possível gravar a operação.")
+        return op
+
+    return {"ok": True, "operacao": _com_banco(gravar)}
+
+
+def atualizar_operacao(operacao_id: int, corpo: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(corpo, dict):
+        raise ValueError("Dados inválidos.")
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        row = _row_op(con, operacao_id)
+        if row is None:
+            raise ValueError("Operação não encontrada.")
+        nome = str(row["nome"])
+        lat_min, lat_max = float(row["lat_min"]), float(row["lat_max"])
+        lon_min, lon_max = float(row["lon_min"]), float(row["lon_max"])
+        ativa = int(row["ativa"])
+        if "nome" in corpo:
+            nome = str(corpo.get("nome") or "").strip()
+            if not nome:
+                raise ValueError("Informe o nome da operação.")
+        if _tem_limites(corpo):
+            lat_min, lat_max, lon_min, lon_max = _limites_do_corpo(corpo)
+        if "ativa" in corpo:
+            ativa = 1 if _flag(corpo.get("ativa"), "ativa") else 0
+        quer_padrao = _flag(corpo.get("padrao"), "padrao") if "padrao" in corpo else None
+        if quer_padrao is False and int(row["padrao"]):
+            raise ValueError("A operação padrão não pode deixar de ser padrão.")
+        con.execute(
+            """
+            UPDATE frota_operacao
+            SET nome = ?, lat_min = ?, lat_max = ?, lon_min = ?, lon_max = ?, ativa = ?
+            WHERE id = ?
+            """,
+            (nome, lat_min, lat_max, lon_min, lon_max, ativa, int(operacao_id)),
+        )
+        if quer_padrao:
+            con.execute("UPDATE frota_operacao SET padrao = 0 WHERE id != ?", (int(operacao_id),))
+            con.execute("UPDATE frota_operacao SET padrao = 1 WHERE id = ?", (int(operacao_id),))
+        op = _op_de(con, int(operacao_id))
+        if op is None:
+            raise ValueError("Operação não encontrada.")
+        return op
+
+    return {"ok": True, "operacao": _com_banco(gravar)}
+
+
+def apagar_operacao(operacao_id: int) -> dict[str, Any]:
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        row = _row_op(con, operacao_id)
+        if row is None:
+            raise ValueError("Operação não encontrada.")
+        if int(row["padrao"]):
+            raise ValueError("Não é possível apagar a operação padrão.")
+        con.execute("DELETE FROM frota_operacao_placa WHERE operacao_id = ?", (int(operacao_id),))
+        con.execute("DELETE FROM frota_operacao WHERE id = ?", (int(operacao_id),))
+        return {"ok": True}
+
+    return _com_banco(gravar)
+
+
+def fixar_placa(operacao_id: int, placa: str) -> dict[str, Any]:
+    fmt = _fmt_placa(placa)
+    if not _norm_placa(fmt):
+        raise ValueError("Informe a placa.")
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        if _row_op(con, operacao_id) is None:
+            raise ValueError("Operação não encontrada.")
+        con.execute(
+            "INSERT OR IGNORE INTO frota_operacao_placa (operacao_id, placa) VALUES (?, ?)",
+            (int(operacao_id), fmt),
+        )
+        return {"ok": True, "operacao_id": int(operacao_id), "placa": fmt}
+
+    return _com_banco(gravar)
+
+
+def desafixar_placa(operacao_id: int, placa: str) -> dict[str, Any]:
+    fmt = _fmt_placa(placa)
+    if not _norm_placa(fmt):
+        raise ValueError("Informe a placa.")
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        if _row_op(con, operacao_id) is None:
+            raise ValueError("Operação não encontrada.")
+        alvo = _norm_placa(fmt)
+        for row in con.execute(
+            "SELECT placa FROM frota_operacao_placa WHERE operacao_id = ?",
+            (int(operacao_id),),
+        ):
+            if _norm_placa(str(row["placa"])) == alvo:
+                con.execute(
+                    "DELETE FROM frota_operacao_placa WHERE operacao_id = ? AND placa = ?",
+                    (int(operacao_id), row["placa"]),
+                )
+        return {"ok": True, "operacao_id": int(operacao_id), "placa": fmt}
+
+    return _com_banco(gravar)
+
+
+def catalogo_veiculos(qs: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Todos os veículos da conta, para escolher qual fixar na operação."""
+    busca = _param(qs, "busca")
+    termo = busca.lower()
+    norm = _norm_placa(busca)
+    itens: list[dict[str, Any]] = []
+    for bruto in _ao_vivo_completo()["veiculos"]:
+        placa = str(bruto.get("placa") or "")
+        desc = str(bruto.get("descricao") or "")
+        if termo and termo not in placa.lower() and termo not in desc.lower() and not (norm and norm in _norm_placa(placa)):
+            continue
+        lat, lon = bruto.get("lat"), bruto.get("lon")
+        itens.append(
+            {
+                "placa": placa,
+                "descricao": desc,
+                "cidade": str(bruto.get("cidade") or ""),
+                "lat": lat,
+                "lon": lon,
+                "posicao": None if lat is None or lon is None else {"lat": lat, "lon": lon},
+            }
+        )
+    return {"ok": True, "qtd": len(itens), "veiculos": itens}
+
+
+def _operacao_efetiva(qs: dict[str, list[str]] | None) -> dict[str, Any] | None:
+    bruto = _param(qs, "operacao")
+    if bruto.lower() == "todas":
+        return None
+    if not bruto:
+        op = _com_banco(_ler_padrao)
+        if op is None:
+            raise ValueError("Nenhuma operação padrão.")
+        return op
+    try:
+        oid = int(bruto)
+    except ValueError as exc:
+        raise ValueError("Operação inválida.") from exc
+    op = _com_banco(lambda con: _op_de(con, oid))
+    if op is None:
+        raise ValueError("Operação não encontrada.")
+    return op
+
+
+def _recusar_fora(placa: str, op: dict[str, Any]) -> None:
+    alvo = _norm_placa(placa)
+    if not alvo or alvo not in {_norm_placa(item) for item in _placas_operacao(op)}:
+        raise ValueError("Veículo fora desta operação.")
+
+
+def _placas_operacao(op: dict[str, Any]) -> set[str]:
+    placas = _com_banco(lambda con: _fixadas_fmt(con, int(op["id"])))
+    vivo = _ao_vivo_completo()
+    return {str(item["placa"]) for item in _veiculos_da_operacao(vivo["veiculos"], op, placas)}
+
+
+def _veiculos_da_operacao(
+    veiculos: list[dict[str, Any]],
+    op: dict[str, Any],
+    placas_fmt: list[str],
+) -> list[dict[str, Any]]:
+    fixados = {_norm_placa(placa) for placa in placas_fmt}
+    fmt_por_norm = {_norm_placa(placa): _fmt_placa(placa) for placa in placas_fmt if _norm_placa(placa)}
+    saida: list[dict[str, Any]] = []
+    vistos: set[str] = set()
+    for bruto in veiculos:
+        placa = str(bruto.get("placa") or "")
+        norm = _norm_placa(placa)
+        if not norm or norm in vistos:
+            continue
+        vistos.add(norm)
+        fixado = norm in fixados
+        dentro = _dentro_da_area(bruto.get("lat"), bruto.get("lon"), op)
+        if not fixado and not dentro:
+            continue
+        saida.append(_publico_vivo(bruto, {"fixado": fixado, "fora_da_area": bool(fixado and not dentro)}))
+    for norm, placa in fmt_por_norm.items():
+        if norm in vistos:
+            continue
+        saida.append(
+            _publico_vivo(
+                {
+                    "placa": placa,
+                    "descricao": placa,
+                    "lat": None,
+                    "lon": None,
+                    "velocidade": None,
+                    "ignicao": None,
+                    "data_gps": "",
+                    "minutos": None,
+                    "status": "sem_sinal",
+                },
+                {"fixado": True, "fora_da_area": True},
+            )
+        )
+    saida.sort(key=lambda row: row["placa"])
+    return saida
+
+
+def _publico_vivo(bruto: dict[str, Any], marca: dict[str, bool] | None = None) -> dict[str, Any]:
+    item = {
+        "placa": bruto.get("placa") or "",
+        "descricao": bruto.get("descricao") or bruto.get("placa") or "",
+        "lat": bruto.get("lat"),
+        "lon": bruto.get("lon"),
+        "velocidade": bruto.get("velocidade"),
+        "ignicao": bruto.get("ignicao"),
+        "data_gps": bruto.get("data_gps") or "",
+        "minutos": bruto.get("minutos"),
+        "status": bruto.get("status") or "sem_sinal",
+    }
+    if marca is not None:
+        item["fixado"] = bool(marca["fixado"])
+        item["fora_da_area"] = bool(marca["fora_da_area"])
+    return item
+
+
+def _dentro_da_area(lat: Any, lon: Any, op: dict[str, Any]) -> bool:
+    if lat is None or lon is None:
+        return False
+    if _caixa_aparecida(op):
+        return _em_aparecida(lat, lon)
+    try:
+        la, lo = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return False
+    return float(op["lat_min"]) <= la <= float(op["lat_max"]) and float(op["lon_min"]) <= lo <= float(op["lon_max"])
+
+
+def _caixa_aparecida(op: dict[str, Any]) -> bool:
+    try:
+        return (
+            abs(float(op["lat_min"]) - APARECIDA_LAT[0]) < 1e-9
+            and abs(float(op["lat_max"]) - APARECIDA_LAT[1]) < 1e-9
+            and abs(float(op["lon_min"]) - APARECIDA_LON[0]) < 1e-9
+            and abs(float(op["lon_max"]) - APARECIDA_LON[1]) < 1e-9
+        )
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
+def _dados_novos(corpo: Any) -> tuple[str, tuple[float, float, float, float]]:
+    if not isinstance(corpo, dict):
+        raise ValueError("Dados inválidos.")
+    nome = str(corpo.get("nome") or "").strip()
+    if not nome:
+        raise ValueError("Informe o nome da operação.")
+    cidade = str(corpo.get("cidade") or "").strip()
+    if cidade:
+        return nome, _limites_da_cidade(cidade)
+    return nome, _limites_do_corpo(corpo)
+
+
+def _tem_limites(corpo: dict[str, Any]) -> bool:
+    if isinstance(corpo.get("limites"), dict):
+        return True
+    return any(chave in corpo for chave in ("lat_min", "lat_max", "lon_min", "lon_max"))
+
+
+def _limites_do_corpo(corpo: dict[str, Any]) -> tuple[float, float, float, float]:
+    fonte = corpo.get("limites") if isinstance(corpo.get("limites"), dict) else corpo
+    if not isinstance(fonte, dict):
+        raise ValueError("Informe a cidade ou lat_min, lat_max, lon_min e lon_max.")
+    faltando = [
+        nome
+        for nome in ("lat_min", "lat_max", "lon_min", "lon_max")
+        if nome not in fonte or fonte.get(nome) in ("", None)
+    ]
+    if faltando:
+        raise ValueError("Informe a cidade ou lat_min, lat_max, lon_min e lon_max.")
+    valores: list[float] = []
+    for nome in ("lat_min", "lat_max", "lon_min", "lon_max"):
+        try:
+            valores.append(float(str(fonte[nome]).replace(",", ".")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Limite {nome} inválido.") from exc
+    limites = (valores[0], valores[1], valores[2], valores[3])
+    _validar_limites(*limites)
+    return limites
+
+
+def _validar_limites(lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> None:
+    if not (-34 <= lat_min <= 6 and -34 <= lat_max <= 6):
+        raise ValueError("Latitude fora do Brasil: use valores entre -34 e 6.")
+    if not (-74 <= lon_min <= -34 and -74 <= lon_max <= -34):
+        raise ValueError("Longitude fora do Brasil: use valores entre -74 e -34.")
+    if not (lat_min < lat_max and lon_min < lon_max):
+        raise ValueError("Limites inválidos: o mínimo precisa ser menor que o máximo.")
+
+
+def _limites_da_cidade(cidade: str) -> tuple[float, float, float, float]:
+    with _GEO:
+        _esperar_nominatim()
+        query = urlencode({"q": cidade, "format": "json", "countrycodes": "br", "limit": "1"})
+        pedido = Request(
+            _NOMINATIM_BUSCA + "?" + query,
+            headers={
+                "User-Agent": "SEGTRACK-frota",
+                "Accept": "application/json",
+                "Accept-Language": "pt-BR",
+            },
+        )
+        try:
+            with urlopen(pedido, timeout=12) as resp:
+                corpo = json.loads(resp.read().decode("utf-8", "replace"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            raise ValueError("Não foi possível obter os limites da cidade.") from exc
+    if not isinstance(corpo, list) or not corpo or not isinstance(corpo[0], dict):
+        raise ValueError("Cidade não encontrada.")
+    box = corpo[0].get("boundingbox")
+    if not isinstance(box, (list, tuple)) or len(box) < 4:
+        raise ValueError("Cidade sem limites no mapa.")
+    try:
+        limites = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Cidade sem limites no mapa.") from exc
+    _validar_limites(*limites)
+    return limites
+
+
+def _flag(valor: Any, campo: str) -> bool:
+    if isinstance(valor, bool):
+        return valor
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return valor != 0
+    texto = str(valor or "").strip().lower()
+    if texto in {"1", "true", "sim", "yes", "on"}:
+        return True
+    if texto in {"0", "false", "nao", "não", "no", "off"}:
+        return False
+    raise ValueError(f"Campo {campo} inválido.")
+
+
+def _semear_operacao(con: sqlite3.Connection) -> None:
+    qtd = int(con.execute("SELECT COUNT(*) AS n FROM frota_operacao").fetchone()["n"])
+    if qtd:
+        return
+    con.execute(
+        """
+        INSERT INTO frota_operacao (
+            nome, lat_min, lat_max, lon_min, lon_max, ativa, padrao, criado_em
+        ) VALUES (?, ?, ?, ?, ?, 1, 1, ?)
+        """,
+        (
+            "Aparecida de Goiânia",
+            APARECIDA_LAT[0],
+            APARECIDA_LAT[1],
+            APARECIDA_LON[0],
+            APARECIDA_LON[1],
+            _iso(_agora_brt()),
+        ),
+    )
+
+
+def _listar_rows(con: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = con.execute("SELECT * FROM frota_operacao ORDER BY nome COLLATE NOCASE, id").fetchall()
+    return [_op_dict(row, _fixadas_fmt(con, int(row["id"]))) for row in rows]
+
+
+def _ler_padrao(con: sqlite3.Connection) -> dict[str, Any] | None:
+    row = con.execute("SELECT * FROM frota_operacao WHERE padrao = 1 ORDER BY id LIMIT 1").fetchone()
+    if row is None:
+        return None
+    return _op_dict(row, _fixadas_fmt(con, int(row["id"])))
+
+
+def _op_de(con: sqlite3.Connection, operacao_id: int) -> dict[str, Any] | None:
+    row = _row_op(con, operacao_id)
+    if row is None:
+        return None
+    return _op_dict(row, _fixadas_fmt(con, int(row["id"])))
+
+
+def _row_op(con: sqlite3.Connection, operacao_id: int) -> sqlite3.Row | None:
+    try:
+        oid = int(operacao_id)
+    except (TypeError, ValueError):
+        return None
+    return con.execute("SELECT * FROM frota_operacao WHERE id = ?", (oid,)).fetchone()
+
+
+def _fixadas_fmt(con: sqlite3.Connection, operacao_id: int) -> list[str]:
+    rows = con.execute(
+        "SELECT placa FROM frota_operacao_placa WHERE operacao_id = ? ORDER BY placa",
+        (int(operacao_id),),
+    ).fetchall()
+    return [str(row["placa"]) for row in rows]
+
+
+def _op_dict(row: sqlite3.Row, placas: list[str]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "nome": str(row["nome"]),
+        "lat_min": float(row["lat_min"]),
+        "lat_max": float(row["lat_max"]),
+        "lon_min": float(row["lon_min"]),
+        "lon_max": float(row["lon_max"]),
+        "ativa": bool(row["ativa"]),
+        "padrao": bool(row["padrao"]),
+        "criado_em": str(row["criado_em"] or ""),
+        "placas": list(placas),
+    }
+
+
 @contextmanager
 def _conexao() -> Iterator[sqlite3.Connection]:
     from .live_db import caminho_banco
@@ -915,6 +1447,7 @@ def _conexao() -> Iterator[sqlite3.Connection]:
     try:
         con.execute("PRAGMA busy_timeout=5000")
         con.executescript(_SCHEMA)
+        _semear_operacao(con)
         yield con
         con.commit()
     except Exception:

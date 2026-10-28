@@ -1621,6 +1621,7 @@ class Handler(BaseHTTPRequestHandler):
         from .frota import (
             ao_vivo,
             catalogo_veiculos,
+            consultar_enderecos,
             consultar_eventos,
             consultar_paradas,
             consultar_telemetria,
@@ -1664,6 +1665,9 @@ class Handler(BaseHTTPRequestHandler):
                 job = (qs.get("job_id") or [""])[0]
                 conteudo, nome = baixar_paradas_pdf(job)
                 self._bytes(200, conteudo, "application/pdf", download=nome)
+                return
+            if path == "/api/frota/enderecos":
+                self._json(200, consultar_enderecos(qs), self._no_store())
                 return
             if path == "/api/frota/telemetria":
                 self._json(200, consultar_telemetria(qs), self._no_store())

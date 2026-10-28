@@ -83,6 +83,9 @@ def _preparar(monkeypatch, frota):
     monkeypatch.setattr(frota, "historico", historico)
     monkeypatch.setattr(frota, "endereco", lambda lat, lon: "Rua das Flores, 100")
     monkeypatch.setattr(frota, "_classificar_ponto", classificar)
+    frota._com_banco(
+        lambda con: frota._geo_gravar(con, "-16.9000", "-49.2500", "Rua das Flores, 100")
+    )
 
 
 def _qs(**itens):

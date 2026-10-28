@@ -184,7 +184,7 @@ def _fulltrack_falso(monkeypatch):
             {"ras_vei_placa": "DEF2E34", "ras_vei_id": "10", "ras_vei_veiculo": "TESTE 2"},
         ]
 
-    def eventos(settings, vehicle_id, inicio, fim, token=None):
+    def eventos(settings, vehicle_id, inicio, fim, token=None, **_kwargs):
         chamadas.append((inicio, fim))
         meio = inicio + (fim - inicio) / 2
         utc = meio + timedelta(hours=3)
@@ -243,6 +243,8 @@ def test_historico_divide_janela_acima_de_24h(ambiente, monkeypatch):
 
 
 def test_geocode_falha_nao_quebra_e_nao_repete_o_mesmo_ponto(ambiente, monkeypatch):
+    from inlog_agent import frota
+
     pedidos: list[str] = []
 
     class Resposta:
@@ -262,9 +264,19 @@ def test_geocode_falha_nao_quebra_e_nao_repete_o_mesmo_ponto(ambiente, monkeypat
         return Resposta()
 
     monkeypatch.setattr("inlog_agent.frota.urlopen", urlopen)
+    frota._GEO_ULTIMO = 0.0
+    frota._FILA.clear()
+    frota._FILA_SET.clear()
+    assert endereco(-16.82111, -49.25111) == ""
+    assert endereco(-16.82114, -49.25114) == ""
+    assert pedidos == []
+    assert len(frota._FILA) == 1
+    assert frota._processar_um_geo() is True
     assert endereco(-16.82111, -49.25111) == "Rua das Flores, Aparecida de Goiania"
     assert endereco(-16.82114, -49.25114) == "Rua das Flores, Aparecida de Goiania"
     assert pedidos == ["SEGTRACK-frota"]
+    assert endereco(-16.7, -49.1) == ""
+    assert frota._processar_um_geo() is True
     assert endereco(-16.7, -49.1) == ""
     assert endereco(None, None) == ""
 
@@ -330,6 +342,7 @@ def test_operador_recebe_403_na_frota(ambiente, monkeypatch):
         "/api/frota/ao-vivo",
         "/api/frota/paradas?data=2026-10-21&turno=diurno",
         "/api/frota/telemetria?placa=ABC1D23&data=2026-10-21&turno=diurno",
+        "/api/frota/enderecos?pontos=-16.82,-49.25",
         "/api/frota/trajeto?placa=ABC1D23&data=2026-10-21&turno=diurno",
         "/api/frota/paradas.csv?data=2026-10-21&turno=diurno",
     ]

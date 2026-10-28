@@ -3685,6 +3685,36 @@
       return `<a href="https://www.google.com/maps?q=${q}" target="_blank" rel="noopener">Abrir no Google Maps</a>`;
     }
 
+    function chaveEndereco(lat, lon) {
+      return Number(lat).toFixed(4) + "," + Number(lon).toFixed(4);
+    }
+
+    async function completarEnderecos(lista, aoMudar) {
+      let pendentes = (lista || []).filter((p) => !p.endereco && coordOk(p.lat, p.lon)).slice(0, 200);
+      for (let tentativa = 0; tentativa < 6 && pendentes.length; tentativa++) {
+        const pontos = pendentes.map((p) => p.lat + "," + p.lon).join(";");
+        try {
+          const corpo = await apiFrota(urlFrota("/api/frota/enderecos?pontos=" + encodeURIComponent(pontos)));
+          const achados = {};
+          (corpo.enderecos || []).forEach((item) => {
+            if (item && item.endereco) achados[chaveEndereco(item.lat, item.lon)] = item.endereco;
+          });
+          let mudou = false;
+          pendentes.forEach((p) => {
+            const texto = achados[chaveEndereco(p.lat, p.lon)];
+            if (!texto) return;
+            p.endereco = texto;
+            mudou = true;
+          });
+          if (mudou && aoMudar) aoMudar();
+        } catch (e) {
+          return;
+        }
+        pendentes = pendentes.filter((p) => !p.endereco);
+        if (pendentes.length) await new Promise((resolver) => setTimeout(resolver, 1500));
+      }
+    }
+
     function htmlLinhaParada(p) {
       const rotaCls = p.dentro_da_rota === false ? "aud-alerta" : (p.dentro_da_rota === true ? "aud-ok" : "");
       const lacunaCls = p.com_lacuna ? "aud-alerta" : "";
@@ -3823,6 +3853,9 @@
         frotaParadasConsultou = true;
         frotaParAvisos = resumirAvisos(info.avisos);
         pintarParadas(frotaParAvisos);
+        completarEnderecos(frotaParadasCache, () => {
+          if (seq === frotaParSeq && aba === "frota") pintarParadas(frotaParAvisos);
+        });
       } catch (e) {
         if (e && e.name === "AbortError") return;
         if (seq !== frotaParSeq || aba !== "frota") return;
@@ -4022,6 +4055,10 @@
         ]);
         if (seq !== frotaTelSeq || aba !== "frota") return;
         pintarTelemetria(tel, par);
+        const paradasTel = (par && par.paradas) || [];
+        completarEnderecos(paradasTel, () => {
+          if (seq === frotaTelSeq && aba === "frota") pintarParadasTel(paradasTel);
+        });
       } catch (e) {
         if (e && e.name === "AbortError") return;
         if (seq !== frotaTelSeq || aba !== "frota") return;

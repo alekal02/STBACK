@@ -8,14 +8,17 @@ Sem ?operacao=, a consulta usa a operação padrão. operacao=todas devolve a co
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import threading
 import time
 import unicodedata
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +37,7 @@ from .config import ROOT, load_settings
 from .fulltrack_api import (
     APARECIDA_LAT,
     APARECIDA_LON,
+    TIMEOUT_OPCIONAL_S,
     FulltrackSemDados,
     _em_aparecida,
     _eventos_atuais,
@@ -44,6 +48,7 @@ from .fulltrack_api import (
     historico_veiculo,
     listar_veiculos,
     login,
+    teto_timeout,
 )
 from .gps import haversine_m, utc_para_brt_texto
 from .live_turno import classificar_instante, fim_operacional, inicio_operacional
@@ -121,9 +126,21 @@ _ESTADOS = {
 _IO = threading.Lock()
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[str, Any] = {"chave": "", "expira": 0.0, "corpo": None}
+_TEL_LOCK = threading.Lock()
+_TEL: dict[str, tuple[float, dict[str, Any]]] = {}
+_TEL_ABERTO_S = 30.0
+_TEL_FECHADO_S = 60.0
+_TEL_MAX = 32
 _GEO = threading.Lock()
 _GEO_ULTIMO = 0.0
 _GEO_AVISO = False
+_FILA_MAX = 400
+_FILA_LOCK = threading.Lock()
+_FILA: deque[tuple[str, str]] = deque()
+_FILA_SET: set[tuple[str, str]] = set()
+_FILA_AVISO = threading.Event()
+_FILA_THREAD: threading.Thread | None = None
+LIMITE_ESPERA_GEO_S = 12.0
 _STATS_LOCK = threading.Lock()
 _PULSO_STATS = {"sem_coord": 0}
 
@@ -270,6 +287,7 @@ def historico(
     token: str | None = None,
     veiculos: dict[str, dict[str, Any]] | None = None,
     incluir_direcao: bool = False,
+    timeout: int | None = None,
 ) -> list[dict[str, Any]]:
     """Pontos já guardados não voltam para a API. Janela acima de 24 h vira blocos.
 
@@ -278,11 +296,11 @@ def historico(
     if fim <= inicio:
         raise ValueError("Janela inválida: o fim precisa ser depois do início.")
     placa_fmt = _fmt_placa(placa)
-    _preencher(placa_fmt, inicio, fim, settings, token, veiculos)
+    _preencher(placa_fmt, inicio, fim, settings, token, veiculos, timeout=timeout)
     pontos = _com_banco(lambda con: _ler(con, placa_fmt, inicio, fim))
     if incluir_direcao and pontos and any(item.get("direcao") is None for item in pontos):
         _com_banco(lambda con: _esquecer(con, placa_fmt, inicio, fim))
-        _preencher(placa_fmt, inicio, fim, settings, token, veiculos)
+        _preencher(placa_fmt, inicio, fim, settings, token, veiculos, timeout=timeout)
         pontos = _com_banco(lambda con: _ler(con, placa_fmt, inicio, fim))
     return pontos
 
@@ -348,31 +366,35 @@ def telemetria(
     token = login(settings)
     mapa = _mapa_veiculos(settings, token)
     placa_fmt = _fmt_placa(placa)
-    pontos = historico(
-        placa,
-        inicio,
-        fim,
-        settings=settings,
-        token=token,
-        veiculos=mapa,
-        incluir_direcao=True,
-    )
-    resumo = resumir_pontos(pontos)
     item = mapa.get(_norm_placa(placa_fmt)) or {}
+    vehicle_id = str(item.get("ras_vei_id") or "")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_pontos = pool.submit(
+            historico,
+            placa,
+            inicio,
+            fim,
+            settings=settings,
+            token=token,
+            veiculos=mapa,
+            incluir_direcao=True,
+            timeout=TIMEOUT_OPCIONAL_S,
+        )
+        fut_alertas = pool.submit(_alertas_do_turno, settings, token, inicio, fim, [])
+        fut_ocioso = pool.submit(_ocioso_api, settings, token, vehicle_id, dia)
+        pontos = fut_pontos.result()
+        alertas, falha_alertas = fut_alertas.result()
+        ocioso, falha_consolidado = fut_ocioso.result()
+    resumo = resumir_pontos(pontos)
     conducao = _conducao_de(
-        settings,
-        token,
         placa_fmt,
-        str(item.get("ras_vei_id") or ""),
         pontos,
         item.get("ras_vei_velocidade_limite"),
-        inicio,
-        fim,
-        dia,
+        alertas,
+        ocioso,
+        falha_alertas or falha_consolidado,
     )
-    if geocodificar:
-        for evento in conducao["eventos"]:
-            evento["endereco"] = endereco(evento.get("lat"), evento.get("lon"))
+    _aplicar_enderecos(conducao["eventos"], enfileirar=geocodificar)
     resumo.update(conducao)
     resumo["ok"] = True
     resumo["placa"] = placa_fmt
@@ -412,22 +434,12 @@ def resumir_pontos(pontos: list[dict[str, Any]] | None) -> dict[str, Any]:
 
 
 def endereco(lat: Any, lon: Any) -> str:
-    """Geocodificação reversa. Falha de rede devolve vazio e não repete o mesmo ponto."""
-    try:
-        la = f"{round(float(lat), 4):.4f}"
-        lo = f"{round(float(lon), 4):.4f}"
-        if abs(float(la)) < 0.5 or abs(float(lo)) < 0.5:
-            return ""
-    except (TypeError, ValueError):
+    """Só o que já está em frota_geocache. O que falta entra na fila e devolve vazio."""
+    texto = _endereco_cache(lat, lon)
+    if texto is None:
+        _enfileirar_pontos([(lat, lon)])
         return ""
-    guardado = _com_banco(lambda con: _geo_ler(con, la, lo))
-    if guardado is not _AUSENTE:
-        return str(guardado)
-    try:
-        return _nominatim(la, lo)
-    except Exception:
-        _avisar_geo()
-        return ""
+    return texto
 
 
 def consultar_paradas(qs: dict[str, list[str]]) -> dict[str, Any]:
@@ -446,8 +458,7 @@ def consultar_paradas(qs: dict[str, list[str]]) -> dict[str, Any]:
     paradas: list[dict[str, Any]] = []
     for pontos in blocos:
         paradas.extend(detectar_paradas(pontos, minimo, maximo, dia=dia, turno=turno))
-    for item in paradas:
-        item["endereco"] = endereco(item.get("lat"), item.get("lon"))
+    _aplicar_enderecos(paradas, enfileirar=True)
     return {
         "ok": True,
         "placa": placa_fmt,
@@ -501,12 +512,54 @@ def paradas_csv(qs: dict[str, list[str]]) -> tuple[bytes, str]:
 
 
 def consultar_telemetria(qs: dict[str, list[str]]) -> dict[str, Any]:
-    op = _operacao_efetiva(qs)
-    inicio, fim, dia, _turno, _minimo, _maximo, placa = _filtros(qs, exigir_placa=True)
-    if op is not None:
-        _recusar_fora(placa, op)
-    geocodificar = _param(qs, "sem_geo_eventos").lower() not in {"1", "true", "sim", "yes", "on"}
-    return telemetria(placa, inicio, fim, dia=dia, geocodificar=geocodificar)
+    with teto_timeout(TIMEOUT_OPCIONAL_S):
+        op = _operacao_efetiva(qs)
+        inicio, fim, dia, turno, _minimo, _maximo, placa = _filtros(qs, exigir_placa=True)
+        if op is not None:
+            _recusar_fora(placa, op)
+        geocodificar = _param(qs, "sem_geo_eventos").lower() not in {"1", "true", "sim", "yes", "on"}
+        chave = _tel_chave(placa, dia, turno)
+        guardado = _tel_ler(chave)
+        if guardado is not None:
+            if geocodificar:
+                _enfileirar_pontos((item.get("lat"), item.get("lon")) for item in guardado.get("eventos") or [])
+            return guardado
+        corpo = telemetria(placa, inicio, fim, dia=dia, geocodificar=geocodificar)
+        _tel_gravar(chave, corpo, _tel_ttl(fim))
+        return corpo
+
+
+def consultar_enderecos(qs: dict[str, list[str]]) -> dict[str, Any]:
+    """Devolve o que já está no cache e enfileira o resto. No máximo 200 pontos."""
+    bruto = _param(qs, "pontos")
+    if not bruto:
+        raise ValueError("Informe os pontos.")
+    partes = [parte.strip() for parte in bruto.split(";") if parte.strip()]
+    if len(partes) > 200:
+        raise ValueError("No máximo 200 pontos.")
+    chaves: list[tuple[str, str]] = []
+    for parte in partes:
+        pedacos = [item.strip() for item in parte.split(",")]
+        if len(pedacos) != 2:
+            raise ValueError("Ponto inválido.")
+        chave = _chave_ponto(pedacos[0], pedacos[1])
+        if chave is None:
+            raise ValueError("Ponto inválido.")
+        chaves.append(chave)
+    lidos = _geo_mapa(chaves)
+    faltam = [chave for chave in chaves if lidos.get(chave) is _AUSENTE]
+    _enfileirar_chaves(faltam)
+    enderecos = []
+    for la, lo in chaves:
+        guardado = lidos.get((la, lo), _AUSENTE)
+        enderecos.append(
+            {
+                "lat": float(la),
+                "lon": float(lo),
+                "endereco": None if guardado is _AUSENTE else (str(guardado) or None),
+            }
+        )
+    return {"ok": True, "enderecos": enderecos}
 
 
 def consultar_eventos(qs: dict[str, list[str]]) -> dict[str, Any]:
@@ -531,7 +584,7 @@ def consultar_eventos(qs: dict[str, list[str]]) -> dict[str, Any]:
     else:
         placas = sorted(_placas_operacao(op))
         nome = str(op.get("nome") or "")
-    alertas = _alertas_do_turno(settings, token, inicio, fim, avisos)
+    alertas, falha_alertas = _alertas_do_turno(settings, token, inicio, fim, avisos)
     pontos = _pontos_das_placas(placas, inicio, fim, settings, token, mapa, avisos)
     linhas: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(placas)))) as pool:
@@ -566,6 +619,7 @@ def consultar_eventos(qs: dict[str, list[str]]) -> dict[str, Any]:
         "fim": _iso(fim),
         "caminhoes": linhas,
         "avisos": avisos,
+        "consolidado_indisponivel": bool(falha_alertas or any(item.get("consolidado_indisponivel") for item in linhas)),
     }
 
 
@@ -805,13 +859,28 @@ def _exigir_veiculo(placa_fmt: str, mapa: dict[str, dict[str, Any]]) -> tuple[st
     return placa_fmt, vid
 
 
-def _baixar(settings: Any, vid: str, placa: str, bloco: tuple[datetime, datetime], token: str) -> list[dict[str, Any]]:
+def _baixar(
+    settings: Any,
+    vid: str,
+    placa: str,
+    bloco: tuple[datetime, datetime],
+    token: str,
+    *,
+    timeout: int | None = None,
+) -> list[dict[str, Any]]:
     inicio, fim = bloco
     if fim <= inicio:
         return []
     print(f"Frota: historico {placa} {_iso(inicio)} -> {_iso(fim)}", flush=True)
     try:
-        eventos = historico_veiculo(settings, vid, inicio, fim, token=token)
+        eventos = historico_veiculo(
+            settings,
+            vid,
+            inicio,
+            fim,
+            token=token,
+            timeout=TIMEOUT_OPCIONAL_S if timeout is None else timeout,
+        )
     except FulltrackSemDados:
         return []
     return eventos or []
@@ -1059,6 +1128,182 @@ def _avisar_geo() -> None:
     print("Frota: geocodificação indisponível; o endereço fica vazio.", flush=True)
 
 
+def _chave_ponto(lat: Any, lon: Any) -> tuple[str, str] | None:
+    try:
+        la = f"{round(float(lat), 4):.4f}"
+        lo = f"{round(float(lon), 4):.4f}"
+    except (TypeError, ValueError):
+        return None
+    if abs(float(la)) < 0.5 or abs(float(lo)) < 0.5:
+        return None
+    return la, lo
+
+
+def _geo_mapa(chaves: list[tuple[str, str]]) -> dict[tuple[str, str], Any]:
+    unicas = list(dict.fromkeys(chaves))
+    if not unicas:
+        return {}
+
+    def ler(con: sqlite3.Connection) -> dict[tuple[str, str], Any]:
+        return {chave: _geo_ler(con, chave[0], chave[1]) for chave in unicas}
+
+    return _com_banco(ler)
+
+
+def _endereco_cache(lat: Any, lon: Any) -> str | None:
+    chave = _chave_ponto(lat, lon)
+    if chave is None:
+        return None
+    guardado = _geo_mapa([chave]).get(chave, _AUSENTE)
+    if guardado is _AUSENTE:
+        return None
+    return str(guardado) or None
+
+
+def _enfileirar_pontos(pontos: Any) -> None:
+    chaves = []
+    for item in pontos:
+        if isinstance(item, tuple) and len(item) == 2:
+            chave = _chave_ponto(item[0], item[1])
+        else:
+            continue
+        if chave is not None:
+            chaves.append(chave)
+    if not chaves:
+        return
+    presentes = _geo_mapa(chaves)
+    _enfileirar_chaves([chave for chave in chaves if presentes.get(chave) is _AUSENTE])
+
+
+def _enfileirar_chaves(chaves: list[tuple[str, str]]) -> None:
+    if not chaves:
+        return
+    with _FILA_LOCK:
+        for chave in chaves:
+            if chave in _FILA_SET or len(_FILA) >= _FILA_MAX:
+                continue
+            _FILA.append(chave)
+            _FILA_SET.add(chave)
+        pendente = bool(_FILA)
+    if pendente:
+        _acordar_fila()
+
+
+def _acordar_fila() -> None:
+    global _FILA_THREAD
+    _FILA_AVISO.set()
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    with _FILA_LOCK:
+        if _FILA_THREAD is not None and _FILA_THREAD.is_alive():
+            return
+        _FILA_THREAD = threading.Thread(target=_worker_geo, name="frota-geocode", daemon=True)
+        _FILA_THREAD.start()
+
+
+def _processar_um_geo() -> bool:
+    with _FILA_LOCK:
+        if not _FILA:
+            return False
+        chave = _FILA.popleft()
+    try:
+        guardado = _geo_mapa([chave]).get(chave, _AUSENTE)
+        if guardado is _AUSENTE:
+            _nominatim(chave[0], chave[1])
+    except Exception:
+        _avisar_geo()
+    finally:
+        with _FILA_LOCK:
+            _FILA_SET.discard(chave)
+    return True
+
+
+def _worker_geo() -> None:
+    while True:
+        if _processar_um_geo():
+            continue
+        _FILA_AVISO.wait(timeout=5)
+        _FILA_AVISO.clear()
+
+
+def _aplicar_enderecos(itens: list[dict[str, Any]], *, enfileirar: bool) -> None:
+    chaves = []
+    for item in itens:
+        if not isinstance(item, dict) or item.get("endereco"):
+            continue
+        chave = _chave_ponto(item.get("lat"), item.get("lon"))
+        if chave is not None:
+            chaves.append(chave)
+    lidos = _geo_mapa(chaves)
+    faltam: list[tuple[str, str]] = []
+    for item in itens:
+        if not isinstance(item, dict) or item.get("endereco"):
+            continue
+        chave = _chave_ponto(item.get("lat"), item.get("lon"))
+        if chave is None:
+            item["endereco"] = None
+            continue
+        guardado = lidos.get(chave, _AUSENTE)
+        if guardado is _AUSENTE:
+            item["endereco"] = None
+            faltam.append(chave)
+        else:
+            item["endereco"] = str(guardado) or None
+    if enfileirar:
+        _enfileirar_chaves(faltam)
+
+
+def esperar_enderecos(itens: list[dict[str, Any]], limite_s: float = LIMITE_ESPERA_GEO_S) -> None:
+    """O PDF espera a fila, até o limite. O que não chegar sai sem endereço."""
+    _aplicar_enderecos(itens, enfileirar=True)
+    prazo = time.monotonic() + max(0.0, float(limite_s))
+    while time.monotonic() < prazo and _faltam_endereco(itens):
+        time.sleep(0.2)
+        _aplicar_enderecos(itens, enfileirar=False)
+
+
+def _faltam_endereco(itens: list[dict[str, Any]]) -> bool:
+    for item in itens:
+        if item.get("endereco"):
+            continue
+        if _chave_ponto(item.get("lat"), item.get("lon")) is not None:
+            return True
+    return False
+
+
+def _tel_chave(placa: str, dia: date, turno: str | None) -> str:
+    from .live_db import caminho_banco
+
+    return f"{caminho_banco()}|{_norm_placa(placa)}|{dia.isoformat()}|{turno or ''}"
+
+
+def _tel_ttl(fim: datetime) -> float:
+    if _agora_brt() < fim:
+        return _TEL_ABERTO_S
+    return _TEL_FECHADO_S
+
+
+def _tel_ler(chave: str) -> dict[str, Any] | None:
+    agora = time.monotonic()
+    with _TEL_LOCK:
+        item = _TEL.get(chave)
+        if item is None or agora >= item[0]:
+            _TEL.pop(chave, None)
+            return None
+        return copy.deepcopy(item[1])
+
+
+def _tel_gravar(chave: str, corpo: dict[str, Any], ttl: float) -> None:
+    agora = time.monotonic()
+    with _TEL_LOCK:
+        vencidas = [nome for nome, item in _TEL.items() if agora >= item[0]]
+        for nome in vencidas:
+            _TEL.pop(nome, None)
+        while len(_TEL) >= _TEL_MAX:
+            _TEL.pop(next(iter(_TEL)))
+        _TEL[chave] = (agora + ttl, copy.deepcopy(corpo))
+
+
 def _preencher(
     placa_fmt: str,
     inicio: datetime,
@@ -1066,6 +1311,8 @@ def _preencher(
     settings: Any,
     token: str | None,
     veiculos: dict[str, dict[str, Any]] | None,
+    *,
+    timeout: int | None = None,
 ) -> None:
     faltam = _com_banco(lambda con: _faltantes(con, placa_fmt, inicio, fim))
     if not faltam:
@@ -1075,7 +1322,7 @@ def _preencher(
     mapa = veiculos if veiculos is not None else _mapa_veiculos(settings, token)
     _placa, vid = _exigir_veiculo(placa_fmt, mapa)
     for bloco in _achatar(faltam):
-        eventos = _baixar(settings, vid, placa_fmt, bloco, token)
+        eventos = _baixar(settings, vid, placa_fmt, bloco, token, timeout=timeout)
         pontos = [item for ev in eventos if (item := _ponto_evento(ev, placa_fmt))]
         _com_banco(lambda con, bloco=bloco, pontos=pontos: _salvar(con, placa_fmt, bloco, pontos))
 
@@ -1092,24 +1339,21 @@ def _esquecer(con: sqlite3.Connection, placa: str, inicio: datetime, fim: dateti
 
 
 def _conducao_de(
-    settings: Any,
-    token: str,
     placa: str,
-    vehicle_id: str,
     pontos: list[dict[str, Any]],
     limite: Any,
-    inicio: datetime,
-    fim: datetime,
-    dia: date | None,
+    alertas: list[dict[str, Any]],
+    ocioso: dict[str, float] | None,
+    indisponivel: bool,
 ) -> dict[str, Any]:
-    alertas = [
+    da_placa = [
         item
-        for item in _alertas_do_turno(settings, token, inicio, fim, [])
+        for item in alertas
         if _norm_placa(str(item.get("placa") or "")) == _norm_placa(placa)
     ]
-    ocioso = _ocioso_api(settings, token, vehicle_id, dia) if vehicle_id and dia is not None else None
-    corpo = analisar_conducao(pontos, limite, alertas, ocioso)
+    corpo = analisar_conducao(pontos, limite, da_placa, ocioso)
     corpo["alerta_ignicao"] = ALERTA_IGNICAO if corpo["ignicao_sempre_ligada"] else ""
+    corpo["consolidado_indisponivel"] = bool(indisponivel)
     return corpo
 
 
@@ -1119,12 +1363,12 @@ def _alertas_do_turno(
     inicio: datetime,
     fim: datetime,
     avisos: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     try:
-        brutos = alertas_periodo(settings, inicio, fim, token)
+        brutos = alertas_periodo(settings, inicio, fim, token, timeout=TIMEOUT_OPCIONAL_S)
     except Exception as exc:
         avisos.append(f"Alertas: {exc}")
-        return []
+        return [], True
     saida: list[dict[str, Any]] = []
     for bruto in brutos:
         evento = normalizar_alerta(bruto)
@@ -1134,23 +1378,28 @@ def _alertas_do_turno(
         if momento is None or momento < inicio or momento > fim:
             continue
         saida.append(evento)
-    return saida
+    return saida, False
 
 
-def _ocioso_api(settings: Any, token: str, vehicle_id: str, dia: date | None) -> dict[str, float] | None:
+def _ocioso_api(
+    settings: Any,
+    token: str,
+    vehicle_id: str,
+    dia: date | None,
+) -> tuple[dict[str, float] | None, bool]:
     if not vehicle_id or dia is None:
-        return None
+        return None, False
     try:
-        corpo = consolidado_veiculo(settings, vehicle_id, dia, token)
+        corpo = consolidado_veiculo(settings, vehicle_id, dia, token, timeout=TIMEOUT_OPCIONAL_S)
     except Exception:
-        return None
+        return None, True
     if not corpo:
-        return None
+        return None, False
     ocioso = _minutos_relogio(corpo.get("tempo_total_ocioso"))
     ligado = _minutos_relogio(corpo.get("tempo_total_ligado"))
     if ocioso is None or ligado is None:
-        return None
-    return {"ocioso_min": ocioso, "ligado_min": ligado}
+        return None, False
+    return {"ocioso_min": ocioso, "ligado_min": ligado}, False
 
 
 def _minutos_relogio(valor: Any) -> float | None:
@@ -1218,8 +1467,9 @@ def _linha_eventos(
         for item in alertas
         if _norm_placa(str(item.get("placa") or "")) == _norm_placa(placa)
     ]
-    ocioso = _ocioso_api(settings, token, str(veiculo.get("ras_vei_id") or ""), dia)
+    ocioso, indisponivel = _ocioso_api(settings, token, str(veiculo.get("ras_vei_id") or ""), dia)
     corpo = analisar_conducao(pontos, veiculo.get("ras_vei_velocidade_limite"), da_placa, ocioso)
+    _enfileirar_pontos((item.get("lat"), item.get("lon")) for item in corpo["eventos"])
     tempo = corpo["ocioso"].get("tempo_min")
     return {
         "placa": placa,
@@ -1231,6 +1481,7 @@ def _linha_eventos(
         "ocioso_origem": corpo["ocioso"].get("origem"),
         "ignicao_sempre_ligada": corpo["ignicao_sempre_ligada"],
         "limite_kmh": corpo["limite_kmh"],
+        "consolidado_indisponivel": indisponivel,
     }
 
 

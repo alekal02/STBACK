@@ -34,6 +34,7 @@ from .frota import (
     ao_vivo,
     consultar_paradas,
     consultar_telemetria,
+    esperar_enderecos,
 )
 from .live_turno import horarios_do_turno
 
@@ -139,6 +140,7 @@ def _montar(qs: dict[str, list[str]]) -> dict[str, Any]:
     placa = _fmt_placa(_param(qs, "placa")) if _param(qs, "placa") else ""
     placas = [placa] if placa else _lista_placas(qs, op)
     consulta = consultar_paradas(qs)
+    esperar_enderecos(list(consulta.get("paradas") or []))
     grupos: dict[str, list[dict[str, Any]]] = {item: [] for item in placas}
     for parada in consulta.get("paradas") or []:
         if so_fora and parada.get("dentro_da_rota") is not False:

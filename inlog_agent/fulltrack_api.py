@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -20,7 +22,34 @@ class FulltrackSemDados(RuntimeError):
     """HTTP 400 com 'No data were found!'. A consulta existiu e nao achou GPS."""
 
 
+TIMEOUT_OPCIONAL_S = 8
+_TETO = threading.local()
+
+
+@contextmanager
+def teto_timeout(segundos: int) -> Iterator[None]:
+    """Teto das chamadas Fulltrack nesta thread. Cada pedido usa o menor timeout."""
+    anterior = getattr(_TETO, "segundos", None)
+    _TETO.segundos = int(segundos)
+    try:
+        yield
+    finally:
+        if anterior is None:
+            if hasattr(_TETO, "segundos"):
+                delattr(_TETO, "segundos")
+        else:
+            _TETO.segundos = anterior
+
+
+def _timeout_efetivo(pedido: int) -> int:
+    teto = getattr(_TETO, "segundos", None)
+    if teto is None:
+        return int(pedido)
+    return min(int(pedido), int(teto))
+
+
 def _req(method: str, url: str, headers: dict[str, str], data: bytes | None = None, timeout: int = 90) -> Any:
+    timeout = _timeout_efetivo(timeout)
     request = Request(url, data=data, headers=headers, method=method)
     try:
         with urlopen(request, timeout=timeout) as resp:
@@ -64,7 +93,7 @@ def _em_aparecida(lat: Any, lon: Any) -> bool:
     return APARECIDA_LAT[0] <= la <= APARECIDA_LAT[1] and APARECIDA_LON[0] <= lo <= APARECIDA_LON[1]
 
 
-def login(settings: Settings) -> str:
+def login(settings: Settings, *, timeout: int = 30) -> str:
     if not settings.fulltrack_username or not settings.fulltrack_password:
         raise RuntimeError("Preencha FULLTRACK_USERNAME e FULLTRACK_PASSWORD no .env")
     corpo = _req(
@@ -80,7 +109,7 @@ def login(settings: Settings) -> str:
                 "secret_key": settings.fulltrack_secret_key,
             }
         ).encode(),
-        timeout=30,
+        timeout=timeout,
     )
     token = (corpo or {}).get("access_token")
     if not token:
@@ -92,15 +121,15 @@ def _headers(token: str) -> dict[str, str]:
     return {"Accept": "application/json", "Authorization": "Bearer " + token}
 
 
-def listar_veiculos(settings: Settings, token: str | None = None) -> list[dict[str, Any]]:
+def listar_veiculos(settings: Settings, token: str | None = None, *, timeout: int = 90) -> list[dict[str, Any]]:
     at = token or login(settings)
-    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + "/vehicles/all", _headers(at))
+    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + "/vehicles/all", _headers(at), timeout=timeout)
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     return [item for item in (data or []) if isinstance(item, dict)]
 
 
-def _eventos_atuais(settings: Settings, token: str) -> list[dict[str, Any]]:
-    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + "/events/all", _headers(token))
+def _eventos_atuais(settings: Settings, token: str, *, timeout: int = 90) -> list[dict[str, Any]]:
+    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + "/events/all", _headers(token), timeout=timeout)
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     return [item for item in (data or []) if isinstance(item, dict)]
 
@@ -111,13 +140,15 @@ def historico_veiculo(
     inicio: datetime,
     fim: datetime,
     token: str | None = None,
+    *,
+    timeout: int = 90,
 ) -> list[dict[str, Any]]:
     at = token or login(settings)
     begin, end = _unix(inicio), _unix(fim)
     if end <= begin:
         raise RuntimeError("Janela Fulltrack inválida: data/hora final menor que a inicial")
     path = f"/events/interval/id/{vehicle_id}/begin/{begin}/end/{end}"
-    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at))
+    corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=timeout)
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     return [item for item in (data or []) if isinstance(item, dict)]
 
@@ -127,14 +158,16 @@ def consolidado_veiculo(
     vehicle_id: str,
     dia: date,
     token: str | None = None,
+    *,
+    timeout: int = TIMEOUT_OPCIONAL_S,
 ) -> dict[str, Any] | None:
-    """Totais do dia civil. Sem série, devolve None."""
+    """Totais do dia civil. Sem série, devolve None. Falha de rede sobe para o chamador."""
     at = token or login(settings)
     iso = dia.isoformat()
     path = f"/consolidatedevents/vehicle/id/{vehicle_id}/initial/{iso}/final/{iso}"
     try:
-        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=25)
-    except (FulltrackSemDados, RuntimeError):
+        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=timeout)
+    except FulltrackSemDados:
         return None
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     if isinstance(data, list):
@@ -147,14 +180,16 @@ def alertas_periodo(
     inicio: datetime,
     fim: datetime,
     token: str | None = None,
+    *,
+    timeout: int = TIMEOUT_OPCIONAL_S,
 ) -> list[dict[str, Any]]:
-    """Alertas prontos da conta. Conta sem alerta devolve lista vazia."""
+    """Alertas prontos da conta. Conta sem alerta devolve lista vazia. Falha de rede sobe."""
     at = token or login(settings)
     begin, end = _unix(inicio), _unix(fim)
     path = f"/alerts/period/initial/{begin}/final/{end}"
     try:
-        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=25)
-    except (FulltrackSemDados, RuntimeError):
+        corpo = _req("GET", settings.fulltrack_base_url.rstrip("/") + path, _headers(at), timeout=timeout)
+    except FulltrackSemDados:
         return []
     data = corpo.get("data") if isinstance(corpo, dict) else corpo
     return [item for item in (data or []) if isinstance(item, dict)]

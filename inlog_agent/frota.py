@@ -9,6 +9,7 @@ Sem ?operacao=, a consulta usa a operação padrão. operacao=todas devolve a co
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import sqlite3
@@ -18,12 +19,13 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .config import load_settings
+from .config import ROOT, load_settings
 from .fulltrack_api import (
     APARECIDA_LAT,
     APARECIDA_LON,
@@ -158,7 +160,13 @@ CREATE TABLE IF NOT EXISTS frota_operacao_placa (
     placa TEXT NOT NULL,
     PRIMARY KEY (operacao_id, placa)
 );
+CREATE TABLE IF NOT EXISTS frota_import (
+    versao TEXT PRIMARY KEY,
+    aplicado_em TEXT NOT NULL
+);
 """
+
+ARQUIVO_OPERACOES_APROVADO = ROOT / "data" / "frota_operacoes_aprovado.json"
 
 
 def janela_do_turno(dia: date, turno: str) -> tuple[datetime, datetime]:
@@ -1795,6 +1803,212 @@ def aplicar_mapeamento(resultado: dict[str, Any] | None = None, *, ajustes: bool
         }
 
     return _com_banco(gravar)
+
+
+def _caminho_snapshot(arquivo: str | Path | None = None) -> Path:
+    if arquivo:
+        return Path(arquivo)
+    return ARQUIVO_OPERACOES_APROVADO
+
+
+def _versao_snapshot(operacoes: list[dict[str, Any]], placas: dict[str, str]) -> str:
+    """SHA-256 do JSON canônico de operações e placas, sem o campo versao."""
+    ops: list[dict[str, Any]] = []
+    for op in operacoes:
+        ops.append(
+            {
+                "ativa": bool(op["ativa"]),
+                "lat_max": float(op["lat_max"]),
+                "lat_min": float(op["lat_min"]),
+                "lon_max": float(op["lon_max"]),
+                "lon_min": float(op["lon_min"]),
+                "nome": str(op["nome"]),
+                "padrao": bool(op["padrao"]),
+            }
+        )
+    ops.sort(key=lambda item: (_sem_acento(item["nome"]), item["nome"]))
+    mapa = {str(placa): str(placas[placa]) for placa in sorted(placas, key=str)}
+    corpo = json.dumps(
+        {"operacoes": ops, "placas": mapa},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(corpo.encode("utf-8")).hexdigest()
+
+
+def _ler_snapshot(caminho: Path) -> tuple[list[dict[str, Any]], dict[str, str], str]:
+    try:
+        bruto = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Arquivo inválido: {exc}") from exc
+    if not isinstance(bruto, dict):
+        raise ValueError("Arquivo inválido.")
+    ops_brutas = bruto.get("operacoes")
+    placas_brutas = bruto.get("placas")
+    if not isinstance(ops_brutas, list) or not isinstance(placas_brutas, dict):
+        raise ValueError("Arquivo inválido.")
+    operacoes: list[dict[str, Any]] = []
+    chaves: set[str] = set()
+    for item in ops_brutas:
+        if not isinstance(item, dict):
+            raise ValueError("Operação inválida no snapshot.")
+        nome = item.get("nome")
+        if not isinstance(nome, str) or not nome.strip():
+            raise ValueError("Operação sem nome no snapshot.")
+        chave = _sem_acento(nome)
+        if chave in chaves:
+            raise ValueError(f"Operação repetida: {nome}")
+        chaves.add(chave)
+        limites: list[float] = []
+        for campo in ("lat_min", "lat_max", "lon_min", "lon_max"):
+            if campo not in item:
+                raise ValueError(f"Operação {nome} sem {campo}.")
+            try:
+                limites.append(float(item[campo]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Limite {campo} inválido.") from exc
+        _validar_limites(*limites)
+        for campo in ("ativa", "padrao"):
+            if not isinstance(item.get(campo), bool):
+                raise ValueError(f"Campo {campo} inválido.")
+        operacoes.append(
+            {
+                "nome": nome,
+                "lat_min": limites[0],
+                "lat_max": limites[1],
+                "lon_min": limites[2],
+                "lon_max": limites[3],
+                "ativa": item["ativa"],
+                "padrao": item["padrao"],
+            }
+        )
+    placas: dict[str, str] = {}
+    normas: dict[str, str] = {}
+    for placa, nome_op in placas_brutas.items():
+        if not isinstance(placa, str) or not isinstance(nome_op, str):
+            raise ValueError("Placa inválida no snapshot.")
+        norm = _norm_placa(placa)
+        if not norm:
+            raise ValueError("Placa inválida no snapshot.")
+        chave_op = _sem_acento(nome_op)
+        if chave_op not in chaves:
+            raise ValueError(f"Operação da placa {placa.strip() or norm} não está no snapshot.")
+        anterior = normas.get(norm)
+        if anterior is not None and anterior != chave_op:
+            raise ValueError(f"Placa repetida no snapshot: {placa}")
+        normas[norm] = chave_op
+        placas[placa] = nome_op
+    versao = str(bruto.get("versao") or "").strip().lower()
+    calculada = _versao_snapshot(operacoes, placas)
+    if versao != calculada:
+        raise ValueError("Versão do arquivo não confere com o conteúdo.")
+    return operacoes, placas, versao
+
+
+def _aplicar_snapshot(
+    con: sqlite3.Connection,
+    operacoes: list[dict[str, Any]],
+    placas: dict[str, str],
+) -> tuple[int, int]:
+    por_nome: dict[str, int] = {}
+    for row in con.execute("SELECT id, nome FROM frota_operacao ORDER BY id"):
+        por_nome.setdefault(_sem_acento(str(row["nome"])), int(row["id"]))
+    criadas = 0
+    for op in operacoes:
+        chave = _sem_acento(str(op["nome"]))
+        if chave in por_nome:
+            continue
+        cur = con.execute(
+            """
+            INSERT INTO frota_operacao (
+                nome, lat_min, lat_max, lon_min, lon_max, ativa, padrao, criado_em
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                str(op["nome"]),
+                float(op["lat_min"]),
+                float(op["lat_max"]),
+                float(op["lon_min"]),
+                float(op["lon_max"]),
+                1 if op["ativa"] else 0,
+                _iso(_agora_brt()),
+            ),
+        )
+        por_nome[chave] = int(cur.lastrowid)
+        criadas += 1
+    oid_ap = por_nome.get(_sem_acento("Aparecida de Goiânia"))
+    if oid_ap is not None:
+        con.execute("UPDATE frota_operacao SET padrao = 0 WHERE id != ?", (oid_ap,))
+        con.execute("UPDATE frota_operacao SET padrao = 1 WHERE id = ?", (oid_ap,))
+    vinculos: dict[str, set[int]] = {}
+    for row in con.execute("SELECT operacao_id, placa FROM frota_operacao_placa"):
+        norm = _norm_placa(str(row["placa"]))
+        if norm:
+            vinculos.setdefault(norm, set()).add(int(row["operacao_id"]))
+    fixadas = 0
+    for placa, nome_op in placas.items():
+        norm = _norm_placa(placa)
+        oid = por_nome.get(_sem_acento(nome_op))
+        if oid is None or not norm:
+            raise ValueError(f"Operação da placa {placa} não encontrada.")
+        atuais = vinculos.setdefault(norm, set())
+        if atuais:
+            continue
+        con.execute(
+            "INSERT OR IGNORE INTO frota_operacao_placa (operacao_id, placa) VALUES (?, ?)",
+            (int(oid), placa),
+        )
+        atuais.add(int(oid))
+        fixadas += 1
+    return criadas, fixadas
+
+
+def importar_operacoes_aprovadas(
+    arquivo: str | Path | None = None,
+    *,
+    exigir_arquivo: bool = False,
+) -> dict[str, Any]:
+    """Cria operações e placas que faltam. Não altera limites nem remove vínculos."""
+    caminho = _caminho_snapshot(arquivo)
+    if not caminho.is_file():
+        if exigir_arquivo or arquivo:
+            raise ValueError(f"Arquivo não encontrado: {caminho}")
+        return {"aplicado": False, "versao": "", "criadas": 0, "fixadas": 0}
+    operacoes, placas, versao = _ler_snapshot(caminho)
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        ja = con.execute("SELECT versao FROM frota_import WHERE versao = ?", (versao,)).fetchone()
+        if ja is not None:
+            return {"aplicado": False, "versao": versao, "criadas": 0, "fixadas": 0}
+        criadas, fixadas = _aplicar_snapshot(con, operacoes, placas)
+        con.execute(
+            "INSERT INTO frota_import (versao, aplicado_em) VALUES (?, ?)",
+            (versao, _iso(_agora_brt())),
+        )
+        return {"aplicado": True, "versao": versao, "criadas": criadas, "fixadas": fixadas}
+
+    return _com_banco(gravar)
+
+
+def linha_import(resultado: dict[str, Any]) -> str:
+    return (
+        f"Frota import: {resultado['criadas']} operações criadas, "
+        f"{resultado['fixadas']} placas fixadas (versão {resultado['versao']})"
+    )
+
+
+def importar_na_subida(arquivo: str | Path | None = None) -> None:
+    """Cria as tabelas da frota e aplica o snapshot. Erro não impede o servidor de subir."""
+    try:
+        _com_banco(lambda con: None)
+        resultado = importar_operacoes_aprovadas(arquivo)
+    except Exception as exc:
+        print(f"Frota import: {exc}", flush=True)
+        return
+    if not resultado.get("aplicado"):
+        return
+    print(linha_import(resultado), flush=True)
 
 
 def listar_operacoes() -> dict[str, Any]:

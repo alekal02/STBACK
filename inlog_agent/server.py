@@ -2474,6 +2474,9 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         usada = porta or settings.porta or _porta_do_ambiente(None)
     except Exception:
         usada = _porta_do_ambiente(porta)
+    from .frota import importar_na_subida
+
+    importar_na_subida()
     padrao_host = "0.0.0.0" if os.getenv("PORT") else "127.0.0.1"
     usado_host = (host or os.getenv("HOST") or padrao_host).strip() or padrao_host
     try:

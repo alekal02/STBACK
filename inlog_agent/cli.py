@@ -166,6 +166,23 @@ def cmd_frota_mapear(aplicar: bool) -> None:
         print(f"  preservada {placa}", flush=True)
 
 
+def cmd_frota_importar(arquivo: str | None) -> None:
+    from .frota import importar_operacoes_aprovadas, linha_import
+
+    try:
+        load_settings()
+    except Exception:
+        pass
+    try:
+        resultado = importar_operacoes_aprovadas(arquivo, exigir_arquivo=True)
+    except Exception as exc:
+        print(f"Frota import: {exc}", flush=True)
+        raise SystemExit(1) from exc
+    if not resultado.get("aplicado"):
+        return
+    print(linha_import(resultado), flush=True)
+
+
 def _imprimir_mapeamento(resultado: dict, caminho: str) -> None:
     verificacao = resultado.get("verificacao") or {}
     print(f"Veículos: {verificacao.get('total_veiculos', 0)}", flush=True)
@@ -300,6 +317,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Cria as operações que faltam e fixa as placas de situação associado.",
     )
+    imp = sub.add_parser(
+        "frota-importar",
+        help="Importa o snapshot aprovado de operações e placas fixadas",
+    )
+    imp.add_argument(
+        "--arquivo",
+        default=None,
+        help="JSON do snapshot (padrão: data/frota_operacoes_aprovado.json)",
+    )
     return parser
 
 
@@ -329,6 +355,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.comando == "frota-mapear":
         cmd_frota_mapear(bool(getattr(args, "aplicar", False)))
+        return
+    if args.comando == "frota-importar":
+        cmd_frota_importar(getattr(args, "arquivo", None))
         return
     if args.comando == "pdf":
         from .pdf import gerar_pdf_dia

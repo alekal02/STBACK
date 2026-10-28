@@ -1625,6 +1625,7 @@ class Handler(BaseHTTPRequestHandler):
             consultar_telemetria,
             consultar_trajeto,
             listar_operacoes,
+            mapear_operacoes,
             paradas_csv,
         )
 
@@ -1645,11 +1646,32 @@ class Handler(BaseHTTPRequestHandler):
                 conteudo, nome = paradas_csv(qs)
                 self._bytes(200, conteudo, "text/csv; charset=utf-8", download=nome)
                 return
+            if path == "/api/frota/paradas.pdf":
+                from .frota_pdf import gerar_paradas_pdf, iniciar_paradas_pdf
+
+                self._enviar_paradas_pdf(qs, gerar_paradas_pdf, iniciar_paradas_pdf)
+                return
+            if path == "/api/frota/paradas.pdf/andamento":
+                from .frota_pdf import andamento_paradas_pdf
+
+                job = (qs.get("job_id") or [""])[0]
+                self._json(200, andamento_paradas_pdf(job), self._no_store())
+                return
+            if path == "/api/frota/paradas.pdf/baixar":
+                from .frota_pdf import baixar_paradas_pdf
+
+                job = (qs.get("job_id") or [""])[0]
+                conteudo, nome = baixar_paradas_pdf(job)
+                self._bytes(200, conteudo, "application/pdf", download=nome)
+                return
             if path == "/api/frota/telemetria":
                 self._json(200, consultar_telemetria(qs), self._no_store())
                 return
             if path == "/api/frota/trajeto":
                 self._json(200, consultar_trajeto(qs), self._no_store())
+                return
+            if path == "/api/frota/mapeamento":
+                self._json(200, mapear_operacoes(), self._no_store())
                 return
             self._json(404, {"ok": False, "erro": "Rota não encontrada."}, self._no_store())
         except ValueError as exc:
@@ -1658,12 +1680,41 @@ class Handler(BaseHTTPRequestHandler):
             print(f"Frota: {exc}", flush=True)
             self._json(500, {"ok": False, "erro": "Não foi possível consultar a frota."}, self._no_store())
 
+    def _enviar_paradas_pdf(self, qs: dict[str, list[str]], gerar, iniciar) -> None:
+        from .frota import _param
+
+        if not _param(qs, "placa"):
+            self._json(202, iniciar(qs), self._no_store())
+            return
+        conteudo, nome = gerar(qs)
+        self._bytes(200, conteudo, "application/pdf", download=nome)
+
     def _responder_frota_escrita(self, method: str, path: str, payload: dict[str, Any]) -> None:
-        from .frota import apagar_operacao, atualizar_operacao, criar_operacao, desafixar_placa, fixar_placa
+        from .frota import (
+            apagar_operacao,
+            aplicar_mapeamento,
+            atualizar_operacao,
+            criar_operacao,
+            desafixar_placa,
+            fixar_placa,
+        )
 
         try:
             if method == "POST" and path == "/api/frota/operacoes":
                 self._json(200, criar_operacao(payload), self._no_store())
+                return
+            if method == "POST" and path == "/api/frota/mapeamento/aplicar":
+                corpo = payload if isinstance(payload, dict) and payload.get("veiculos") else None
+                self._json(200, aplicar_mapeamento(corpo, ajustes=True), self._no_store())
+                return
+            if method == "POST" and path == "/api/frota/paradas.pdf/iniciar":
+                from .frota_pdf import iniciar_paradas_pdf
+
+                pedido = parse_qs(urlparse(self.path).query)
+                for chave in ("placa", "data", "turno", "operacao", "min", "max", "so_fora_da_rota"):
+                    if payload.get(chave) not in (None, ""):
+                        pedido[chave] = [str(payload.get(chave))]
+                self._json(200, iniciar_paradas_pdf(pedido), self._no_store())
                 return
             operacao = _FROTA_OPERACAO.fullmatch(path)
             if operacao and method == "PUT":

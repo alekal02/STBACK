@@ -138,6 +138,68 @@ def cmd_criar_admin() -> None:
     print("O login passa a ser exigido porque já existe um administrador ativo.", flush=True)
 
 
+def cmd_frota_mapear(aplicar: bool) -> None:
+    from .frota import aplicar_mapeamento, mapear_operacoes, salvar_mapeamento_csv
+
+    print("Mapeando a frota pelos pulsos dos últimos 7 dias...", flush=True)
+    try:
+        resultado = mapear_operacoes()
+    except Exception as exc:
+        print(str(exc), flush=True)
+        raise SystemExit(1) from exc
+    caminho = salvar_mapeamento_csv(resultado)
+    _imprimir_mapeamento(resultado, caminho)
+    if not aplicar:
+        print("Simulação: nenhuma operação nem placa foi gravada.", flush=True)
+        return
+    try:
+        gravado = aplicar_mapeamento(resultado, ajustes=True)
+    except Exception as exc:
+        print(str(exc), flush=True)
+        raise SystemExit(1) from exc
+    print(f"Operações criadas: {len(gravado.get('criadas') or [])}", flush=True)
+    for nome in gravado.get("criadas") or []:
+        print(f"  + {nome}", flush=True)
+    print(f"Placas fixadas: {len(gravado.get('fixadas') or [])}", flush=True)
+    print(f"Vínculos manuais preservados: {len(gravado.get('preservadas') or [])}", flush=True)
+    for placa in gravado.get("preservadas") or []:
+        print(f"  preservada {placa}", flush=True)
+
+
+def _imprimir_mapeamento(resultado: dict, caminho: str) -> None:
+    verificacao = resultado.get("verificacao") or {}
+    print(f"Veículos: {verificacao.get('total_veiculos', 0)}", flush=True)
+    print(f"Com pulso nos últimos 7 dias: {verificacao.get('com_pulso', 0)}", flush=True)
+    print(f"Sem pulso: {verificacao.get('sem_pulso', 0)}", flush=True)
+    print(f"Sem posição válida: {verificacao.get('sem_posicao_valida', 0)}", flush=True)
+    latlon = "sim" if verificacao.get("latlon_em_todos_os_pulsos") else "não"
+    print(
+        f"Lat/lon em todos os pulsos: {latlon} "
+        f"(eventos sem coordenada: {verificacao.get('eventos_sem_latlon', 0)}; "
+        f"histórico sem coordenada: {verificacao.get('historico_sem_latlon', 0)})",
+        flush=True,
+    )
+    print("Resumo por operação:", flush=True)
+    for item in resultado.get("resumo") or []:
+        print(f"  {item.get('operacao')}: {item.get('qtd')}", flush=True)
+    print(f"Revisar ({len(resultado.get('revisar') or [])}):", flush=True)
+    for item in resultado.get("revisar") or []:
+        print(
+            f"  {item.get('placa')} | base {item.get('cidade_da_base') or '—'} | "
+            f"sugestão {item.get('operacao_sugerida') or '—'}",
+            flush=True,
+        )
+    print(f"Não associado ({len(resultado.get('nao_associado') or [])}):", flush=True)
+    for item in resultado.get("nao_associado") or []:
+        print(
+            f"  {item.get('placa')} | base {item.get('cidade_da_base') or '—'} | "
+            f"{item.get('base_lat')}, {item.get('base_lon')}",
+            flush=True,
+        )
+    print(f"Sem dados: {len(resultado.get('sem_dados') or [])}", flush=True)
+    print(f"CSV: {caminho}", flush=True)
+
+
 def cmd_realocar_horario(data: str, aplicar: bool) -> None:
     import json
 
@@ -223,6 +285,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Grava a realocação. Sem esta opção, só mostra a prévia.",
     )
+    mapa = sub.add_parser(
+        "frota-mapear",
+        help="Associa cada placa à operação pela base dos últimos 7 dias",
+    )
+    modo = mapa.add_mutually_exclusive_group()
+    modo.add_argument(
+        "--simular",
+        action="store_true",
+        help="Não grava operações nem placas (padrão). Gera o CSV de revisão.",
+    )
+    modo.add_argument(
+        "--aplicar",
+        action="store_true",
+        help="Cria as operações que faltam e fixa as placas de situação associado.",
+    )
     return parser
 
 
@@ -249,6 +326,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.comando == "realocar-horario":
         cmd_realocar_horario(args.data, bool(args.aplicar))
+        return
+    if args.comando == "frota-mapear":
+        cmd_frota_mapear(bool(getattr(args, "aplicar", False)))
         return
     if args.comando == "pdf":
         from .pdf import gerar_pdf_dia

@@ -14,6 +14,7 @@ import json
 import sqlite3
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -46,9 +47,67 @@ SALTO_M = 2000.0
 SALTO_S = 30.0
 BLOCO_H = 24
 CACHE_S = 30.0
+CAP_BASE_S = 2 * 60 * 60
+RAIO_VIZINHA_M = 40_000.0
 _NOMINATIM = "https://nominatim.openstreetmap.org/reverse"
 _NOMINATIM_BUSCA = "https://nominatim.openstreetmap.org/search"
 _AUSENTE = object()
+# Cidades da empresa. A placa entra pela cidade da base, não pela caixa do mapa.
+OPERACOES_ALVO = (
+    ("Belo Horizonte", "MG"),
+    ("Aparecida de Goiânia", "GO"),
+    ("Londrina", "PR"),
+    ("Unaí", "MG"),
+    ("Contagem", "MG"),
+    ("Ibiporã", "PR"),
+    ("Pindamonhangaba", "SP"),
+    ("Porto Velho", "RO"),
+    ("Uberaba", "MG"),
+)
+OPERACOES_EXTRAS = (
+    ("Ariquemes", "RO"),
+    ("Caldas Novas", "GO"),
+)
+_PLACAS_ARIQUEMES = (
+    "CAT226B3",
+    "RVE-2H79",
+    "RVU-8C66",
+    "TTV-9G70",
+    "TUF-3C31",
+    "UAX-0F65",
+    "YTO NX854 0",
+)
+_PLACAS_CALDAS = ("SCO-6H09", "TBY-3G12")
+_PLACA_CONTAGEM = "TRZ-5F28"
+_ESTADOS = {
+    "acre": "AC",
+    "alagoas": "AL",
+    "amapa": "AP",
+    "amazonas": "AM",
+    "bahia": "BA",
+    "ceara": "CE",
+    "distrito federal": "DF",
+    "espirito santo": "ES",
+    "goias": "GO",
+    "maranhao": "MA",
+    "mato grosso": "MT",
+    "mato grosso do sul": "MS",
+    "minas gerais": "MG",
+    "para": "PA",
+    "paraiba": "PB",
+    "parana": "PR",
+    "pernambuco": "PE",
+    "piaui": "PI",
+    "rio de janeiro": "RJ",
+    "rio grande do norte": "RN",
+    "rio grande do sul": "RS",
+    "rondonia": "RO",
+    "roraima": "RR",
+    "santa catarina": "SC",
+    "sao paulo": "SP",
+    "sergipe": "SE",
+    "tocantins": "TO",
+}
 
 _IO = threading.Lock()
 _CACHE_LOCK = threading.Lock()
@@ -56,6 +115,8 @@ _CACHE: dict[str, Any] = {"chave": "", "expira": 0.0, "corpo": None}
 _GEO = threading.Lock()
 _GEO_ULTIMO = 0.0
 _GEO_AVISO = False
+_STATS_LOCK = threading.Lock()
+_PULSO_STATS = {"sem_coord": 0}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS frota_ponto (
@@ -71,6 +132,8 @@ CREATE TABLE IF NOT EXISTS frota_geocache (
     lat TEXT NOT NULL,
     lon TEXT NOT NULL,
     endereco TEXT NOT NULL DEFAULT '',
+    cidade TEXT,
+    uf TEXT,
     PRIMARY KEY (lat, lon)
 );
 CREATE TABLE IF NOT EXISTS frota_janela (
@@ -634,7 +697,7 @@ def _baixar(settings: Any, vid: str, placa: str, bloco: tuple[datetime, datetime
     inicio, fim = bloco
     if fim <= inicio:
         return []
-    print(f"Frota: histórico {placa} {_iso(inicio)} → {_iso(fim)}", flush=True)
+    print(f"Frota: historico {placa} {_iso(inicio)} -> {_iso(fim)}", flush=True)
     try:
         eventos = historico_veiculo(settings, vid, inicio, fim, token=token)
     except FulltrackSemDados:
@@ -645,6 +708,9 @@ def _baixar(settings: Any, vid: str, placa: str, bloco: tuple[datetime, datetime
 def _ponto_evento(evento: dict[str, Any], placa: str) -> dict[str, Any] | None:
     lat, lon = _coord(evento.get("ras_eve_latitude"), evento.get("ras_eve_longitude"))
     if lat is None or lon is None:
+        if str(evento.get("ras_eve_data_gps") or evento.get("ras_eve_data_enviado") or "").strip():
+            with _STATS_LOCK:
+                _PULSO_STATS["sem_coord"] += 1
         return None
     ts = _iso_de_utc(evento.get("ras_eve_data_gps") or evento.get("ras_eve_data_enviado"))
     if not ts:
@@ -948,8 +1014,38 @@ def _geo_ler(con: sqlite3.Connection, lat: str, lon: str) -> Any:
 
 def _geo_gravar(con: sqlite3.Connection, lat: str, lon: str, texto: str) -> None:
     con.execute(
-        "INSERT OR REPLACE INTO frota_geocache (lat, lon, endereco) VALUES (?, ?, ?)",
+        """
+        INSERT INTO frota_geocache (lat, lon, endereco) VALUES (?, ?, ?)
+        ON CONFLICT(lat, lon) DO UPDATE SET endereco = excluded.endereco
+        """,
         (lat, lon, texto),
+    )
+
+
+def _geo_ler_lugar(con: sqlite3.Connection, lat: str, lon: str) -> dict[str, str] | None:
+    row = con.execute(
+        "SELECT endereco, cidade, uf FROM frota_geocache WHERE lat = ? AND lon = ?",
+        (lat, lon),
+    ).fetchone()
+    if row is None or row["cidade"] is None:
+        return None
+    return {
+        "endereco": str(row["endereco"] or ""),
+        "cidade": str(row["cidade"] or ""),
+        "uf": str(row["uf"] or ""),
+    }
+
+
+def _geo_gravar_lugar(con: sqlite3.Connection, lat: str, lon: str, endereco: str, cidade: str, uf: str) -> None:
+    con.execute(
+        """
+        INSERT INTO frota_geocache (lat, lon, endereco, cidade, uf) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(lat, lon) DO UPDATE SET
+            endereco = excluded.endereco,
+            cidade = excluded.cidade,
+            uf = excluded.uf
+        """,
+        (lat, lon, endereco, cidade, uf),
     )
 
 
@@ -1007,6 +1103,698 @@ def _buracos(
     if cursor < fim:
         faltam.append((cursor, fim))
     return faltam
+
+
+def _sem_acento(texto: str) -> str:
+    bruto = unicodedata.normalize("NFKD", str(texto or ""))
+    sem = "".join(ch for ch in bruto if not unicodedata.combining(ch))
+    return " ".join(sem.lower().split())
+
+
+def _sigla_uf(texto: str) -> str:
+    limpo = _sem_acento(texto)
+    if not limpo:
+        return ""
+    if len(limpo) == 2 and limpo.isalpha():
+        return limpo.upper()
+    return _ESTADOS.get(limpo, "")
+
+
+def _chave_op(cidade: str, uf: str) -> str:
+    return f"{_sem_acento(cidade)}|{uf.strip().lower()}"
+
+
+def _rotulo_operacao(cidade: str, uf: str) -> str:
+    if _sem_acento(cidade) == "aparecida de goiania":
+        return "Aparecida de Goiânia"
+    return f"{cidade} - {uf}"
+
+
+def _operacao_por_cidade(cidade: str, uf: str) -> tuple[str, str] | None:
+    alvo = _sem_acento(cidade)
+    if not alvo:
+        return None
+    sigla = _sigla_uf(uf)
+    achados = [(nome, estado) for nome, estado in OPERACOES_ALVO if _sem_acento(nome) == alvo and (not sigla or sigla == estado)]
+    if len(achados) == 1:
+        return achados[0]
+    return None
+
+
+def _cidade_address(address: dict[str, Any]) -> str:
+    for chave in ("city", "town", "municipality"):
+        texto = str(address.get(chave) or "").strip()
+        if texto:
+            return texto
+    return ""
+
+
+def _uf_address(address: dict[str, Any]) -> str:
+    for chave in ("ISO3166-2-lvl4", "ISO3166-2-lvl3"):
+        iso = str(address.get(chave) or "").strip().upper()
+        if "-" in iso:
+            sigla = iso.split("-")[-1].strip()
+            if len(sigla) == 2 and sigla.isalpha():
+                return sigla
+    return _sigla_uf(str(address.get("state") or ""))
+
+
+def _nominatim_lugar(lat: str, lon: str) -> dict[str, str]:
+    with _GEO:
+        guardado = _com_banco(lambda con: _geo_ler_lugar(con, lat, lon))
+        if guardado is not None:
+            return guardado
+        _esperar_nominatim()
+        query = urlencode(
+            {
+                "format": "jsonv2",
+                "lat": lat,
+                "lon": lon,
+                "zoom": "12",
+                "addressdetails": "1",
+            }
+        )
+        pedido = Request(
+            _NOMINATIM + "?" + query,
+            headers={
+                "User-Agent": "SEGTRACK-frota",
+                "Accept": "application/json",
+                "Accept-Language": "pt-BR",
+            },
+        )
+        try:
+            with urlopen(pedido, timeout=12) as resp:
+                corpo = json.loads(resp.read().decode("utf-8", "replace"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+            raise
+        address = corpo.get("address") if isinstance(corpo, dict) else {}
+        if not isinstance(address, dict):
+            address = {}
+        cidade = _cidade_address(address)
+        uf = _uf_address(address)
+        texto = str(corpo.get("display_name") or "").strip() if isinstance(corpo, dict) else ""
+        _com_banco(lambda con: _geo_gravar_lugar(con, lat, lon, texto, cidade, uf))
+        return {"endereco": texto, "cidade": cidade, "uf": uf}
+
+
+def _lugar(lat: float, lon: float) -> dict[str, str]:
+    la = f"{float(lat):.3f}"
+    lo = f"{float(lon):.3f}"
+    guardado = _com_banco(lambda con: _geo_ler_lugar(con, la, lo))
+    if guardado is not None:
+        return guardado
+    try:
+        return _nominatim_lugar(la, lo)
+    except Exception:
+        _avisar_geo()
+        return {"endereco": "", "cidade": "", "uf": ""}
+
+
+def _caixa_da_cidade(cidade: str, uf: str) -> dict[str, float]:
+    lat_min, lat_max, lon_min, lon_max = _limites_da_cidade(f"{cidade}, {uf}")
+    return {
+        "lat_min": lat_min,
+        "lat_max": lat_max,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+        "centro_lat": (lat_min + lat_max) / 2.0,
+        "centro_lon": (lon_min + lon_max) / 2.0,
+    }
+
+
+def _caixas_das_operacoes(avisos: list[str]) -> dict[str, dict[str, float]]:
+    caixas: dict[str, dict[str, float]] = {}
+    for cidade, uf in OPERACOES_ALVO:
+        try:
+            caixas[_chave_op(cidade, uf)] = _caixa_da_cidade(cidade, uf)
+        except ValueError as exc:
+            avisos.append(f"{_rotulo_operacao(cidade, uf)}: {exc}")
+    return caixas
+
+
+def _celula_de(lat: float, lon: float) -> tuple[float, float]:
+    return (round(float(lat), 3), round(float(lon), 3))
+
+
+def _tempo_por_celula(pontos: list[dict[str, Any]]) -> tuple[dict[tuple[float, float], float], dict[tuple[float, float], float]]:
+    """Tempo parado+em trânsito e tempo só em movimento, por célula de ~100 m."""
+    lista: list[dict[str, Any]] = []
+    for bruto in pontos or []:
+        if not isinstance(bruto, dict):
+            continue
+        momento = bruto.get("ts") if isinstance(bruto.get("ts"), datetime) else _parse_ts(bruto.get("ts"))
+        lat, lon = _coord(bruto.get("lat"), bruto.get("lon"))
+        if momento is None or lat is None or lon is None:
+            continue
+        lista.append({"ts": momento, "lat": lat, "lon": lon, "vel": _numero_ou_none(bruto.get("vel"))})
+    lista.sort(key=lambda item: item["ts"])
+    dwell: dict[tuple[float, float], float] = {}
+    mov: dict[tuple[float, float], float] = {}
+    if len(lista) == 1:
+        dwell[_celula_de(lista[0]["lat"], lista[0]["lon"])] = 1.0
+        return dwell, mov
+    for a, b in zip(lista, lista[1:]):
+        dt = (b["ts"] - a["ts"]).total_seconds()
+        if dt <= 0 or dt > CAP_BASE_S:
+            continue
+        celula = _celula_de(a["lat"], a["lon"])
+        dwell[celula] = dwell.get(celula, 0.0) + dt
+        vel = a.get("vel")
+        if vel is None and dt > 0:
+            vel = haversine_m((a["lat"], a["lon"]), (b["lat"], b["lon"])) / dt * 3.6
+        if vel is not None and float(vel) > VEL_PARADO:
+            mov[celula] = mov.get(celula, 0.0) + dt
+    if lista and not dwell:
+        contagem: dict[tuple[float, float], int] = {}
+        for item in lista:
+            celula = _celula_de(item["lat"], item["lon"])
+            contagem[celula] = contagem.get(celula, 0) + 1
+        base = max(contagem, key=lambda cel: (contagem[cel], cel[0], cel[1]))
+        dwell[base] = 0.0
+    return dwell, mov
+
+
+def _mais_proxima(
+    lat: float,
+    lon: float,
+    caixas: dict[str, dict[str, float]],
+) -> tuple[tuple[str, str] | None, float]:
+    melhor: tuple[str, str] | None = None
+    dist_min: float | None = None
+    for cidade, uf in OPERACOES_ALVO:
+        caixa = caixas.get(_chave_op(cidade, uf))
+        if not caixa:
+            continue
+        dist = haversine_m((lat, lon), (float(caixa["centro_lat"]), float(caixa["centro_lon"])))
+        if dist_min is None or dist < dist_min:
+            dist_min = dist
+            melhor = (cidade, uf)
+    return melhor, dist_min if dist_min is not None else 1e18
+
+
+def _classificar_base(
+    cidade: str,
+    uf: str,
+    lat: float | None,
+    lon: float | None,
+    caixas: dict[str, dict[str, float]],
+) -> tuple[str, str]:
+    achou = _operacao_por_cidade(cidade, uf)
+    if achou:
+        return _rotulo_operacao(*achou), "associado"
+    if lat is None or lon is None:
+        return "", "não associado"
+    perto, dist = _mais_proxima(lat, lon, caixas)
+    if perto is not None and dist <= RAIO_VIZINHA_M:
+        return _rotulo_operacao(*perto), "revisar"
+    return "", "não associado"
+
+
+def _cidade_mais_rodou(
+    mov: dict[tuple[float, float], float],
+    lugares: dict[tuple[float, float], dict[str, str]],
+) -> str:
+    if not mov:
+        return ""
+    ordenadas = sorted(mov.items(), key=lambda item: (-item[1], item[0]))
+    por_cidade: dict[str, float] = {}
+    nomes: dict[str, str] = {}
+    restante = sum(mov.values())
+    consultas = 0
+    for celula, tempo in ordenadas:
+        restante -= tempo
+        nova = celula not in lugares
+        lugar = lugares.get(celula) or _lugar(celula[0], celula[1])
+        lugares[celula] = lugar
+        if nova:
+            consultas += 1
+        chave = _sem_acento(lugar.get("cidade") or "")
+        if chave:
+            por_cidade[chave] = por_cidade.get(chave, 0.0) + tempo
+            nomes[chave] = str(lugar.get("cidade") or "")
+        if por_cidade and max(por_cidade.values()) > restante:
+            break
+        if consultas >= 6:
+            break
+    if not por_cidade:
+        return ""
+    return nomes[max(por_cidade, key=lambda chave: por_cidade[chave])]
+
+
+def _coord_evento(ev: dict[str, Any] | None) -> tuple[float, float] | None:
+    if not ev:
+        return None
+    lat, lon = _coord(ev.get("ras_eve_latitude"), ev.get("ras_eve_longitude"))
+    if lat is None or lon is None:
+        return None
+    return lat, lon
+
+
+def _historicos_da_conta(
+    placas: list[str],
+    inicio: datetime,
+    fim: datetime,
+    settings: Any,
+    token: str,
+    mapa: dict[str, dict[str, Any]],
+) -> dict[str, tuple[list[dict[str, Any]], str]]:
+    saida: dict[str, tuple[list[dict[str, Any]], str]] = {}
+
+    def um(placa: str) -> tuple[list[dict[str, Any]], str]:
+        try:
+            return historico(placa, inicio, fim, settings=settings, token=token, veiculos=mapa), ""
+        except Exception as exc:
+            try:
+                novo = login(settings)
+                return historico(placa, inicio, fim, settings=settings, token=novo, veiculos=mapa), ""
+            except Exception:
+                return [], str(exc)
+
+    if not placas:
+        return saida
+    with ThreadPoolExecutor(max_workers=min(4, len(placas))) as pool:
+        futuros = {pool.submit(um, placa): placa for placa in placas}
+        for fut in as_completed(futuros):
+            placa = futuros[fut]
+            saida[placa] = fut.result()
+            print(f"Frota: histórico {placa} ({len(saida)}/{len(placas)})", flush=True)
+    return saida
+
+
+def _linha_base(
+    placa: str,
+    descricao: str,
+    *,
+    lat: float | None,
+    lon: float | None,
+    horas: float | None,
+    cidade: str,
+    uf: str,
+    rodou: str,
+    operacao: str,
+    situacao: str,
+    origem: str,
+    pulsos: int,
+    posicao_valida: bool,
+) -> dict[str, Any]:
+    return {
+        "placa": placa,
+        "descricao": descricao,
+        "base_lat": None if lat is None else round(float(lat), 3),
+        "base_lon": None if lon is None else round(float(lon), 3),
+        "cidade_da_base": cidade,
+        "uf_da_base": uf,
+        "horas_na_base": None if horas is None else round(float(horas), 1),
+        "cidade_onde_mais_rodou": rodou,
+        "operacao_sugerida": operacao,
+        "operacao_chave": _chave_op(*_operacao_por_cidade(cidade, uf)) if situacao == "associado" and _operacao_por_cidade(cidade, uf) else _chave_sugerida(operacao),
+        "situacao": situacao,
+        "origem": origem,
+        "qtd_pulsos": pulsos,
+        "posicao_valida": posicao_valida,
+    }
+
+
+def _chave_sugerida(rotulo: str) -> str:
+    texto = _sem_acento(rotulo)
+    for cidade, uf in OPERACOES_ALVO + OPERACOES_EXTRAS:
+        if texto == _sem_acento(_rotulo_operacao(cidade, uf)) or texto == _sem_acento(cidade):
+            return _chave_op(cidade, uf)
+    return ""
+
+
+def _montar_linha(
+    placa: str,
+    descricao: str,
+    pontos: list[dict[str, Any]],
+    erro: str,
+    evento: dict[str, Any] | None,
+    inicio: datetime,
+    caixas: dict[str, dict[str, float]],
+    lugares: dict[tuple[float, float], dict[str, str]],
+) -> dict[str, Any]:
+    coords_evento = _coord_evento(evento)
+    dwell, mov = _tempo_por_celula(pontos) if pontos else ({}, {})
+    if dwell:
+        celula = max(dwell, key=lambda item: (dwell[item], item[0], item[1]))
+        lugar = lugares.get(celula) or _lugar(celula[0], celula[1])
+        lugares[celula] = lugar
+        operacao, situacao = _classificar_base(lugar.get("cidade") or "", lugar.get("uf") or "", celula[0], celula[1], caixas)
+        return _linha_base(
+            placa,
+            descricao,
+            lat=celula[0],
+            lon=celula[1],
+            horas=dwell.get(celula, 0.0) / 3600.0,
+            cidade=str(lugar.get("cidade") or ""),
+            uf=str(lugar.get("uf") or ""),
+            rodou=_cidade_mais_rodou(mov, lugares),
+            operacao=operacao,
+            situacao=situacao,
+            origem="historico",
+            pulsos=len(pontos),
+            posicao_valida=True,
+        )
+    if erro and coords_evento is not None:
+        momento = _parse_ts(_iso_de_utc((evento or {}).get("ras_eve_data_gps") or (evento or {}).get("ras_eve_data_enviado")))
+        if momento is None or momento >= inicio:
+            celula = _celula_de(*coords_evento)
+            lugar = lugares.get(celula) or _lugar(celula[0], celula[1])
+            lugares[celula] = lugar
+            operacao, situacao = _classificar_base(lugar.get("cidade") or "", lugar.get("uf") or "", celula[0], celula[1], caixas)
+            return _linha_base(
+                placa,
+                descricao,
+                lat=celula[0],
+                lon=celula[1],
+                horas=None,
+                cidade=str(lugar.get("cidade") or ""),
+                uf=str(lugar.get("uf") or ""),
+                rodou="",
+                operacao=operacao,
+                situacao=situacao,
+                origem="base pela posição atual",
+                pulsos=0,
+                posicao_valida=True,
+            )
+    return _linha_base(
+        placa,
+        descricao,
+        lat=None,
+        lon=None,
+        horas=None,
+        cidade="",
+        uf="",
+        rodou="",
+        operacao="",
+        situacao="sem dados",
+        origem="",
+        pulsos=0,
+        posicao_valida=coords_evento is not None,
+    )
+
+
+def mapear_operacoes(*, dias: int = 7) -> dict[str, Any]:
+    """Lê os pulsos e sugere a operação de cada placa. Não grava operação nem vínculo."""
+    if dias < 1:
+        raise ValueError("A janela do mapeamento precisa ter ao menos 1 dia.")
+    settings = load_settings()
+    token = login(settings)
+    brutos = listar_veiculos(settings, token)
+    mapa: dict[str, dict[str, Any]] = {}
+    for item in brutos:
+        chave = _norm_placa(str(item.get("ras_vei_placa") or ""))
+        if chave and chave not in mapa:
+            mapa[chave] = item
+    eventos = _eventos_atuais(settings, token)
+    por_id: dict[str, dict[str, Any]] = {}
+    por_placa: dict[str, dict[str, Any]] = {}
+    eventos_sem_latlon = 0
+    for ev in eventos:
+        if _coord_evento(ev) is None:
+            eventos_sem_latlon += 1
+        vid = str(ev.get("ras_vei_id") or "")
+        if vid and (vid not in por_id or _chave_tempo(ev) >= _chave_tempo(por_id[vid])):
+            por_id[vid] = ev
+        chave = _norm_placa(str(ev.get("ras_vei_placa") or ""))
+        if chave and (chave not in por_placa or _chave_tempo(ev) >= _chave_tempo(por_placa[chave])):
+            por_placa[chave] = ev
+    fim = _agora_brt() - timedelta(minutes=6)
+    inicio = fim - timedelta(days=int(dias))
+    placas = sorted(
+        (_fmt_placa(str(item.get("ras_vei_placa") or "")) for item in mapa.values()),
+        key=lambda placa: placa,
+    )
+    placas = [placa for placa in placas if _norm_placa(placa)]
+    with _STATS_LOCK:
+        _PULSO_STATS["sem_coord"] = 0
+    historicos = _historicos_da_conta(placas, inicio, fim, settings, token, mapa)
+    with _STATS_LOCK:
+        historico_sem_latlon = int(_PULSO_STATS["sem_coord"])
+    avisos: list[str] = []
+    caixas = _caixas_das_operacoes(avisos)
+    lugares: dict[tuple[float, float], dict[str, str]] = {}
+    veiculos: list[dict[str, Any]] = []
+    for indice, placa in enumerate(placas, start=1):
+        if indice == 1 or indice % 25 == 0 or indice == len(placas):
+            print(f"Frota: cidade da base {indice}/{len(placas)}", flush=True)
+        item = mapa.get(_norm_placa(placa)) or {}
+        pontos, erro = historicos.get(placa, ([], ""))
+        if erro:
+            avisos.append(f"{placa}: {erro}")
+        evento = por_id.get(str(item.get("ras_vei_id") or "")) or por_placa.get(_norm_placa(placa))
+        veiculos.append(
+            _montar_linha(
+                placa,
+                str(item.get("ras_vei_veiculo") or placa).strip() or placa,
+                pontos,
+                erro,
+                evento,
+                inicio,
+                caixas,
+                lugares,
+            )
+        )
+    return _pacote_mapeamento(veiculos, caixas, avisos, eventos_sem_latlon, historico_sem_latlon, inicio, fim)
+
+
+def _pacote_mapeamento(
+    veiculos: list[dict[str, Any]],
+    caixas: dict[str, dict[str, float]],
+    avisos: list[str],
+    eventos_sem_latlon: int,
+    historico_sem_latlon: int,
+    inicio: datetime,
+    fim: datetime,
+) -> dict[str, Any]:
+    com_pulso = sum(1 for item in veiculos if item.get("origem"))
+    sem_posicao = sum(1 for item in veiculos if not item.get("posicao_valida"))
+    resumo = []
+    for cidade, uf in OPERACOES_ALVO:
+        rotulo = _rotulo_operacao(cidade, uf)
+        resumo.append(
+            {
+                "operacao": rotulo,
+                "qtd": sum(1 for item in veiculos if item.get("situacao") == "associado" and item.get("operacao_sugerida") == rotulo),
+            }
+        )
+    return {
+        "ok": True,
+        "inicio": _iso(inicio),
+        "fim": _iso(fim),
+        "gerado_em": _iso(_agora_brt()),
+        "verificacao": {
+            "total_veiculos": len(veiculos),
+            "com_pulso": com_pulso,
+            "sem_pulso": len(veiculos) - com_pulso,
+            "sem_posicao_valida": sem_posicao,
+            "eventos_sem_latlon": int(eventos_sem_latlon),
+            "historico_sem_latlon": int(historico_sem_latlon),
+            "latlon_em_todos_os_pulsos": int(eventos_sem_latlon) == 0 and int(historico_sem_latlon) == 0,
+        },
+        "resumo": resumo,
+        "revisar": [item for item in veiculos if item.get("situacao") == "revisar"],
+        "nao_associado": [item for item in veiculos if item.get("situacao") == "não associado"],
+        "sem_dados": [item for item in veiculos if item.get("situacao") == "sem dados"],
+        "veiculos": veiculos,
+        "caixas": caixas,
+        "avisos": avisos,
+    }
+
+
+def mapeamento_csv_bytes(resultado: dict[str, Any]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    writer.writerow(
+        [
+            "placa",
+            "descricao",
+            "base_lat",
+            "base_lon",
+            "cidade_da_base",
+            "horas_na_base",
+            "cidade_onde_mais_rodou",
+            "operacao_sugerida",
+            "situacao",
+            "origem",
+        ]
+    )
+    for item in resultado.get("veiculos") or []:
+        writer.writerow(
+            [
+                item.get("placa") or "",
+                item.get("descricao") or "",
+                "" if item.get("base_lat") is None else item.get("base_lat"),
+                "" if item.get("base_lon") is None else item.get("base_lon"),
+                item.get("cidade_da_base") or "",
+                "" if item.get("horas_na_base") is None else item.get("horas_na_base"),
+                item.get("cidade_onde_mais_rodou") or "",
+                item.get("operacao_sugerida") or "",
+                item.get("situacao") or "",
+                item.get("origem") or "",
+            ]
+        )
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def salvar_mapeamento_csv(resultado: dict[str, Any], destino: Any = None) -> str:
+    from pathlib import Path
+
+    if destino is None:
+        pasta = load_settings().output_dir / "frota"
+        pasta.mkdir(parents=True, exist_ok=True)
+        destino = pasta / "mapeamento-operacoes.csv"
+    caminho = Path(destino)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_bytes(mapeamento_csv_bytes(resultado))
+    return str(caminho)
+
+
+def _buscar_operacao_nome(ops: list[dict[str, Any]], cidade: str, uf: str) -> dict[str, Any] | None:
+    alvo = _sem_acento(cidade)
+    rotulo = _sem_acento(_rotulo_operacao(cidade, uf))
+    for op in ops:
+        nome = _sem_acento(str(op.get("nome") or ""))
+        if nome in {alvo, rotulo}:
+            return op
+    return None
+
+
+def _ajustar_mapeamento(resultado: dict[str, Any]) -> dict[str, Any]:
+    """Ajustes aprovados: Ariquemes, Caldas Novas e a TRZ-5F28 em Contagem.
+
+    Placas sem dados continuam sem vínculo. Revisar que não está na lista não entra.
+    """
+    saida = dict(resultado)
+    ariquemes = {_norm_placa(placa) for placa in _PLACAS_ARIQUEMES}
+    caldas = {_norm_placa(placa) for placa in _PLACAS_CALDAS}
+    contagem = _norm_placa(_PLACA_CONTAGEM)
+    veiculos: list[dict[str, Any]] = []
+    for item in resultado.get("veiculos") or []:
+        if not isinstance(item, dict):
+            continue
+        linha = dict(item)
+        norm = _norm_placa(str(linha.get("placa") or ""))
+        if norm in ariquemes:
+            linha["situacao"] = "associado"
+            linha["operacao_sugerida"] = _rotulo_operacao("Ariquemes", "RO")
+            linha["operacao_chave"] = _chave_op("Ariquemes", "RO")
+        elif norm in caldas:
+            linha["situacao"] = "associado"
+            linha["operacao_sugerida"] = _rotulo_operacao("Caldas Novas", "GO")
+            linha["operacao_chave"] = _chave_op("Caldas Novas", "GO")
+        elif norm == contagem:
+            linha["situacao"] = "associado"
+            linha["operacao_sugerida"] = _rotulo_operacao("Contagem", "MG")
+            linha["operacao_chave"] = _chave_op("Contagem", "MG")
+        veiculos.append(linha)
+    saida["veiculos"] = veiculos
+    return saida
+
+
+def aplicar_mapeamento(resultado: dict[str, Any] | None = None, *, ajustes: bool = False) -> dict[str, Any]:
+    """Cria as operações que faltam e fixa só as placas associadas.
+
+    Não apaga vínculo já existente e não grava situação revisar.
+    Com ajustes, inclui Ariquemes, Caldas Novas e a TRZ-5F28 em Contagem.
+    """
+    if resultado is None:
+        resultado = mapear_operacoes()
+    if not isinstance(resultado, dict):
+        raise ValueError("Mapeamento inválido.")
+    if ajustes:
+        resultado = _ajustar_mapeamento(resultado)
+    cidades = list(OPERACOES_ALVO)
+    if ajustes:
+        cidades.extend(OPERACOES_EXTRAS)
+    caixas = dict(resultado.get("caixas") or {})
+    avisos = list(resultado.get("avisos") or [])
+    for cidade, uf in cidades:
+        chave = _chave_op(cidade, uf)
+        if chave in caixas or _sem_acento(cidade) == "aparecida de goiania":
+            continue
+        try:
+            caixas[chave] = _caixa_da_cidade(cidade, uf)
+        except ValueError as exc:
+            avisos.append(f"{_rotulo_operacao(cidade, uf)}: {exc}")
+
+    def gravar(con: sqlite3.Connection) -> dict[str, Any]:
+        ops = _listar_rows(con)
+        ids: dict[str, int] = {}
+        criadas: list[str] = []
+        for cidade, uf in cidades:
+            chave = _chave_op(cidade, uf)
+            rotulo = _rotulo_operacao(cidade, uf)
+            achada = _buscar_operacao_nome(ops, cidade, uf)
+            if achada:
+                ids[chave] = int(achada["id"])
+                continue
+            caixa = caixas.get(chave)
+            if not caixa:
+                avisos.append(f"{rotulo}: sem limites para criar a operação.")
+                continue
+            cur = con.execute(
+                """
+                INSERT INTO frota_operacao (
+                    nome, lat_min, lat_max, lon_min, lon_max, ativa, padrao, criado_em
+                ) VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+                """,
+                (
+                    rotulo,
+                    float(caixa["lat_min"]),
+                    float(caixa["lat_max"]),
+                    float(caixa["lon_min"]),
+                    float(caixa["lon_max"]),
+                    _iso(_agora_brt()),
+                ),
+            )
+            novo = {
+                "id": int(cur.lastrowid),
+                "nome": rotulo,
+            }
+            ops.append(novo)
+            ids[chave] = int(cur.lastrowid)
+            criadas.append(rotulo)
+        vinculos: dict[str, set[int]] = {}
+        for row in con.execute("SELECT operacao_id, placa FROM frota_operacao_placa"):
+            norm = _norm_placa(str(row["placa"]))
+            if norm:
+                vinculos.setdefault(norm, set()).add(int(row["operacao_id"]))
+        fixadas: list[str] = []
+        preservadas: list[str] = []
+        ja_estavam: list[str] = []
+        for item in resultado.get("veiculos") or []:
+            if not isinstance(item, dict) or item.get("situacao") != "associado":
+                continue
+            chave = str(item.get("operacao_chave") or "") or _chave_sugerida(str(item.get("operacao_sugerida") or ""))
+            oid = ids.get(chave)
+            placa = _fmt_placa(str(item.get("placa") or ""))
+            norm = _norm_placa(placa)
+            if oid is None or not norm:
+                continue
+            atuais = vinculos.setdefault(norm, set())
+            if oid in atuais:
+                ja_estavam.append(placa)
+                continue
+            if atuais:
+                preservadas.append(placa)
+                continue
+            con.execute(
+                "INSERT OR IGNORE INTO frota_operacao_placa (operacao_id, placa) VALUES (?, ?)",
+                (int(oid), placa),
+            )
+            atuais.add(int(oid))
+            fixadas.append(placa)
+        return {
+            "ok": True,
+            "criadas": criadas,
+            "fixadas": fixadas,
+            "preservadas": preservadas,
+            "ja_fixadas": ja_estavam,
+            "avisos": avisos,
+        }
+
+    return _com_banco(gravar)
 
 
 def listar_operacoes() -> dict[str, Any]:
@@ -1367,6 +2155,14 @@ def _flag(valor: Any, campo: str) -> bool:
     raise ValueError(f"Campo {campo} inválido.")
 
 
+def _garantir_colunas(con: sqlite3.Connection) -> None:
+    colunas = {str(row[1]) for row in con.execute("PRAGMA table_info(frota_geocache)")}
+    if "cidade" not in colunas:
+        con.execute("ALTER TABLE frota_geocache ADD COLUMN cidade TEXT")
+    if "uf" not in colunas:
+        con.execute("ALTER TABLE frota_geocache ADD COLUMN uf TEXT")
+
+
 def _semear_operacao(con: sqlite3.Connection) -> None:
     qtd = int(con.execute("SELECT COUNT(*) AS n FROM frota_operacao").fetchone()["n"])
     if qtd:
@@ -1447,6 +2243,7 @@ def _conexao() -> Iterator[sqlite3.Connection]:
     try:
         con.execute("PRAGMA busy_timeout=5000")
         con.executescript(_SCHEMA)
+        _garantir_colunas(con)
         _semear_operacao(con)
         yield con
         con.commit()

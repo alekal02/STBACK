@@ -1610,6 +1610,33 @@ class Handler(BaseHTTPRequestHandler):
             print(f"Auditoria de rotas: {exc}", flush=True)
             self._json(500, {"ok": False, "erro": "Não foi possível ler a auditoria."}, self._no_store())
 
+    def _responder_frota(self, path: str, qs: dict[str, list[str]]) -> None:
+        from .frota import consultar_paradas, consultar_telemetria, consultar_trajeto, ao_vivo, paradas_csv
+
+        try:
+            if path == "/api/frota/ao-vivo":
+                self._json(200, ao_vivo(), self._no_store())
+                return
+            if path == "/api/frota/paradas":
+                self._json(200, consultar_paradas(qs), self._no_store())
+                return
+            if path == "/api/frota/paradas.csv":
+                conteudo, nome = paradas_csv(qs)
+                self._bytes(200, conteudo, "text/csv; charset=utf-8", download=nome)
+                return
+            if path == "/api/frota/telemetria":
+                self._json(200, consultar_telemetria(qs), self._no_store())
+                return
+            if path == "/api/frota/trajeto":
+                self._json(200, consultar_trajeto(qs), self._no_store())
+                return
+            self._json(404, {"ok": False, "erro": "Rota não encontrada."}, self._no_store())
+        except ValueError as exc:
+            self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
+        except Exception as exc:
+            print(f"Frota: {exc}", flush=True)
+            self._json(500, {"ok": False, "erro": "Não foi possível consultar a frota."}, self._no_store())
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self._cors()
@@ -1636,6 +1663,15 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 return
             self._responder_auditoria_rotas(path, parse_qs(parsed.query))
+            return
+        if path == "/api/frota" or path.startswith("/api/frota/"):
+            if not self._exigir(
+                "GET",
+                admin=True,
+                erro_admin="Somente administradores podem acessar a frota.",
+            ):
+                return
+            self._responder_frota(path, parse_qs(parsed.query))
             return
         if path not in {"/api/health", "/config.js", "/", "/index.html"}:
             if not self._exigir("GET"):
@@ -2022,6 +2058,15 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 return
             self._json(405, {"ok": False, "erro": "A auditoria de rotas é somente leitura."}, self._no_store())
+            return
+        if path == "/api/frota" or path.startswith("/api/frota/"):
+            if not self._exigir(
+                "POST",
+                admin=True,
+                erro_admin="Somente administradores podem acessar a frota.",
+            ):
+                return
+            self._json(405, {"ok": False, "erro": "A frota é somente leitura."}, self._no_store())
             return
         if path != "/api/chatbot/gerar":
             if not self._exigir("POST"):

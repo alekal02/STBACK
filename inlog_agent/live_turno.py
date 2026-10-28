@@ -5,7 +5,7 @@ ABERTO e FINALIZANDO mantêm aberto = 1. ENCERRADO grava aberto = 0.
 
 Nos demais dias o diurno vai de 06:00 a 18:59 e o noturno de 19:00 a 05:59
 do dia seguinte. No sábado o diurno começa às 05:00 e termina às 14:59;
-o noturno começa às 15:00 e termina às 01:59 de domingo. Por isso o noturno
+o noturno começa às 15:00 e termina às 03:00 de domingo. Por isso o noturno
 de sexta fecha às 04:59 de sábado: sem esse corte, 05:00–05:59 cairia nos
 dois turnos. O diurno de domingo continua às 06:00.
 """
@@ -35,7 +35,7 @@ def horarios_do_turno(dia: date, turno: str) -> tuple[str, str]:
         raise ValueError("Turno inválido. Use diurno ou noturno.")
     if dia.weekday() == 5:
         if pedido == "noturno":
-            return "15:00", "01:59"
+            return "15:00", "03:00"
         return "05:00", "14:59"
     if pedido == "noturno" and dia.weekday() == 4:
         return "19:00", "04:59"
@@ -75,7 +75,7 @@ def ciclo_operacional(dia: date) -> tuple[str, str, date]:
     """Do início do diurno ao fim do noturno da mesma data, sem turno nomeado.
 
     Nos demais dias continua 06:00 → 05:59. Na sexta o fim é 04:59, porque o
-    diurno de sábado começa às 05:00. No sábado o ciclo é 05:00 → 01:59.
+    diurno de sábado começa às 05:00. No sábado o ciclo é 05:00 → 03:00.
     """
     inicio, _fim_diurno = horarios_do_turno(dia, "diurno")
     _inicio_noturno, fim = horarios_do_turno(dia, "noturno")
@@ -98,7 +98,7 @@ def _contem(momento: datetime, dia: date, turno: str) -> bool:
 
 
 def classificar_instante(momento: datetime) -> tuple[date, str] | None:
-    """Turno que possui o instante. None no vão de domingo, das 02:00 às 05:59."""
+    """Turno que possui o instante. None no vão de domingo, das 03:01 às 05:59."""
     lido = momento.replace(tzinfo=None)
     dia = lido.date()
     for candidato in (

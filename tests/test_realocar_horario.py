@@ -273,16 +273,16 @@ def test_pulso_fora_de_turno_permanece(monkeypatch, tmp_path):
         SABADO,
         "diurno",
         PLACA,
-        [_pulso("2026-10-24T15:00:00"), _pulso("2026-10-25T03:00:00")],
+        [_pulso("2026-10-24T15:00:00"), _pulso("2026-10-25T04:00:00")],
     )
     marcar_placa(con, SABADO, "diurno", PLACA, veiculo=VEICULO)
     con.commit()
     con.close()
 
     resultado = live_sync.realocar_pontos_pelo_horario(tmp_path, SABADO, aplicar=True)
-    assert [item["ts"] for item in resultado["fora_de_turno"]] == ["2026-10-25T03:00:00"]
+    assert [item["ts"] for item in resultado["fora_de_turno"]] == ["2026-10-25T04:00:00"]
     con = _ler()
-    assert _horas(con, SABADO, "diurno") == ["03:00"]
+    assert _horas(con, SABADO, "diurno") == ["04:00"]
     assert _horas(con, SABADO, "noturno") == ["15:00"]
     con.close()
 

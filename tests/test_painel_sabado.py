@@ -29,7 +29,7 @@ def test_o_painel_nao_guarda_a_janela_antiga_como_unica_regra():
     janela = _trecho(html, "function janelaTurno", "function atualizarRotulosTurno")
     assert html.count("function janelaTurno") == 1
     assert 'hora_inicio: "05:00", hora_fim: "14:59"' in janela
-    assert 'hora_inicio: "15:00", hora_fim: "01:59"' in janela
+    assert 'hora_inicio: "15:00", hora_fim: "03:00"' in janela
     assert 'hora_inicio: "19:00", hora_fim: "04:59"' in janela
     assert 'hora_inicio: "06:00", hora_fim: "18:59"' in janela
     assert 'hora_inicio: "19:00", hora_fim: "05:59"' in janela

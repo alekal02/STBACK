@@ -207,7 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
     uni.add_argument(
         "--turno",
         choices=["diurno", "noturno"],
-        help="Janela operacional do turno. Sábado: diurno 05:00–14:59 e noturno 15:00–01:59",
+        help="Janela operacional do turno. Sábado: diurno 05:00–14:59 e noturno 15:00–03:00",
     )
     sub.add_parser(
         "criar-admin",

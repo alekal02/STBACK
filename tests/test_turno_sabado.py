@@ -1,7 +1,7 @@
 """Limites do sábado e a preservação dos outros dias.
 
 Sábado diurno: 05:00 até antes das 15:00.
-Sábado noturno: 15:00 até antes das 02:00 de domingo.
+Sábado noturno: 15:00 até 03:00 de domingo, inclusive o minuto.
 A data operacional do noturno continua sendo o sábado.
 """
 
@@ -55,7 +55,9 @@ def test_limites_do_sabado():
         (_quando(SABADO, "23:59:00"), SABADO, "noturno"),
         (_quando(DOMINGO, "00:00:00"), SABADO, "noturno"),
         (_quando(DOMINGO, "01:59:00"), SABADO, "noturno"),
-        (_quando(DOMINGO, "01:59:59"), SABADO, "noturno"),
+        (_quando(DOMINGO, "02:00:00"), SABADO, "noturno"),
+        (_quando(DOMINGO, "03:00:00"), SABADO, "noturno"),
+        (_quando(DOMINGO, "03:00:59"), SABADO, "noturno"),
     ]
     for momento, dia, turno in casos:
         assert classificar_instante(momento) == (dia, turno)
@@ -64,63 +66,63 @@ def test_limites_do_sabado():
         assert situacao_pelo_relogio(dia, turno, momento) == "ABERTO"
 
 
-def test_consulta_depois_da_meia_noite_corta_as_02():
+def test_consulta_depois_da_meia_noite_corta_as_03():
     assert fim_da_consulta(SABADO, "noturno", _quando(DOMINGO, "00:00:00")) == _quando(DOMINGO, "00:00:00")
-    assert fim_da_consulta(SABADO, "noturno", _quando(DOMINGO, "01:59:00")) == _quando(DOMINGO, "01:59:00")
-    assert fim_da_consulta(SABADO, "noturno", _quando(DOMINGO, "02:00:00")) == _quando(DOMINGO, "01:59:59")
-    assert ponto_pertence(_iso(DOMINGO, "01:59:59"), SABADO, "noturno")
-    assert ponto_pertence(_iso(DOMINGO, "02:00:00"), SABADO, "noturno") is False
+    assert fim_da_consulta(SABADO, "noturno", _quando(DOMINGO, "03:00:00")) == _quando(DOMINGO, "03:00:00")
+    assert fim_da_consulta(SABADO, "noturno", _quando(DOMINGO, "03:01:00")) == _quando(DOMINGO, "03:00:59")
+    assert ponto_pertence(_iso(DOMINGO, "03:00:59"), SABADO, "noturno")
+    assert ponto_pertence(_iso(DOMINGO, "03:01:00"), SABADO, "noturno") is False
 
 
 def test_ciclo_do_dia_acompanha_o_sabado_e_preserva_os_outros():
-    assert ciclo_operacional(SABADO) == ("05:00", "01:59", DOMINGO)
+    assert ciclo_operacional(SABADO) == ("05:00", "03:00", DOMINGO)
     assert ciclo_operacional(SEXTA) == ("06:00", "04:59", SABADO)
     assert ciclo_operacional(QUARTA) == ("06:00", "05:59", QUINTA)
     assert ciclo_operacional(DOMINGO) == ("06:00", "05:59", SEGUNDA)
 
 
-def test_domingo_as_02_nao_pertence_ao_noturno_de_sabado():
-    momento = _quando(DOMINGO, "02:00:00")
+def test_domingo_depois_das_03_nao_pertence_ao_noturno_de_sabado():
+    momento = _quando(DOMINGO, "03:01:00")
     assert classificar_instante(momento) is None
-    assert ponto_pertence(_iso(DOMINGO, "02:00:00"), SABADO, "noturno") is False
-    assert ponto_pertence(_iso(DOMINGO, "02:00:00"), DOMINGO, "diurno") is False
+    assert ponto_pertence(_iso(DOMINGO, "03:01:00"), SABADO, "noturno") is False
+    assert ponto_pertence(_iso(DOMINGO, "03:01:00"), DOMINGO, "diurno") is False
     assert situacao_pelo_relogio(SABADO, "noturno", momento) != "ABERTO"
     assert turno_operacional(momento) == (DOMINGO, "diurno")
     assert situacao_pelo_relogio(DOMINGO, "diurno", momento) == ""
 
 
-def test_noturno_de_sabado_finaliza_e_encerra_depois_das_02():
-    assert situacao_pelo_relogio(SABADO, "noturno", _quando(DOMINGO, "02:00:00")) == "FINALIZANDO"
-    assert consolidar_ate(SABADO, "noturno") == _quando(DOMINGO, "02:20:00")
-    assert situacao_pelo_relogio(SABADO, "noturno", _quando(DOMINGO, "02:20:00")) == "ENCERRADO"
-    fila = candidatos(_quando(DOMINGO, "02:00:00"))
+def test_noturno_de_sabado_finaliza_e_encerra_depois_das_03():
+    assert situacao_pelo_relogio(SABADO, "noturno", _quando(DOMINGO, "03:01:00")) == "FINALIZANDO"
+    assert consolidar_ate(SABADO, "noturno") == _quando(DOMINGO, "03:21:00")
+    assert situacao_pelo_relogio(SABADO, "noturno", _quando(DOMINGO, "03:21:00")) == "ENCERRADO"
+    fila = candidatos(_quando(DOMINGO, "03:01:00"))
     assert ("ABERTO", SABADO, "noturno") not in fila
     assert ("ABERTO", DOMINGO, "diurno") not in fila
     assert ("FINALIZANDO", SABADO, "noturno") in fila
-    assert candidatos(_quando(DOMINGO, "03:00:00")) == []
+    assert candidatos(_quando(DOMINGO, "04:00:00")) == []
 
 
 def test_ponto_depois_da_meia_noite_fica_no_sabado():
     assert classificar_instante(_quando(DOMINGO, "00:30:00")) == (SABADO, "noturno")
     assert ponto_pertence("25/10/2026 00:30:00", SABADO, "noturno")
     assert ponto_pertence("25/10/2026 00:30", DOMINGO, "diurno") is False
-    assert ponto_pertence("25/10/2026 01:59:59", SABADO, "noturno")
-    assert ponto_pertence("25/10/2026 02:00:00", SABADO, "noturno") is False
+    assert ponto_pertence("25/10/2026 03:00:59", SABADO, "noturno")
+    assert ponto_pertence("25/10/2026 03:01:00", SABADO, "noturno") is False
 
 
 def test_janelas_do_sabado_e_o_corte_da_sexta():
     assert horarios_do_turno(SABADO, "diurno") == ("05:00", "14:59")
-    assert horarios_do_turno(SABADO, "noturno") == ("15:00", "01:59")
+    assert horarios_do_turno(SABADO, "noturno") == ("15:00", "03:00")
     assert inicio_operacional(SABADO, "diurno") == _quando(SABADO, "05:00:00")
     assert fim_operacional(SABADO, "diurno") == _quando(SABADO, "14:59:59")
     assert inicio_operacional(SABADO, "noturno") == _quando(SABADO, "15:00:00")
-    assert fim_operacional(SABADO, "noturno") == _quando(DOMINGO, "01:59:59")
+    assert fim_operacional(SABADO, "noturno") == _quando(DOMINGO, "03:00:59")
     assert horarios_do_turno(SEXTA, "noturno") == ("19:00", "04:59")
     assert fim_operacional(SEXTA, "noturno") == _quando(SABADO, "04:59:59")
     assert janela_ainda_aberta(SABADO, "diurno", _quando(SABADO, "14:59:59"))
     assert janela_ainda_aberta(SABADO, "diurno", _quando(SABADO, "15:00:00")) is False
-    assert janela_ainda_aberta(SABADO, "noturno", _quando(DOMINGO, "01:59:59"))
-    assert janela_ainda_aberta(SABADO, "noturno", _quando(DOMINGO, "02:00:00")) is False
+    assert janela_ainda_aberta(SABADO, "noturno", _quando(DOMINGO, "03:00:59"))
+    assert janela_ainda_aberta(SABADO, "noturno", _quando(DOMINGO, "03:01:00")) is False
 
 
 def test_historico_gps_cobertura_e_relatorio_usam_a_mesma_janela():
@@ -151,8 +153,9 @@ def test_historico_gps_cobertura_e_relatorio_usam_a_mesma_janela():
             {"timestamp": _iso(SABADO, "15:00:00")},
             {"timestamp": _iso(SABADO, "23:59:00")},
             {"timestamp": _iso(DOMINGO, "00:00:00")},
-            {"timestamp": _iso(DOMINGO, "01:59:00")},
             {"timestamp": _iso(DOMINGO, "02:00:00")},
+            {"timestamp": _iso(DOMINGO, "03:00:00")},
+            {"timestamp": _iso(DOMINGO, "03:01:00")},
         ],
         SABADO,
         *periodo_coleta(SABADO, "noturno")[:2],
@@ -162,12 +165,13 @@ def test_historico_gps_cobertura_e_relatorio_usam_a_mesma_janela():
         _iso(SABADO, "15:00:00"),
         _iso(SABADO, "23:59:00"),
         _iso(DOMINGO, "00:00:00"),
-        _iso(DOMINGO, "01:59:00"),
+        _iso(DOMINGO, "02:00:00"),
+        _iso(DOMINGO, "03:00:00"),
     ]
     assert "05:00" in _periodo_padrao(SABADO, "diurno")
     assert "14:59" in _periodo_padrao(SABADO, "diurno")
     assert "15:00" in _periodo_padrao(SABADO, "noturno")
-    assert "01:59" in _periodo_padrao(SABADO, "noturno")
+    assert "03:00" in _periodo_padrao(SABADO, "noturno")
 
 
 def test_demais_dias_permanecem_iguais():

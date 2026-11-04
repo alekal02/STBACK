@@ -775,6 +775,126 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
     return pacote
 
 
+def dificil_acesso_v2(data: str | None, turno: str | None) -> dict[str, Any]:
+    """Endpoint aditivo V2. Falha no cálculo novo → pacote vazio, sem 500."""
+    from .dificil_acesso import (
+        BASCULANTES,
+        anotar_cobertura,
+        anotar_programacao,
+        marcar_atividade,
+    )
+    from .dificil_acesso_v2 import (
+        montar_area_v2,
+        montar_veiculo_v2,
+        pacote_vazio,
+    )
+    from .mapa_oficial import malha_areas_dificil
+    from .pdf_mapa import cor_da_placa
+
+    dia, pedido = _dia_turno(data, turno)
+    vazio = pacote_vazio(dia.isoformat(), pedido)
+    try:
+        bruto, instavel = _ler_pontos_basculante(dia, pedido)
+    except Exception as exc:
+        print(f"GPS difícil acesso v2 indisponível: {exc}", flush=True)
+        vazio["falha"] = True
+        vazio["gps_indisponivel"] = True
+        return vazio
+
+    inicio = time.perf_counter()
+    try:
+        areas = areas_dificil()
+        areas_marcadas = anotar_programacao(areas, dia, pedido)
+        anotar_cobertura(areas_marcadas, bruto)
+        marcar_atividade(areas_marcadas, bruto)
+        malha = malha_areas_dificil()
+        areas_v2: list[dict[str, Any]] = []
+        for area in areas_marcadas:
+            try:
+                info = malha.get(str(area.get("id") or "")) or {}
+                areas_v2.append(montar_area_v2(area, bruto, BASCULANTES, info))
+            except Exception as exc:
+                print(f"Área V2 {area.get('nome')}: {exc}", flush=True)
+                copia = dict(area)
+                copia["acessos"] = []
+                copia["passagens"] = []
+                copia["status"] = "Não iniciada"
+                copia["grupo"] = "nao"
+                areas_v2.append(copia)
+
+        veiculos = []
+        for item in BASCULANTES:
+            try:
+                veiculos.append(montar_veiculo_v2(item, bruto.get(item["codigo"]) or [], areas_v2))
+            except Exception as exc:
+                print(f"Veículo V2 {item.get('placa')}: {exc}", flush=True)
+                veiculos.append(
+                    {
+                        "codigo": item["codigo"],
+                        "placa": item["placa"],
+                        "cor": cor_da_placa(item["placa"]),
+                        "pulsos": 0,
+                        "trechos": [],
+                        "marcadores": [],
+                        "passagens": [],
+                    }
+                )
+
+        placas = []
+        vistos = set()
+        for area in areas_v2:
+            for pas in area.get("passagens") or []:
+                placa = str(pas.get("placa") or "")
+                if not placa or placa in vistos:
+                    continue
+                vistos.add(placa)
+                placas.append(
+                    {
+                        "placa": placa,
+                        "codigo": pas.get("veiculo") or "",
+                        "cor": pas.get("cor") or cor_da_placa(placa),
+                    }
+                )
+        for item in BASCULANTES:
+            if item["placa"] not in vistos and (bruto.get(item["codigo"]) or []):
+                placas.append(
+                    {
+                        "placa": item["placa"],
+                        "codigo": item["codigo"],
+                        "cor": cor_da_placa(item["placa"]),
+                    }
+                )
+
+        n_passagens = sum(len(a.get("passagens") or []) for a in areas_v2)
+        n_acessos = sum(len(a.get("acessos") or []) for a in areas_v2)
+        pacote = {
+            "versao": 2,
+            "data": dia.isoformat(),
+            "turno": pedido,
+            "fonte": "live_sync",
+            "camada": "Áreas de difícil acesso v2",
+            "areas": areas_v2,
+            "veiculos": veiculos,
+            "placas": placas,
+            "resumo": {
+                "areas": len(areas_v2),
+                "passagens": n_passagens,
+                "acessos": n_acessos,
+                "placas": len(placas),
+                "pulsos": sum(len(bruto.get(i["codigo"]) or []) for i in BASCULANTES),
+                "ms": round((time.perf_counter() - inicio) * 1000, 1),
+            },
+        }
+        if instavel and not any(bruto.values()):
+            pacote["falha"] = True
+            pacote["gps_indisponivel"] = True
+        return pacote
+    except Exception as exc:
+        print(f"difícil acesso v2 falhou: {exc}", flush=True)
+        vazio["falha"] = True
+        return vazio
+
+
 def _placas_basculante(con, data: str, turno: str) -> dict[str, str]:
     """Grafias já usadas no banco. A consulta de ponto fica na chave, sem varrer o turno."""
     from .dificil_acesso import BASCULANTES, codigo_da_frota

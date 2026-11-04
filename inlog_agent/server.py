@@ -1284,7 +1284,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def _mapa_vivo(self, path: str, qs: dict[str, list[str]]) -> None:
-        from .live_mapa import atualizacoes, detalhe_rota, dificil_acesso, geometria_bytes, trilhas
+        from .live_mapa import (
+            atualizacoes,
+            detalhe_rota,
+            dificil_acesso,
+            dificil_acesso_v2,
+            geometria_bytes,
+            trilhas,
+        )
 
         data = (qs.get("data") or [None])[0]
         turno = (qs.get("turno") or ["diurno"])[0]
@@ -1314,6 +1321,10 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     sem_cache,
                 )
+                return
+            # V2 antes do V1: endswith("/dificil-acesso") também casa com ".../v2".
+            if path.endswith("/dificil-acesso/v2") or path.endswith("/areas-dificil-acesso/v2"):
+                self._json(200, dificil_acesso_v2(data, turno), sem_cache)
                 return
             if path.endswith("/dificil-acesso"):
                 self._json(200, dificil_acesso(data, turno), sem_cache)
@@ -1900,6 +1911,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/live-report/track-updates",
             "/api/live-report/route-detail",
             "/api/live-report/dificil-acesso",
+            "/api/live-report/dificil-acesso/v2",
+            "/api/live-report/areas-dificil-acesso/v2",
         }:
             self._mapa_vivo(path, parse_qs(parsed.query))
             return

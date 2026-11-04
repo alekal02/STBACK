@@ -294,7 +294,7 @@ def ler_painel(
     dia = parse_data(data) or date.today()
     from .live_db import percentuais_outro_turno
     from .live_turno import resumo_guardado
-    from .unificado import ajustar_rotas_turno_flexivel
+    from .unificado import ajustar_rotas_turno_flexivel, filtrar_rotas_frequencia_atual
 
     try:
         con = conectar()
@@ -320,14 +320,18 @@ def ler_painel(
             estado["aviso"] = "Atualizando dados..."
         return estado
     cab = view["turno"]
-    rotas = ajustar_rotas_turno_flexivel(view["rotas"], pedido, pct_outro)
+    rotas = filtrar_rotas_frequencia_atual(view["rotas"], dia, pedido)
+    rotas = ajustar_rotas_turno_flexivel(rotas, pedido, pct_outro)
     situacao = str(cab["situacao"] or "") if "situacao" in cab.keys() else ""
     if not situacao:
         situacao = "ENCERRADO" if not cab["aberto"] else "ABERTO"
     resumo = _resumo(rotas)
     guardado = resumo_guardado(cab["resumo_json"]) if situacao == "ENCERRADO" and "resumo_json" in cab.keys() else None
+    # Contagens sempre pela grade atual do GPKG; do snapshot só metadados do encerramento.
     if guardado:
-        resumo = guardado
+        for chave in ("primeiro_gps", "ultimo_gps", "aberto_em", "fechado_em", "duracao_operacional"):
+            if guardado.get(chave) not in (None, ""):
+                resumo[chave] = guardado[chave]
     atualizado = str(cab["atualizado_em"] or cab["ultima_sincronizacao"] or "")
     falha = str(cab["falha"] or "")
     aviso = ""

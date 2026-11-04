@@ -1,5 +1,6 @@
 """86BN opera só no domingo, em diurno ou noturno (varia por semana)."""
 
+import json
 import os
 import tempfile
 from datetime import date, datetime
@@ -12,17 +13,21 @@ from inlog_agent.live_db import conectar, gravar_rotas, gravar_turno
 from inlog_agent.live_report import _exibir_classificacao, _resumo
 from inlog_agent.live_sync import ler_painel, turno_operacional
 from inlog_agent.live_turno import classificar_instante
-from inlog_agent.mapa_oficial import carregar_setores
+from inlog_agent.mapa_oficial import _freq_do_dia, carregar_setores
 from inlog_agent.unificado import (
     _casa_turno,
+    _na_programacao,
     _turno_flexivel,
     ajustar_rotas_turno_flexivel,
+    filtrar_rotas_frequencia_atual,
     obter_rotas_previstas,
 )
 
 DOMINGO = date(2026, 10, 25)
 SEGUNDA = date(2026, 10, 19)
 TERCA = date(2026, 10, 20)
+TERCA_PROD = date(2026, 11, 3)
+DOMINGO_PROD = date(2026, 11, 8)
 SABADO = date(2026, 10, 24)
 OUTRAS_BN = [f"{n}BN" for n in range(76, 86)]
 FREQ = "DOM - DIURNO/NOTURNO"
@@ -64,6 +69,16 @@ def test_frequencia_gpkg_aceita_domingo_qualquer_turno():
     assert not _turno_flexivel("DOM - NOTURNO")
     assert not _casa_turno("DOM - NOTURNO", "diurno")
     assert _casa_turno("DOM - NOTURNO", "noturno")
+    # DIURNO/NOTURNO não é diário: o dia da semana continua valendo.
+    assert _freq_do_dia(FREQ, DOMINGO)
+    assert not _freq_do_dia(FREQ, TERCA)
+    assert not _freq_do_dia(FREQ, TERCA_PROD)
+    assert _na_programacao(FREQ, DOMINGO, "diurno")
+    assert _na_programacao(FREQ, DOMINGO, "noturno")
+    assert not _na_programacao(FREQ, TERCA_PROD, "diurno")
+    assert not _na_programacao(FREQ, TERCA_PROD, "noturno")
+    assert not _freq_do_dia("DIURNO/NOTURNO", TERCA_PROD)
+    assert not _na_programacao("DIURNO/NOTURNO", TERCA_PROD, "noturno")
 
 
 def test_86bn_aparece_nos_dois_turnos_do_domingo():
@@ -181,3 +196,116 @@ def test_painel_sqlite_tres_cenarios():
     assert "86BN" not in {r["codigo"] for r in painel_d["rotas"]}
     assert painel_d["resumo"]["nao_iniciadas"] == 0
     assert painel_n["resumo"]["concluidas"] == 1
+
+
+def _seed_turno(con, dia: date, turno: str, rotas, *, situacao="ABERTO", resumo_json=""):
+    aberto = 0 if situacao == "ENCERRADO" else 1
+    fim = dia.isoformat() if turno == "diurno" else date.fromordinal(dia.toordinal() + 1).isoformat()
+    gravar_turno(
+        con,
+        {
+            "data": dia.isoformat(),
+            "turno": turno,
+            "aberto": aberto,
+            "periodo": f"{dia.isoformat()} {turno}",
+            "hora_inicio": "06:00" if turno == "diurno" else "19:00",
+            "hora_fim": "18:59" if turno == "diurno" else "05:59",
+            "data_fim": fim,
+            "atualizado_em": f"{dia.isoformat()}T12:00:00",
+        },
+    )
+    con.execute(
+        "UPDATE turno SET situacao = ?, aberto = ?, resumo_json = ? WHERE data = ? AND turno = ?",
+        (situacao, aberto, resumo_json, dia.isoformat(), turno),
+    )
+    gravar_rotas(con, dia.isoformat(), turno, rotas)
+
+
+def _rotas_seed(previstas):
+    return [
+        {
+            "codigo": r["codigo"],
+            "rota": f"{r['codigo']} - X",
+            "frequencia": r.get("frequencia") or "",
+            "veiculo": "",
+            "placa": "",
+            "status": "Não iniciada",
+            "grupo": "nao",
+            "percentual": 0,
+            "inicio": "",
+            "ultimo_gps": "",
+            "tempo_em_rota": "",
+            "km_coleta": "",
+            "km_oficial": "",
+            "na_grade": True,
+        }
+        for r in previstas
+    ]
+
+
+def test_snapshot_terca_remove_86bn_mesmo_com_estado_antigo():
+    """Estado salvo antes da mudança de frequência: 86BN some na terça e volta no domingo."""
+    previstas_ter = obter_rotas_previstas(TERCA_PROD, "noturno")
+    assert all(r["codigo"] != "86BN" for r in previstas_ter)
+    assert any(r["codigo"] == "85BN" for r in previstas_ter)
+
+    stale = _rota(codigo="86BN", pct=0, turno_freq="TER/QUI/SAB - NOTURNO", na_grade=True)
+    con = conectar()
+    for turno in ("diurno", "noturno"):
+        base = _rotas_seed(obter_rotas_previstas(TERCA_PROD, turno))
+        _seed_turno(
+            con,
+            TERCA_PROD,
+            turno,
+            base + [stale],
+            situacao="ENCERRADO",
+            resumo_json=json.dumps(
+                {
+                    "previstas": len(base) + 1,
+                    "concluidas": 0,
+                    "parciais": 0,
+                    "nao_iniciadas": len(base) + 1,
+                    "apoios": 0,
+                    "percentual_geral": 0,
+                    "fechado_em": f"{TERCA_PROD.isoformat()}T06:00:00",
+                }
+            ),
+        )
+    con.commit()
+    con.close()
+
+    for turno in ("diurno", "noturno"):
+        painel = ler_painel(SAIDA, TERCA_PROD.isoformat(), turno)
+        codigos = {r["codigo"] for r in painel["rotas"]}
+        assert "86BN" not in codigos
+        esperadas = {r["codigo"] for r in obter_rotas_previstas(TERCA_PROD, turno)}
+        assert codigos == esperadas
+        assert painel["resumo"]["previstas"] == len(esperadas)
+        assert painel["resumo"]["nao_iniciadas"] == len(esperadas)
+        assert painel["resumo"].get("fechado_em") == f"{TERCA_PROD.isoformat()}T06:00:00"
+
+    # Domingo seguinte: 86BN volta nos dois turnos.
+    con = conectar()
+    for turno in ("diurno", "noturno"):
+        base = _rotas_seed(obter_rotas_previstas(DOMINGO_PROD, turno))
+        assert any(r["codigo"] == "86BN" for r in base)
+        _seed_turno(con, DOMINGO_PROD, turno, base)
+    con.commit()
+    con.close()
+    for turno in ("diurno", "noturno"):
+        painel = ler_painel(SAIDA, DOMINGO_PROD.isoformat(), turno)
+        assert "86BN" in {r["codigo"] for r in painel["rotas"]}
+        assert painel["resumo"]["previstas"] == len(obter_rotas_previstas(DOMINGO_PROD, turno))
+
+
+def test_filtrar_rotas_frequencia_atual_puro():
+    terca = filtrar_rotas_frequencia_atual(
+        [_rota(pct=0), _rota(codigo="85BN", pct=0, turno_freq="TER/QUI/SAB - NOTURNO")],
+        TERCA_PROD,
+        "noturno",
+    )
+    assert [r["codigo"] for r in terca] == ["85BN"]
+    assert terca[0]["frequencia"]  # veio do GPKG
+    domingo = filtrar_rotas_frequencia_atual([_rota(pct=0)], DOMINGO_PROD, "noturno")
+    assert [r["codigo"] for r in domingo] == ["86BN"]
+    assert domingo[0]["frequencia"] == FREQ

@@ -80,7 +80,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     from .live_report import _exibir_classificacao, _hora_curta, _periodo_padrao, _resumo
     from .live_turno import resumo_guardado
     from .mapa_oficial import _freq_do_dia
-    from .unificado import _casa_turno, ajustar_rotas_turno_flexivel
+    from .unificado import _casa_turno, ajustar_rotas_turno_flexivel, filtrar_rotas_frequencia_atual
 
     dia, pedido = _validar(data, turno)
     con = _leitura()
@@ -102,7 +102,8 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
         pct_outro = percentuais_outro_turno(con, dia.isoformat(), pedido)
     finally:
         con.close()
-    rotas = ajustar_rotas_turno_flexivel([_rota_lida(row) for row in linhas], pedido, pct_outro)
+    rotas = filtrar_rotas_frequencia_atual([_rota_lida(row) for row in linhas], dia, pedido)
+    rotas = ajustar_rotas_turno_flexivel(rotas, pedido, pct_outro)
     rotas.sort(key=_ordem_codigo)
     if not rotas:
         raise ValueError("Ainda não há estado salvo deste turno.")
@@ -148,7 +149,9 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     resumo = _resumo(rotas)
     guardado = resumo_guardado(cab["resumo_json"]) if situacao == "ENCERRADO" and "resumo_json" in cab.keys() else None
     if guardado:
-        resumo = guardado
+        for chave in ("primeiro_gps", "ultimo_gps", "aberto_em", "fechado_em", "duracao_operacional"):
+            if guardado.get(chave) not in (None, ""):
+                resumo[chave] = guardado[chave]
     atualizado = str(cab["atualizado_em"] or cab["ultima_sincronizacao"] or "")
     estado = _exibir_classificacao({
         "data": dia.isoformat(),

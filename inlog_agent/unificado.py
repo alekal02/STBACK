@@ -1058,6 +1058,47 @@ def _pct_rota(rota: dict[str, Any]) -> float:
         return 0.0
 
 
+def filtrar_rotas_frequencia_atual(
+    rotas: list[dict[str, Any]],
+    dia: date,
+    turno: str,
+) -> list[dict[str, Any]]:
+    """Ao carregar estado salvo: some rota cuja FREQUÊNCIA atual no GPKG não cobre o dia/turno.
+
+    Códigos fora do GPKG (observados ad hoc) e apoios continuam visíveis.
+    A frequência gravada no SQLite é atualizada pela do GPKG.
+    """
+    pedido = (turno or "").strip().lower()
+    freq_por_codigo: dict[str, str] = {}
+    for setor in carregar_setores(None):
+        codigo = str(setor.get("codigo") or "").upper()
+        if codigo:
+            freq_por_codigo[codigo] = str(setor.get("frequencia") or "")
+    programadas = {
+        str(rota.get("codigo") or "").upper()
+        for rota in obter_rotas_previstas(dia, pedido)
+        if str(rota.get("codigo") or "").strip()
+    }
+    saida: list[dict[str, Any]] = []
+    for rota in rotas:
+        if not isinstance(rota, dict):
+            saida.append(rota)
+            continue
+        codigo = str(rota.get("codigo") or "").upper()
+        if codigo in freq_por_codigo and codigo not in programadas:
+            if str(rota.get("grupo") or "") == "apoio":
+                item = dict(rota)
+                item["frequencia"] = freq_por_codigo[codigo]
+                item["na_grade"] = False
+                saida.append(item)
+            continue
+        item = dict(rota)
+        if codigo in freq_por_codigo:
+            item["frequencia"] = freq_por_codigo[codigo]
+        saida.append(item)
+    return saida
+
+
 def ajustar_rotas_turno_flexivel(
     rotas: list[dict[str, Any]],
     turno: str,

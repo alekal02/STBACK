@@ -1033,9 +1033,17 @@ def _codigos_vizinhos(a: str, b: str) -> bool:
     return False
 
 
+def _turno_flexivel(freq: str) -> bool:
+    """FREQUÊNCIA com DIURNO e NOTURNO (ex.: DOM - DIURNO/NOTURNO): qualquer turno do dia."""
+    blob = (freq or "").upper()
+    return "DIURNO" in blob and "NOTURNO" in blob
+
+
 def _casa_turno(freq: str, turno: str | None) -> bool:
     pedido = (turno or "").strip().lower()
     if pedido not in {"diurno", "noturno"}:
+        return True
+    if _turno_flexivel(freq):
         return True
     noturno = "NOTURNO" in (freq or "").upper()
     if pedido == "noturno":
@@ -1043,11 +1051,56 @@ def _casa_turno(freq: str, turno: str | None) -> bool:
     return not noturno
 
 
+def _pct_rota(rota: dict[str, Any]) -> float:
+    try:
+        return float(rota.get("percentual") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def ajustar_rotas_turno_flexivel(
+    rotas: list[dict[str, Any]],
+    turno: str,
+    pct_outro: dict[str, float],
+) -> list[dict[str, Any]]:
+    """DIURNO/NOTURNO: conta só onde rodou; sem execução, 'Não iniciada' no turno atual; nunca em dobro."""
+    pedido = (turno or "").strip().lower()
+    saida: list[dict[str, Any]] = []
+    for rota in rotas:
+        if not isinstance(rota, dict):
+            saida.append(rota)
+            continue
+        if not _turno_flexivel(str(rota.get("frequencia") or "")):
+            saida.append(rota)
+            continue
+        codigo = str(rota.get("codigo") or "").upper()
+        eu = _pct_rota(rota)
+        outro = float(pct_outro.get(codigo) or 0)
+        if eu <= 0 and outro > 0:
+            # Feita no outro turno: some da lista (não vira "Não iniciada" aqui).
+            continue
+        if eu > 0 and outro > eu:
+            item = dict(rota)
+            item["na_grade"] = False
+            saida.append(item)
+            continue
+        if eu > 0 and outro == eu and pedido == "noturno":
+            # Empate: a contagem fica no diurno.
+            item = dict(rota)
+            item["na_grade"] = False
+            saida.append(item)
+            continue
+        saida.append(rota)
+    return saida
+
+
 def _mesmo_ciclo(a: dict[str, Any], b: dict[str, Any]) -> bool:
     fa = str(a.get("frequencia") or "").upper()
     fb = str(b.get("frequencia") or "").upper()
     if fa and fb and fa == fb:
         return True
+    if _turno_flexivel(fa) or _turno_flexivel(fb):
+        return _turno_flexivel(fa) and _turno_flexivel(fb)
     def turno(freq: str) -> str:
         if "NOTURNO" in freq:
             return "N"

@@ -727,6 +727,19 @@ def ler_pontos_placa(con: sqlite3.Connection, data: str, turno: str, placa: str)
     ]
 
 
+def percentuais_outro_turno(con: sqlite3.Connection, data: str, turno: str) -> dict[str, float]:
+    """Cobertura do turno irmão, para rotas DIURNO/NOTURNO não contarem em dobro."""
+    pedido = (turno or "").strip().lower()
+    outro = "noturno" if pedido == "diurno" else "diurno"
+    return {
+        str(row[0] or "").upper(): float(row[1] or 0)
+        for row in con.execute(
+            "SELECT codigo, percentual FROM rota WHERE data = ? AND turno = ?",
+            (data, outro),
+        )
+    }
+
+
 def ler_view(
     con: sqlite3.Connection,
     data: str,

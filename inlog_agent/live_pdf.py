@@ -75,11 +75,12 @@ def _validar(data: str | None, turno: str | None) -> tuple[date, str]:
 
 def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     """Uma transação de leitura. O desenho usa só este dicionário."""
+    from .live_db import percentuais_outro_turno
     from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos
     from .live_report import _exibir_classificacao, _hora_curta, _periodo_padrao, _resumo
     from .live_turno import resumo_guardado
     from .mapa_oficial import _freq_do_dia
-    from .unificado import _casa_turno
+    from .unificado import _casa_turno, ajustar_rotas_turno_flexivel
 
     dia, pedido = _validar(data, turno)
     con = _leitura()
@@ -98,9 +99,10 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
             "SELECT placa, ts, lat, lon FROM ponto WHERE data = ? AND turno = ? ORDER BY placa, ts",
             (dia.isoformat(), pedido),
         ).fetchall()
+        pct_outro = percentuais_outro_turno(con, dia.isoformat(), pedido)
     finally:
         con.close()
-    rotas = [_rota_lida(row) for row in linhas]
+    rotas = ajustar_rotas_turno_flexivel([_rota_lida(row) for row in linhas], pedido, pct_outro)
     rotas.sort(key=_ordem_codigo)
     if not rotas:
         raise ValueError("Ainda não há estado salvo deste turno.")

@@ -292,6 +292,10 @@ def ler_painel(
     from .config import parse_data
 
     dia = parse_data(data) or date.today()
+    from .live_db import percentuais_outro_turno
+    from .live_turno import resumo_guardado
+    from .unificado import ajustar_rotas_turno_flexivel
+
     try:
         con = conectar()
     except RuntimeError as exc:
@@ -300,6 +304,7 @@ def ler_painel(
     try:
         _importar_json_se_vazio(con, output_dir, dia, pedido)
         view = ler_view(con, dia.isoformat(), pedido)
+        pct_outro = percentuais_outro_turno(con, dia.isoformat(), pedido) if view else {}
         con.commit()
     finally:
         con.close()
@@ -315,12 +320,10 @@ def ler_painel(
             estado["aviso"] = "Atualizando dados..."
         return estado
     cab = view["turno"]
-    rotas = view["rotas"]
+    rotas = ajustar_rotas_turno_flexivel(view["rotas"], pedido, pct_outro)
     situacao = str(cab["situacao"] or "") if "situacao" in cab.keys() else ""
     if not situacao:
         situacao = "ENCERRADO" if not cab["aberto"] else "ABERTO"
-    from .live_turno import resumo_guardado
-
     resumo = _resumo(rotas)
     guardado = resumo_guardado(cab["resumo_json"]) if situacao == "ENCERRADO" and "resumo_json" in cab.keys() else None
     if guardado:
@@ -486,6 +489,14 @@ def reconciliar_rotas_previstas(con, dia: date, turno: str) -> dict[str, Any]:
     extras = [codigo for codigo in existentes if codigo not in codigos]
     t0 = time.perf_counter()
     inseridas = garantir_rotas_previstas(con, dia.isoformat(), turno, programadas)
+    for rota in programadas:
+        codigo = str(rota.get("codigo") or "").upper()
+        if not codigo:
+            continue
+        con.execute(
+            "UPDATE rota SET frequencia = ? WHERE data = ? AND turno = ? AND codigo = ?",
+            (str(rota.get("frequencia") or ""), dia.isoformat(), turno, codigo),
+        )
     gravacao_s = time.perf_counter() - t0
     extra = (" extras=" + ",".join(extras)) if extras else ""
     print(

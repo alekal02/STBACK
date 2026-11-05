@@ -250,6 +250,168 @@ def test_carimbar_origem_nao_sobrescreve_e_filtro_usa_virada():
     )
     assert {rota["codigo"] for rota in filtradas} == {"A", "B"}
 
+    # Origem carimbada de turno mais antigo não entra, mesmo parcial/aberta.
+    filtradas_origem = filtrar_rotas_virada(
+        [
+            {
+                "codigo": "OK",
+                "grupo": "parcial",
+                "inicio": "2026-10-23T22:00:00",
+                "percentual": 40,
+                "data_turno": "2026-10-23",
+                "turno_origem": "noturno",
+            },
+            {
+                "codigo": "VELHA",
+                "grupo": "parcial",
+                "inicio": "2026-10-22T22:00:00",
+                "percentual": 55,
+                "data_turno": "2026-10-22",
+                "turno_origem": "noturno",
+            },
+            {
+                "codigo": "OUTRO",
+                "grupo": "parcial",
+                "inicio": "2026-10-23T10:00:00",
+                "percentual": 30,
+                "data_turno": "2026-10-23",
+                "turno_origem": "diurno",
+            },
+        ],
+        virada,
+        ant_dia=date(2026, 10, 23),
+        ant_turno="noturno",
+    )
+    assert {rota["codigo"] for rota in filtradas_origem} == {"OK"}
+
+    # Encerrada com concluido_em >= virada permanece; antes da virada só no histórico.
+    filtradas_encerrada = filtrar_rotas_virada(
+        [
+            {
+                "codigo": "ENC",
+                "grupo": "parcial",
+                "inicio": "2026-10-23T22:00:00",
+                "percentual": 72,
+                "concluido_em": "2026-10-24T07:10:00",
+                "data_turno": "2026-10-23",
+                "turno_origem": "noturno",
+            },
+            {
+                "codigo": "CONG",
+                "grupo": "parcial",
+                "inicio": "2026-10-23T20:00:00",
+                "percentual": 50,
+                "concluido_em": "2026-10-23T23:40:00",
+                "data_turno": "2026-10-23",
+                "turno_origem": "noturno",
+            },
+            {
+                "codigo": "FEITA",
+                "grupo": "concluida",
+                "inicio": "2026-10-23T20:00:00",
+                "percentual": 100,
+                "concluido_em": "2026-10-23T23:40:00",
+                "data_turno": "2026-10-23",
+                "turno_origem": "noturno",
+            },
+        ],
+        virada,
+        ant_dia=date(2026, 10, 23),
+        ant_turno="noturno",
+    )
+    assert {rota["codigo"] for rota in filtradas_encerrada} == {"ENC"}
+
+
+def test_encerrar_rota_virada_regras_e_placas():
+    from datetime import date
+
+    from inlog_agent.live_virada import (
+        corte_gps_turno_origem,
+        encerrar_rota_virada,
+        filtrar_pontos_virada,
+        inicio_placa_turno_atual,
+        placas_da_rota,
+    )
+
+    rota = {
+        "codigo": "71AN",
+        "grupo": "parcial",
+        "percentual": 80.1,
+        "placa": "SDJ-6C47",
+        "placa_principal": "SDJ-6C47",
+        "placas_apoio": ["SDI-4I97"],
+        "ultimo_gps": "2026-11-05T05:03:00",
+    }
+    assert placas_da_rota(rota) == {"SDJ6C47", "SDI4I97"}
+    assert "SEMAPOIOIDENTIFICADO" not in placas_da_rota(
+        {"placa": "SDJ-6C47", "apoio": "Sem apoio identificado", "placas_apoio": []}
+    )
+    virada = datetime(2026, 11, 5, 6, 0, 0)
+    assert corte_gps_turno_origem(date(2026, 11, 4), "noturno") == datetime(2026, 11, 5, 12, 0, 0)
+    assert corte_gps_turno_origem(date(2026, 11, 5), "diurno") == datetime(2026, 11, 5, 23, 0, 0)
+    # Corte fixo do noturno (12:00): congela % e concluido_em = último pulso até o corte.
+    fechada = encerrar_rota_virada(
+        rota,
+        virada=virada,
+        agora=datetime(2026, 11, 5, 12, 5, 0),
+        ultimo_pulso=datetime(2026, 11, 5, 11, 50, 0),
+        corte_gps=datetime(2026, 11, 5, 12, 0, 0),
+    )
+    assert fechada is not None
+    assert fechada["percentual"] == 80.1
+    assert fechada["concluido_em"] == "2026-11-05T11:50:00"
+    assert fechada["status"] == "Encerrada"
+    assert fechada["motivo_encerramento"] == "limite_corte"
+
+    # Placa já escalada no turno atual: corte no início da rota nova.
+    assert inicio_placa_turno_atual(
+        [
+            {"codigo": "27BD", "placa": "SDJ-6C47", "inicio": "2026-11-05T06:39:00"},
+            {"codigo": "28BD", "placa": "RBM-2G21", "placas_apoio": ["SDJ-6C47"], "inicio": "2026-11-05T07:39:00"},
+        ],
+        "SDJ-6C47",
+    ) == datetime(2026, 11, 5, 6, 39, 0)
+    cortados = filtrar_pontos_virada(
+        [
+            {"timestamp": "2026-11-05T06:30:00"},
+            {"timestamp": "2026-11-05T06:39:00"},
+            {"timestamp": "2026-11-05T08:00:00"},
+            {"timestamp": "2026-11-05T12:01:00"},
+        ],
+        limite_apos_virada=datetime(2026, 11, 5, 12, 0, 0),
+        inicio_rota_nova=datetime(2026, 11, 5, 6, 39, 0),
+    )
+    assert [p["timestamp"] for p in cortados] == ["2026-11-05T06:30:00"]
+
+    # 30 min sem pulso da placa fecha antes do corte das 12:00.
+    cedo = encerrar_rota_virada(
+        {
+            "codigo": "75AN",
+            "grupo": "parcial",
+            "percentual": 74.7,
+            "ultimo_gps": "2026-11-05T06:10:00",
+        },
+        virada=virada,
+        agora=datetime(2026, 11, 5, 6, 45, 0),
+        ultimo_pulso=datetime(2026, 11, 5, 6, 10, 0),
+        corte_gps=datetime(2026, 11, 5, 12, 0, 0),
+    )
+    assert cedo is not None
+    assert cedo["motivo_encerramento"] == "sem_pulso"
+    assert cedo["concluido_em"] == "2026-11-05T06:10:00"
+
+    # 100% fecha na hora.
+    feita = encerrar_rota_virada(
+        {"codigo": "X", "grupo": "parcial", "percentual": 100, "ultimo_gps": "2026-11-05T06:20:00"},
+        virada=virada,
+        agora=datetime(2026, 11, 5, 6, 21, 0),
+        ultimo_pulso=datetime(2026, 11, 5, 6, 20, 0),
+        corte_gps=datetime(2026, 11, 5, 12, 0, 0),
+    )
+    assert feita is not None
+    assert feita["grupo"] == "concluida"
+    assert feita["concluido_em"] == "2026-11-05T06:20:00"
+
 
 def test_migracao_preenche_origem_sem_alterar_status(monkeypatch, tmp_path):
     monkeypatch.setenv("SAGTRACK_LIVE_DB", str(tmp_path / "live.db"))

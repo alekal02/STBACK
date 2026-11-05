@@ -385,10 +385,28 @@ def _schema(con: sqlite3.Connection) -> None:
         "trechos_feitos": "TEXT",
         "trechos_faltando": "TEXT",
         "executores_json": "TEXT NOT NULL DEFAULT ''",
+        "turno_origem": "TEXT NOT NULL DEFAULT ''",
+        "data_turno": "TEXT NOT NULL DEFAULT ''",
+        "concluido_em": "TEXT NOT NULL DEFAULT ''",
     }
     for nome, tipo in extras_rota.items():
         if nome not in colunas_rota:
             con.execute(f"ALTER TABLE rota ADD COLUMN {nome} {tipo}")
+    # Default seguro: origem = chave atual. Não altera percentual nem status.
+    con.execute(
+        """
+        UPDATE rota
+        SET data_turno = data
+        WHERE data_turno IS NULL OR TRIM(data_turno) = ''
+        """
+    )
+    con.execute(
+        """
+        UPDATE rota
+        SET turno_origem = turno
+        WHERE turno_origem IS NULL OR TRIM(turno_origem) = ''
+        """
+    )
     colunas_placa = {str(row[1]) for row in con.execute("PRAGMA table_info(placa)")}
     extras_placa = {
         "consulta_ate": "TEXT NOT NULL DEFAULT ''",
@@ -494,11 +512,36 @@ def garantir_rotas_previstas(
 
 def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dict[str, Any]]) -> None:
     quando = agora_iso()
+    from .live_virada import carimbar_origem, marcar_conclusao
+
     for rota in rotas:
         codigo = str(rota.get("codigo") or "").upper()
         if not codigo:
             continue
         tem_geo = 1 if rota.get("_geo") else 0
+        anterior = con.execute(
+            """
+            SELECT grupo, concluido_em, data_turno, turno_origem, inicio
+            FROM rota WHERE data = ? AND turno = ? AND codigo = ?
+            """,
+            (data, turno, codigo),
+        ).fetchone()
+        preparado = carimbar_origem(rota, data, turno)
+        if anterior is not None:
+            if not str(preparado.get("data_turno") or "").strip():
+                preparado["data_turno"] = str(anterior["data_turno"] or data)
+            if not str(preparado.get("turno_origem") or "").strip():
+                preparado["turno_origem"] = str(anterior["turno_origem"] or turno)
+            if not str(preparado.get("inicio") or "").strip() and anterior["inicio"]:
+                preparado["inicio"] = anterior["inicio"]
+        preparado = marcar_conclusao(
+            preparado,
+            anterior={"concluido_em": anterior["concluido_em"]} if anterior is not None else None,
+        )
+        # Primeira execução carimba origem; depois não sobrescreve com vazio.
+        data_turno = str(preparado.get("data_turno") or data or "")
+        turno_origem = str(preparado.get("turno_origem") or turno or "")
+        concluido_em = str(preparado.get("concluido_em") or "")
         con.execute(
             """
             INSERT INTO rota (
@@ -506,8 +549,9 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 percentual, inicio, ultimo_gps, tempo_em_rota, km_coleta, km_oficial,
                 na_grade, atualizado_em,
                 entrada_lat, entrada_lon, entrada_hora, saida_lat, saida_lon, saida_hora,
-                trechos_feitos, trechos_faltando, executores_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trechos_feitos, trechos_faltando, executores_json,
+                turno_origem, data_turno, concluido_em
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(data, turno, codigo) DO UPDATE SET
                 rota = excluded.rota,
                 frequencia = excluded.frequencia,
@@ -516,7 +560,10 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 status = excluded.status,
                 grupo = excluded.grupo,
                 percentual = excluded.percentual,
-                inicio = excluded.inicio,
+                inicio = CASE
+                    WHEN excluded.inicio != '' THEN excluded.inicio
+                    ELSE rota.inicio
+                END,
                 ultimo_gps = excluded.ultimo_gps,
                 tempo_em_rota = excluded.tempo_em_rota,
                 km_coleta = excluded.km_coleta,
@@ -531,35 +578,50 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 saida_hora = CASE WHEN ? = 1 THEN excluded.saida_hora ELSE rota.saida_hora END,
                 trechos_feitos = CASE WHEN ? = 1 THEN excluded.trechos_feitos ELSE rota.trechos_feitos END,
                 trechos_faltando = CASE WHEN ? = 1 THEN excluded.trechos_faltando ELSE rota.trechos_faltando END,
-                executores_json = CASE WHEN ? = 1 THEN excluded.executores_json ELSE rota.executores_json END
+                executores_json = CASE WHEN ? = 1 THEN excluded.executores_json ELSE rota.executores_json END,
+                turno_origem = CASE
+                    WHEN rota.turno_origem IS NULL OR TRIM(rota.turno_origem) = '' THEN excluded.turno_origem
+                    ELSE rota.turno_origem
+                END,
+                data_turno = CASE
+                    WHEN rota.data_turno IS NULL OR TRIM(rota.data_turno) = '' THEN excluded.data_turno
+                    ELSE rota.data_turno
+                END,
+                concluido_em = CASE
+                    WHEN excluded.concluido_em != '' THEN excluded.concluido_em
+                    ELSE rota.concluido_em
+                END
             """,
             (
                 data,
                 turno,
                 codigo,
-                rota.get("rota") or "",
-                rota.get("frequencia") or "",
-                rota.get("veiculo") or "",
-                rota.get("placa") or "",
-                rota.get("status") or "",
-                rota.get("grupo") or "",
-                float(rota.get("percentual") or 0),
-                rota.get("inicio") or "",
-                rota.get("ultimo_gps") or "",
-                rota.get("tempo_em_rota") or "",
-                rota.get("km_coleta") or "",
-                rota.get("km_oficial") or "",
-                1 if rota.get("na_grade") else 0,
+                preparado.get("rota") or "",
+                preparado.get("frequencia") or "",
+                preparado.get("veiculo") or "",
+                preparado.get("placa") or "",
+                preparado.get("status") or "",
+                preparado.get("grupo") or "",
+                float(preparado.get("percentual") or 0),
+                preparado.get("inicio") or "",
+                preparado.get("ultimo_gps") or "",
+                preparado.get("tempo_em_rota") or "",
+                preparado.get("km_coleta") or "",
+                preparado.get("km_oficial") or "",
+                1 if preparado.get("na_grade") else 0,
                 quando,
-                rota.get("entrada_lat"),
-                rota.get("entrada_lon"),
-                rota.get("entrada_hora") or "",
-                rota.get("saida_lat"),
-                rota.get("saida_lon"),
-                rota.get("saida_hora") or "",
-                rota.get("trechos_feitos") or "[]",
-                rota.get("trechos_faltando") or "[]",
-                rota.get("executores_json") or "",
+                preparado.get("entrada_lat"),
+                preparado.get("entrada_lon"),
+                preparado.get("entrada_hora") or "",
+                preparado.get("saida_lat"),
+                preparado.get("saida_lon"),
+                preparado.get("saida_hora") or "",
+                preparado.get("trechos_feitos") or "[]",
+                preparado.get("trechos_faltando") or "[]",
+                preparado.get("executores_json") or "",
+                turno_origem,
+                data_turno,
+                concluido_em,
                 tem_geo,
                 tem_geo,
                 tem_geo,
@@ -793,6 +855,9 @@ def ler_view(
                 "saida_lat": row["saida_lat"],
                 "saida_lon": row["saida_lon"],
                 "saida_hora": row["saida_hora"] or "",
+                "turno_origem": row["turno_origem"] if "turno_origem" in row.keys() else (row["turno"] or ""),
+                "data_turno": row["data_turno"] if "data_turno" in row.keys() else (row["data"] or ""),
+                "concluido_em": row["concluido_em"] if "concluido_em" in row.keys() else "",
             }
         )
     posicoes = [

@@ -1218,6 +1218,18 @@ def atender_turnos(
             resultado = gps(output_dir, dia.isoformat(), turno, agora=momento)
             rotas += len(resultado.get("rotas") or [])
             ordem.append(sit)
+            if sit == "ABERTO":
+                try:
+                    from .live_virada import atualizar_conclusoes_virada
+
+                    con_virada = conectar()
+                    try:
+                        atualizar_conclusoes_virada(con_virada, output_dir, dia, turno, agora=momento)
+                        con_virada.commit()
+                    finally:
+                        con_virada.close()
+                except Exception as exc:
+                    print(f"Virada de turno: atualização das rotas anteriores falhou ({exc})", flush=True)
         duracao[sit] = time.perf_counter() - t0
     total = time.perf_counter() - inicio
     if tipo == "gps":

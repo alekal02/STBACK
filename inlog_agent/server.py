@@ -1891,6 +1891,40 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             return
+        if path == "/api/live-report/virada":
+            from .live_virada import ler_estado_virada
+
+            qs = parse_qs(parsed.query)
+            try:
+                settings = load_settings()
+                job = JOB.snapshot()
+                self._json(
+                    200,
+                    ler_estado_virada(
+                        settings.output_dir,
+                        (qs.get("data") or [None])[0],
+                        (qs.get("turno") or ["diurno"])[0],
+                        job_rodando=bool(job.get("rodando") and job.get("nome") == "unificado"),
+                    ),
+                    self._no_store(),
+                )
+            except ValueError as exc:
+                self._json(400, {"ok": False, "erro": str(exc), "falha": str(exc)})
+            except Exception as exc:
+                self._json(
+                    200,
+                    {
+                        "ok": False,
+                        "vazio": True,
+                        "falha": str(exc),
+                        "aviso": "Falha na atualização.",
+                        "rotas": [],
+                        "rotas_turno_anterior": [],
+                        "turno_anterior": {},
+                        "resumo": {},
+                    },
+                )
+            return
         if path == "/api/live-report/operacao.pdf":
             qs = parse_qs(parsed.query)
             try:

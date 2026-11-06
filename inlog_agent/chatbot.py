@@ -54,7 +54,10 @@ def url_wuzapi() -> str:
 
 def admin_token() -> str:
     _env_load()
-    return (os.getenv("WUZAPI_ADMIN_TOKEN") or "1234ABCD").strip()
+    token = (os.getenv("WUZAPI_ADMIN_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("Variável obrigatória ausente: WUZAPI_ADMIN_TOKEN")
+    return token
 
 
 def normalizar_url(url: str) -> str:

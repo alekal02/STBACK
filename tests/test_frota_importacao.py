@@ -107,7 +107,7 @@ def test_snapshot_aprovado_so_tem_operacao_e_placa():
     assert len(bruto["operacoes"]) == 11
     assert {op["nome"] for op in bruto["operacoes"]} == NOMES
     assert sum(1 for op in bruto["operacoes"] if op["padrao"]) == 1
-    assert len(bruto["placas"]) == 171
+    assert len(bruto["placas"]) == 172
     texto = json.dumps(bruto, ensure_ascii=False).lower()
     for termo in ("password", "senha", "token", "api_key", "secret", "authorization"):
         assert termo not in texto
@@ -118,11 +118,11 @@ def test_snapshot_aprovado_so_tem_operacao_e_placa():
 def test_import_em_banco_vazio(ambiente, capsys):
     _, _, versao = _ler_snapshot(ARQUIVO_OPERACOES_APROVADO)
     importar_na_subida()
-    assert capsys.readouterr().out == linha_import({"criadas": 10, "fixadas": 171, "versao": versao}) + "\n"
+    assert capsys.readouterr().out == linha_import({"criadas": 10, "fixadas": 172, "versao": versao}) + "\n"
     ops, versoes = _estado()
     assert {op["nome"] for op in ops} == NOMES
     assert len(ops) == 11
-    assert len(_placas(ops)) == 171
+    assert len(_placas(ops)) == 172
     assert [op["nome"] for op in ops if op["padrao"]] == ["Aparecida de Goiânia"]
     ap = next(op for op in ops if op["nome"] == "Aparecida de Goiânia")
     assert ap["lat_min"] == -16.98
@@ -139,7 +139,7 @@ def test_import_repetido_nao_duplica(ambiente, capsys):
     assert capsys.readouterr().out == ""
     ops, versoes = _estado()
     assert len(ops) == 11
-    assert len(_placas(ops)) == 171
+    assert len(_placas(ops)) == 172
     assert len(versoes) == 1
 
 
@@ -151,12 +151,12 @@ def test_comando_frota_importar(ambiente, capsys):
     assert args.arquivo == "outro.json"
     _, _, versao = _ler_snapshot(ARQUIVO_OPERACOES_APROVADO)
     main(["frota-importar", "--arquivo", str(ARQUIVO_OPERACOES_APROVADO)])
-    assert capsys.readouterr().out == linha_import({"criadas": 10, "fixadas": 171, "versao": versao}) + "\n"
+    assert capsys.readouterr().out == linha_import({"criadas": 10, "fixadas": 172, "versao": versao}) + "\n"
     main(["frota-importar"])
     assert capsys.readouterr().out == ""
     ops, versoes = _estado()
     assert len(ops) == 11
-    assert len(_placas(ops)) == 171
+    assert len(_placas(ops)) == 172
     assert len(versoes) == 1
 
 

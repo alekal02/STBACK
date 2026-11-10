@@ -2234,6 +2234,32 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._json(status, resultado, self._no_store())
             return
+        if path == "/api/admin/rebuscar-historico":
+            if not self._exigir(
+                "POST",
+                admin=True,
+                erro_admin="Somente administradores podem rebusar o histórico do turno.",
+            ):
+                return
+            corpo = payload if isinstance(payload, dict) else {}
+            from .config import load_settings
+            from .live_sync import rebuscar_historico_turno
+
+            try:
+                resultado = rebuscar_historico_turno(
+                    load_settings().output_dir,
+                    str(corpo.get("data") or ""),
+                    str(corpo.get("turno") or ""),
+                    corpo.get("placas") if corpo.get("placas") not in (None, "", []) else corpo.get("placa"),
+                )
+            except Exception as exc:
+                self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
+                return
+            status = 200 if resultado.get("ok") else (
+                409 if resultado.get("erro") == "Atualização ao vivo em andamento" else 400
+            )
+            self._json(status, resultado, self._no_store())
+            return
         if path.startswith("/api/admin/auditoria-rotas"):
             if not self._exigir(
                 "POST",

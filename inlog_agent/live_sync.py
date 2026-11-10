@@ -1567,6 +1567,314 @@ def _historico_da_placa(placa: str, inicio: datetime, fim: datetime) -> list[dic
     return pontos
 
 
+def _normalizar_placas(placas: list[str] | str | None) -> list[str]:
+    from .fulltrack_api import _fmt_placa, _norm_placa
+
+    if isinstance(placas, str):
+        bruto = [parte.strip() for parte in placas.replace(";", ",").split(",")]
+    else:
+        bruto = list(placas or [])
+    saida: list[str] = []
+    vistos: set[str] = set()
+    for item in bruto:
+        chave = _norm_placa(str(item or ""))
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        saida.append(_fmt_placa(chave))
+    return saida
+
+
+def _baixar_historicos(
+    placas: list[str],
+    inicio: datetime,
+    fim: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Um login e a frota uma vez. Cada placa recebe o histórico do intervalo."""
+    from .config import load_settings
+    from .fulltrack_api import (
+        FulltrackSemDados,
+        _norm_placa,
+        _ponto,
+        historico_veiculo,
+        listar_veiculos,
+        login,
+    )
+
+    settings = load_settings()
+    token = login(settings)
+    catalogo: dict[str, dict[str, Any]] = {}
+    for item in listar_veiculos(settings, token):
+        chave = _norm_placa(str(item.get("ras_vei_placa") or ""))
+        if chave and chave not in catalogo:
+            catalogo[chave] = item
+    saida: dict[str, dict[str, Any]] = {}
+    for placa in placas:
+        item = catalogo.get(_norm_placa(placa))
+        if not item:
+            saida[placa] = {
+                "veiculo": placa,
+                "vehicle_id": "",
+                "eventos": [],
+                "erro": f"Placa {placa} não está no cadastro Fulltrack.",
+            }
+            continue
+        vid = str(item.get("ras_vei_id") or "")
+        nome = str(item.get("ras_vei_veiculo") or placa)
+        if not vid:
+            saida[placa] = {
+                "veiculo": nome,
+                "vehicle_id": "",
+                "eventos": [],
+                "erro": f"Placa {placa} sem identificador na Fulltrack.",
+            }
+            continue
+        try:
+            eventos = historico_veiculo(settings, vid, inicio, fim, token=token, timeout=180)
+        except FulltrackSemDados:
+            eventos = []
+        pontos = []
+        for evento in eventos:
+            ponto = _ponto(evento, nome)
+            if ponto:
+                pontos.append(ponto)
+        saida[placa] = {"veiculo": nome, "vehicle_id": vid, "eventos": pontos, "erro": ""}
+    return saida
+
+
+def _pontos_na_janela(
+    eventos: list[dict[str, Any]],
+    dia: date,
+    turno: str,
+) -> tuple[list[dict[str, Any]], int]:
+    from .live_turno import ponto_pertence
+
+    vistos: set[str] = set()
+    na_janela: list[dict[str, Any]] = []
+    fora = 0
+    for item in eventos or []:
+        if not isinstance(item, dict):
+            continue
+        ponto = _ponto_local(item, "")
+        if not ponto:
+            continue
+        ts = str(ponto.get("timestamp") or "")
+        if not ts or ts in vistos:
+            continue
+        vistos.add(ts)
+        if ponto_pertence(ts, dia, turno):
+            na_janela.append(ponto)
+        else:
+            fora += 1
+    return na_janela, fora
+
+
+def rebuscar_historico_turno(
+    output_dir: Path,
+    data: str | None,
+    turno: str | None,
+    placas: list[str] | str | None,
+    *,
+    agora: datetime | None = None,
+    buscar_historico: Callable[..., list[dict[str, Any]]] | None = None,
+    recalcular: Callable[..., list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Busca de novo o GPS do turno na Fulltrack e recalcula as rotas que ele toca.
+
+    A consulta é data + turno + placa, do início operacional até agora.
+    Ponto repetido entra com INSERT OR IGNORE. Não reabre turno já gravado.
+    """
+    from .config import parse_data
+    from .live_turno import fim_da_consulta, inicio_operacional
+
+    momento = agora or agora_brt()
+    dia_op, turno_op = turno_operacional(momento)
+    try:
+        dia = parse_data(data) if str(data or "").strip() else dia_op
+    except (TypeError, ValueError):
+        dia = None
+    pedido = (turno or "").strip().lower()
+    if pedido in {"", "atual"}:
+        pedido = turno_op
+    pedidas = _normalizar_placas(placas)
+    if dia is None or pedido not in {"diurno", "noturno"} or not pedidas:
+        return {"ok": False, "erro": "Data, turno ou placa inválidos.", "rotas": []}
+    inicio = inicio_operacional(dia, pedido)
+    fim = fim_da_consulta(dia, pedido, momento)
+    if fim <= inicio:
+        return {
+            "ok": False,
+            "erro": "O turno ainda não começou.",
+            "data": dia.isoformat(),
+            "turno": pedido,
+            "rotas": [],
+        }
+    try:
+        baixados = None if buscar_historico is not None else _baixar_historicos(pedidas, inicio, fim)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "erro": str(exc),
+            "data": dia.isoformat(),
+            "turno": pedido,
+            "inicio": inicio.isoformat(timespec="seconds"),
+            "fim": fim.isoformat(timespec="seconds"),
+            "placas": [],
+            "rotas": [],
+        }
+    pacotes: list[dict[str, Any]] = []
+    for placa in pedidas:
+        if baixados is not None:
+            bruto = baixados[placa]
+            eventos = list(bruto.get("eventos") or [])
+            erro = str(bruto.get("erro") or "")
+            veiculo = str(bruto.get("veiculo") or placa)
+            vid = str(bruto.get("vehicle_id") or "")
+        else:
+            try:
+                eventos = list((buscar_historico or _historico_da_placa)(placa, inicio, fim) or [])
+                erro = ""
+            except Exception as exc:
+                eventos = []
+                erro = str(exc)
+            veiculo = placa
+            vid = ""
+        na_janela, fora = _pontos_na_janela(eventos, dia, pedido)
+        pacotes.append(
+            {
+                "placa": placa,
+                "veiculo": veiculo,
+                "vehicle_id": vid,
+                "pontos": na_janela,
+                "fora": fora,
+                "erro": erro,
+            }
+        )
+    base = {
+        "data": dia.isoformat(),
+        "turno": pedido,
+        "inicio": inicio.isoformat(timespec="seconds"),
+        "fim": fim.isoformat(timespec="seconds"),
+    }
+    if not any(item["pontos"] for item in pacotes):
+        erro = next((str(item["erro"]) for item in pacotes if item["erro"]), "")
+        return {
+            "ok": not bool(erro),
+            **base,
+            "erro": erro,
+            "placas": [
+                {
+                    "placa": item["placa"],
+                    "pontos": 0,
+                    "novos": 0,
+                    "fora_da_janela": item["fora"],
+                    "erro": item["erro"],
+                }
+                for item in pacotes
+            ],
+            "rotas": [],
+        }
+    if not _entrar():
+        return {"ok": False, "erro": "Atualização ao vivo em andamento", **base, "rotas": []}
+    con = None
+    try:
+        con = conectar()
+        novo_turno = not turno_existe(con, dia.isoformat(), pedido)
+        if novo_turno:
+            from .live_report import _periodo_padrao
+            from .live_turno import campos_de_horario
+
+            gravar_turno(
+                con,
+                {
+                    "data": dia.isoformat(),
+                    "turno": pedido,
+                    "aberto": 1,
+                    "periodo": _periodo_padrao(dia, pedido),
+                    **campos_de_horario(dia, pedido),
+                    "atualizado_em": momento.isoformat(timespec="seconds"),
+                },
+            )
+        fichas = []
+        todos: list[dict[str, Any]] = []
+        for item in pacotes:
+            novos = 0
+            recebidos = item["pontos"]
+            if recebidos and not item["erro"]:
+                novos = inserir_pontos(con, dia.isoformat(), pedido, item["placa"], recebidos)
+                maior = max(str(ponto.get("timestamp") or "") for ponto in recebidos)
+                row = con.execute(
+                    "SELECT last_gps_timestamp FROM placa WHERE data = ? AND turno = ? AND placa = ?",
+                    (dia.isoformat(), pedido, item["placa"]),
+                ).fetchone()
+                cursor = str(row["last_gps_timestamp"] or "") if row else ""
+                marcar_placa(
+                    con,
+                    dia.isoformat(),
+                    pedido,
+                    item["placa"],
+                    veiculo=item["veiculo"],
+                    vehicle_id=item["vehicle_id"],
+                    last_gps_timestamp=maior if not cursor or maior > cursor else "",
+                )
+                todos.extend(recebidos)
+            gravados = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM ponto WHERE data = ? AND turno = ? AND placa = ?",
+                    (dia.isoformat(), pedido, item["placa"]),
+                ).fetchone()[0]
+            )
+            fichas.append(
+                {
+                    "placa": item["placa"],
+                    "pontos": len(recebidos),
+                    "novos": novos,
+                    "gravados": gravados,
+                    "fora_da_janela": item["fora"],
+                    "erro": item["erro"],
+                }
+            )
+        from .cobertura import _xy
+
+        for ponto in todos:
+            ponto["xy"] = _xy(ponto)
+        codigos = codigos_com_ponto_novo([ponto for ponto in todos if ponto.get("xy")], _limites(dia, pedido))
+        atualizadas: list[dict[str, Any]] = []
+        if codigos:
+            funcao = recalcular or _recalcular_oficial
+            atualizadas = funcao(con, output_dir, dia, pedido, codigos) or []
+            if atualizadas:
+                gravar_rotas(con, dia.isoformat(), pedido, atualizadas)
+        if novo_turno:
+            from .live_turno import aplicar_relogio
+
+            aplicar_relogio(con, dia, pedido, momento)
+        con.commit()
+        return {
+            "ok": True,
+            **base,
+            "placas": fichas,
+            "rotas": [
+                {
+                    "codigo": str(rota.get("codigo") or "").upper(),
+                    "rota": str(rota.get("rota") or ""),
+                    "percentual": round(float(rota.get("percentual") or 0), 1),
+                    "placa": str(rota.get("placa") or ""),
+                }
+                for rota in atualizadas
+                if str(rota.get("codigo") or "").strip()
+            ],
+        }
+    except Exception:
+        if con is not None:
+            con.rollback()
+        raise
+    finally:
+        if con is not None:
+            con.close()
+        _sair()
+
+
 def _metros_da_rota(rota: dict[str, Any]) -> float:
     bruto = rota.get("trechos_feitos") or "[]"
     if isinstance(bruto, str):
@@ -2246,6 +2554,45 @@ def _memoria_mb() -> float:
         return 0.0
 
 
+def _placas_unidade_aprovada() -> tuple[str, ...]:
+    """Placas fixadas na operação padrão de data/frota_operacoes_aprovado.json.
+
+    A sincronização usa esta lista. Modelo e prefixo de placa não entram.
+    """
+    from .frota import ARQUIVO_OPERACOES_APROVADO
+    from .fulltrack_api import _norm_placa
+
+    try:
+        bruto = json.loads(ARQUIVO_OPERACOES_APROVADO.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(bruto, dict):
+        return ()
+    operacoes = bruto.get("operacoes")
+    placas = bruto.get("placas")
+    if not isinstance(operacoes, list) or not isinstance(placas, dict):
+        return ()
+    nome = ""
+    for op in operacoes:
+        if isinstance(op, dict) and op.get("padrao") is True and op.get("ativa") is not False:
+            nome = str(op.get("nome") or "").strip()
+            break
+    if not nome:
+        return ()
+    chaves: list[str] = []
+    vistos: set[str] = set()
+    for placa, unidade in placas.items():
+        if str(unidade).strip() != nome:
+            continue
+        chave = _norm_placa(str(placa))
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        chaves.append(chave)
+    chaves.sort()
+    return tuple(chaves)
+
+
 def _descobrir_frota() -> list[dict[str, Any]]:
     from .config import load_settings
     from .fulltrack_api import _escolher_veiculos, _eventos_atuais, _fmt_placa, listar_veiculos, login
@@ -2257,7 +2604,8 @@ def _descobrir_frota() -> list[dict[str, Any]]:
         eventos = _eventos_atuais(settings, token)
     except Exception:
         eventos = []
-    escolhidos = _escolher_veiculos(veiculos, eventos, settings.segtrack_veiculos, None)
+    filtro = _placas_unidade_aprovada() or settings.segtrack_veiculos
+    escolhidos = _escolher_veiculos(veiculos, eventos, filtro, None)
     from .dificil_acesso import norm_placa, presentes_no_cadastro
 
     saida: list[dict[str, Any]] = []

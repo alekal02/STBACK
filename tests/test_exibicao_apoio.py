@@ -19,6 +19,8 @@ def ambiente(tmp_path, monkeypatch):
     from inlog_agent import live_mapa
 
     live_mapa._LEITURA.clear()
+    live_mapa._RECORTE_ROTA.clear()
+    live_mapa._ANEIS_SETOR.clear()
     return tmp_path
 
 
@@ -127,6 +129,48 @@ def test_hifen_nao_apaga_trajetoria_do_apoio_gravado(ambiente):
     assert set(desenhos) == {"SDE-5I26", "RBM-2G21"}
     assert desenhos["RBM-2G21"]["linhas"]
     assert desenhos["RBM-2G21"]["oficial"] is True
+
+
+def test_trajetoria_sai_da_trilha_salva_sem_varrer_o_gps(ambiente, monkeypatch):
+    from inlog_agent.mapa_oficial import caminho_gpkg
+
+    if caminho_gpkg() is None:
+        pytest.skip("sem geometria oficial")
+    from inlog_agent.live_db import conectar, gravar_trilha_visual
+    from inlog_agent.live_mapa import detalhe_rota
+
+    setor = _setor("65DN")
+    geom = setor["geom"]
+    internas = [
+        rua
+        for rua in _ruas_longas("65DN")
+        if geom.covers(rua.interpolate(0.5, normalized=True))
+    ]
+    rua = internas[0]
+    brutos = _pontos(rua, datetime(2026, 10, 19, 20, 0))[:8]
+    linha = [[item["latitude"], item["longitude"]] for item in brutos]
+    snapshot = {
+        "calculado": True,
+        "percentual": 70,
+        "placa_principal": "SDE-5I26",
+        "apoio": "",
+        "executores": [
+            {"placa": "SDE-5I26", "papel": "principal", "classificacao": "Principal", "percentual": 70, "cor": "#111111"},
+        ],
+    }
+    _gravar("65DN", 70, "SDE-5I26", json.dumps(snapshot))
+    con = conectar()
+    gravar_trilha_visual(con, "2026-10-19", "noturno", "SDE-5I26", [linha], [linha], [], "2026-10-19T20:10:00")
+    con.commit()
+    con.close()
+
+    def proibido(*_args, **_kwargs):
+        raise AssertionError("a troca de rota não deve varrer a tabela de pontos quando a trilha já está salva")
+
+    monkeypatch.setattr("inlog_agent.live_mapa._linhas_visuais", proibido)
+    detalhe = detalhe_rota("2026-10-19", "noturno", "65DN")
+    desenhos = {item["placa"]: item for item in detalhe["veiculos"] if item.get("papel") == "principal"}
+    assert desenhos["SDE-5I26"]["linhas"]
 
 
 def test_65dn_encerrada_mostra_apoio_sem_trocar_o_historico(ambiente):

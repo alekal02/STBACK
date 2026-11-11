@@ -429,6 +429,8 @@ def _gravar_trilha_simples(con: Any, data: str, turno: str, placa: str, brutos: 
 
 _SETORES_TURNO: dict[tuple[str, str], list[dict[str, Any]]] = {}
 _POLIGONOS_PRONTOS: dict[tuple[tuple[str, int], ...], list[tuple[str, Any, float]]] = {}
+_ANEIS_SETOR: dict[str, tuple[list[Any], list[Any]]] = {}
+_RECORTE_ROTA: dict[tuple[Any, ...], list[list[list[float]]]] = {}
 
 
 def _preparar_setores(setores: list[dict[str, Any]]) -> list[tuple[str, Any, float]]:
@@ -1498,41 +1500,88 @@ def _placas_executoras(data: str, turno: str, codigo: str) -> set[str] | None:
     return {legado} if legado else set()
 
 
+def _aneis_do_codigo(codigo: str) -> tuple[list[Any], list[Any]]:
+    chave = str(codigo or "").upper()
+    guardado = _ANEIS_SETOR.get(chave)
+    if guardado is not None:
+        return guardado
+    aneis: list[Any] = []
+    for setor in _poligonos():
+        if str(setor.get("codigo") or "").upper() == chave:
+            aneis = list(setor.get("aneis") or [])
+            break
+    geoms = _poligonos_oficiais([{"poligonos": aneis}]) if aneis else []
+    _ANEIS_SETOR[chave] = (aneis, geoms)
+    return aneis, geoms
+
+
+def _recorte_guardado(
+    codigo: str,
+    placa: str,
+    ate: str,
+    base: list[Any],
+    aneis: list[Any],
+    geoms: list[Any],
+) -> list[list[list[float]]]:
+    if not aneis:
+        return base
+    pontos = 0
+    primeiro = None
+    ultimo = None
+    for linha in base:
+        if not isinstance(linha, list) or not linha:
+            continue
+        pontos += len(linha)
+        if primeiro is None and isinstance(linha[0], (list, tuple)) and len(linha[0]) >= 2:
+            primeiro = (float(linha[0][0]), float(linha[0][1]))
+        if isinstance(linha[-1], (list, tuple)) and len(linha[-1]) >= 2:
+            ultimo = (float(linha[-1][0]), float(linha[-1][1]))
+    marca = (str(codigo or "").upper(), placa, ate, len(base), pontos, primeiro, ultimo)
+    guardado = _RECORTE_ROTA.get(marca)
+    if guardado is not None:
+        return guardado
+    recorte = _recortar_prontas(base, aneis, geoms)
+    if len(_RECORTE_ROTA) > 500:
+        _RECORTE_ROTA.clear()
+    _RECORTE_ROTA[marca] = recorte
+    return recorte
+
+
 def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Traçado de exibição. A cobertura já está nos trechos oficiais gravados."""
     placas = [str(item.get("placa") or "").strip() for item in executores if str(item.get("placa") or "").strip()]
     if not placas:
         return []
-    formas: list[str] = []
-    for placa in placas:
-        for forma in _formas_placa(placa):
-            if forma not in formas:
-                formas.append(forma)
-    from .live_db import ler_trilhas_visuais
+    from .live_db import ler_trilhas_placas
 
     con = conectar(leitura=True)
     try:
-        marcas = ",".join("?" for _ in formas)
-        rows = con.execute(
-            f"""
-            SELECT placa, ts, lat, lon FROM ponto
-            WHERE data = ? AND turno = ? AND placa IN ({marcas})
-            ORDER BY placa, ts
-            """,
-            [data, turno, *formas],
-        ).fetchall()
-        salvas = ler_trilhas_visuais(con, data, turno)
+        salvas = ler_trilhas_placas(con, data, turno, placas)
+        faltam: list[str] = []
+        for placa in placas:
+            salvo = salvas.get(_norm_placa(placa))
+            if salvo and salvo.get("linhas"):
+                continue
+            for forma in _formas_placa(placa):
+                if forma not in faltam:
+                    faltam.append(forma)
+        por_placa: dict[str, list[tuple[str, float, float]]] = {}
+        if faltam:
+            marcas = ",".join("?" for _ in faltam)
+            for row in con.execute(
+                f"""
+                SELECT placa, ts, lat, lon FROM ponto
+                WHERE data = ? AND turno = ? AND placa IN ({marcas})
+                ORDER BY placa, ts
+                """,
+                [data, turno, *faltam],
+            ):
+                por_placa.setdefault(_norm_placa(row["placa"]), []).append(
+                    (str(row["ts"] or ""), float(row["lat"]), float(row["lon"]))
+                )
     finally:
         con.close()
-    por_placa: dict[str, list[tuple[str, float, float]]] = {}
-    for row in rows:
-        por_placa.setdefault(_norm_placa(row["placa"]), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
-    aneis = []
-    for setor in _poligonos():
-        if str(setor.get("codigo") or "").upper() == codigo:
-            aneis = setor.get("aneis") or []
-            break
-    geoms = _poligonos_oficiais([{"poligonos": aneis}]) if aneis else []
+    aneis, geoms = _aneis_do_codigo(codigo)
     saida = []
     for item in executores:
         placa = str(item.get("placa") or "")
@@ -1541,8 +1590,7 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         copia = dict(item)
         salvo = salvas.get(chave)
         if salvo and salvo.get("linhas"):
-            base = salvo["linhas"]
-            copia["linhas"] = _recortar_prontas(base, aneis, geoms) if aneis else base
+            copia["linhas"] = _recorte_guardado(codigo, chave, str(salvo.get("ate") or ""), salvo["linhas"], aneis, geoms)
         elif aneis:
             copia["linhas"] = _recortar_prontas(_linhas_visuais(brutos, None), aneis, geoms)
         else:

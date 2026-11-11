@@ -693,6 +693,19 @@ def gravar_trilha_visual(
     )
 
 
+def _trilha_de_row(row: sqlite3.Row) -> tuple[str, dict[str, Any]] | None:
+    chave = "".join(ch for ch in str(row["placa"] or "").upper() if ch.isalnum())
+    if not chave:
+        return None
+    return chave, {
+        "placa": str(row["placa"] or ""),
+        "linhas": _json_linhas(str(row["linhas"] or "")),
+        "dentro": _json_linhas(str(row["dentro"] or "")),
+        "fora": _json_linhas(str(row["fora"] or "")),
+        "ate": str(row["ate"] or ""),
+    }
+
+
 def ler_trilhas_visuais(con: sqlite3.Connection, data: str, turno: str) -> dict[str, dict[str, Any]]:
     """Desenho já casado. A chave é a placa sem hífen."""
     saida: dict[str, dict[str, Any]] = {}
@@ -704,16 +717,49 @@ def ler_trilhas_visuais(con: sqlite3.Connection, data: str, turno: str) -> dict[
     except sqlite3.OperationalError:
         return saida
     for row in rows:
-        chave = "".join(ch for ch in str(row["placa"] or "").upper() if ch.isalnum())
-        if not chave:
-            continue
-        saida[chave] = {
-            "placa": str(row["placa"] or ""),
-            "linhas": _json_linhas(str(row["linhas"] or "")),
-            "dentro": _json_linhas(str(row["dentro"] or "")),
-            "fora": _json_linhas(str(row["fora"] or "")),
-            "ate": str(row["ate"] or ""),
-        }
+        item = _trilha_de_row(row)
+        if item:
+            saida[item[0]] = item[1]
+    return saida
+
+
+def ler_trilhas_placas(
+    con: sqlite3.Connection,
+    data: str,
+    turno: str,
+    placas: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Só as placas pedidas. Evita abrir o JSON de toda a frota ao trocar de rota."""
+    formas: list[str] = []
+    vistos: set[str] = set()
+    for placa in placas:
+        texto = str(placa or "").strip().upper()
+        chave = "".join(ch for ch in texto if ch.isalnum())
+        candidatos = [texto, chave]
+        if len(chave) == 7:
+            candidatos.append(f"{chave[:3]}-{chave[3:]}")
+        for item in candidatos:
+            if item and item not in vistos:
+                vistos.add(item)
+                formas.append(item)
+    if not formas:
+        return {}
+    saida: dict[str, dict[str, Any]] = {}
+    marcas = ",".join("?" for _ in formas)
+    try:
+        rows = con.execute(
+            f"""
+            SELECT placa, linhas, dentro, fora, ate FROM trilha
+            WHERE data = ? AND turno = ? AND placa IN ({marcas})
+            """,
+            [data, turno, *formas],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return saida
+    for row in rows:
+        item = _trilha_de_row(row)
+        if item:
+            saida[item[0]] = item[1]
     return saida
 
 

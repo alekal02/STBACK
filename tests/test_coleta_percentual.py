@@ -1,6 +1,18 @@
 """O percentual das vias só entra com compactador ou basculante do cadastro."""
 
+import pytest
+
 from inlog_agent.dificil_acesso import eh_coleta
+
+
+@pytest.fixture(autouse=True)
+def banco_limpo(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAGTRACK_LIVE_DB", str(tmp_path / "live.db"))
+    from inlog_agent.cadastro_frota import invalidar
+
+    invalidar()
+    yield
+    invalidar()
 
 
 def test_pm_trator_e_daily_ficam_de_fora():
@@ -72,3 +84,19 @@ def test_modelo_no_codigo_nao_classifica(tmp_path, monkeypatch):
     definir("PM-001", "compactador")
     assert eh_coleta("PM-001", "PM-001") is True
     invalidar()
+
+
+def test_edicao_sobrevive_e_o_json_nao_semeia_de_novo():
+    from inlog_agent.cadastro_frota import definir, invalidar, tipo_de
+    from inlog_agent.live_db import conectar
+
+    assert tipo_de("SCN-4E19") == "compactador"
+    definir("SCN-4E19", "trator")
+    invalidar()
+    assert tipo_de("SCN-4E19") == "trator"
+    con = conectar()
+    con.execute("DELETE FROM frota_tipo WHERE placa = 'SCN-4E19'")
+    con.commit()
+    con.close()
+    invalidar()
+    assert tipo_de("SCN-4E19") == "sem_tipo"

@@ -1,8 +1,9 @@
 """Tipo de cada placa. O código não decide pelo modelo do veículo.
 
-O arquivo data/frota_tipos.json é a base. O administrador grava por cima
-na tabela frota_tipo. Placa nova do rastreador entra como sem tipo até
-alguém classificar.
+A tabela frota_tipo fica no banco do disco persistente. O arquivo
+data/frota_tipos.json só preenche essa tabela na primeira vez.
+Depois disso, a edição do Admin grava na tabela e sobrevive a um restart.
+Placa nova do rastreador entra como sem tipo até alguém classificar.
 """
 
 from __future__ import annotations
@@ -24,6 +25,15 @@ def _fmt(placa: str) -> str:
     chave = _norm(placa)
     if len(chave) == 7:
         return f"{chave[:3]}-{chave[3:]}"
+    letras = ""
+    resto = ""
+    for ch in chave:
+        if ch.isalpha() and not resto:
+            letras += ch
+        else:
+            resto += ch
+    if letras and resto:
+        return f"{letras}-{resto}"
     return chave
 
 
@@ -31,6 +41,54 @@ def _arquivo():
     from .config import ROOT
 
     return ROOT / "data" / "frota_tipos.json"
+
+
+def garantir() -> None:
+    """Cria a tabela no banco persistente e semeia o JSON uma única vez."""
+    from .live_db import conectar
+
+    con = conectar()
+    con.isolation_level = None
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS frota_tipo (
+                placa TEXT PRIMARY KEY,
+                tipo TEXT NOT NULL
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS frota_tipo_meta (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL
+            )
+            """
+        )
+        row = con.execute(
+            "SELECT valor FROM frota_tipo_meta WHERE chave = 'semeado'"
+        ).fetchone()
+        if row is not None:
+            con.commit()
+            return
+        for chave, tipo in _base().items():
+            con.execute(
+                "INSERT INTO frota_tipo (placa, tipo) VALUES (?, ?) "
+                "ON CONFLICT(placa) DO NOTHING",
+                (_fmt(chave), tipo),
+            )
+        con.execute(
+            "INSERT INTO frota_tipo_meta (chave, valor) VALUES ('semeado', '1')"
+        )
+        con.commit()
+    except Exception:
+        if con.in_transaction:
+            con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def _base() -> dict[str, str]:
@@ -49,19 +107,13 @@ def _base() -> dict[str, str]:
     return saida
 
 
-def _ajustes() -> dict[str, str]:
-    from .live_db import caminho_banco, conectar
+def _ler() -> dict[str, str]:
+    garantir()
+    from .live_db import conectar
 
-    try:
-        if not caminho_banco().is_file():
-            return {}
-        con = conectar(leitura=True)
-    except (OSError, sqlite3.Error, RuntimeError):
-        return {}
+    con = conectar(leitura=True)
     try:
         rows = con.execute("SELECT placa, tipo FROM frota_tipo").fetchall()
-    except sqlite3.Error:
-        return {}
     finally:
         con.close()
     saida: dict[str, str] = {}
@@ -84,9 +136,7 @@ def _mapa() -> dict[str, str]:
 
     chave = str(caminho_banco())
     if _CACHE is None or _CACHE[0] != chave:
-        mapa = _base()
-        mapa.update(_ajustes())
-        _CACHE = (chave, mapa)
+        _CACHE = (chave, _ler())
     return _CACHE[1]
 
 
@@ -160,16 +210,9 @@ def definir(placa: str, tipo: str) -> dict[str, Any]:
         raise ValueError("Tipo inválido. Use compactador, basculante, apoio, trator ou outro.")
     from .live_db import conectar
 
+    garantir()
     con = conectar()
     try:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS frota_tipo (
-                placa TEXT PRIMARY KEY,
-                tipo TEXT NOT NULL
-            )
-            """
-        )
         con.execute(
             "INSERT INTO frota_tipo (placa, tipo) VALUES (?, ?) "
             "ON CONFLICT(placa) DO UPDATE SET tipo = excluded.tipo",

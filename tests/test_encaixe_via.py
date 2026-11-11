@@ -127,3 +127,60 @@ def test_vao_de_dez_minutos_nao_liga_os_pulsos():
     assert resultado["percentual"] == 0
     brutos = [(item["timestamp"], item["latitude"], item["longitude"]) for item in pontos]
     assert _linhas_visuais(brutos, ruas) == []
+
+
+def test_trilha_longa_casa_o_trecho_e_nao_liga_o_vao():
+    from inlog_agent.live_mapa import casar_trilha
+
+    ruas = [_rua(0, 0, 0, 220), _rua(0, 220, 200, 220)]
+    inicio = datetime(2026, 11, 10, 9, 0)
+    pontos = [
+        _pulso(0, 0, inicio),
+        _pulso(200, 220, inicio + timedelta(seconds=90)),
+        _pulso(3000, 0, inicio + timedelta(minutes=12)),
+    ]
+    brutos = [(item["timestamp"], item["latitude"], item["longitude"]) for item in pontos]
+    linhas = casar_trilha(brutos, lambda _fatia: ruas)
+    assert linhas
+    assert _perto(linhas, 0, 220) < 25
+    assert _perto(linhas, 100, 110) > 40
+    assert _perto(linhas, 3000, 0) > 500
+
+
+def test_leitura_usa_a_trilha_gravada(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAGTRACK_LIVE_DB", str(tmp_path / "live.db"))
+    monkeypatch.setenv("SAGTRACK_LIVE_SYNC", "0")
+    from inlog_agent import live_mapa
+    from inlog_agent.live_db import conectar, gravar_trilha_visual
+
+    con = conectar()
+    con.execute(
+        "INSERT INTO ponto (data, turno, placa, ts, lat, lon) VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-10", "diurno", "SCH-9B28", "2026-11-10T10:00:00", -16.82, -49.25),
+    )
+    con.execute(
+        "INSERT INTO ponto (data, turno, placa, ts, lat, lon) VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-11-10", "diurno", "SCH-9B28", "2026-11-10T10:01:00", -16.821, -49.251),
+    )
+    curva = [[-16.82, -49.25], [-16.8205, -49.2504], [-16.821, -49.251]]
+    gravar_trilha_visual(
+        con,
+        "2026-11-10",
+        "diurno",
+        "SCH-9B28",
+        [curva],
+        [curva],
+        [],
+        "2026-11-10T10:01:00",
+    )
+    con.commit()
+    con.close()
+
+    def recusou(*_args, **_kwargs):
+        raise AssertionError("o mapa recasou a trilha")
+
+    monkeypatch.setattr(live_mapa, "casar_trilha", recusou)
+    monkeypatch.setattr(live_mapa, "_linhas_visuais", recusou)
+    pacote = live_mapa.trilhas("2026-11-10", "diurno")
+    assert pacote["veiculos"][0]["linhas"] == [curva]
+    assert live_mapa.trilhas("2026-11-10", "diurno")["veiculos"][0]["linhas"] == [curva]

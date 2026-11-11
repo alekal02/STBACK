@@ -214,6 +214,192 @@ def _simplificar(coords: list[tuple[float, float]]) -> list[list[float]]:
     return pontos
 
 
+_FATIA_M = 1800.0
+_FATIA_N = 280
+_ENXUGAR_M = 8.0
+
+
+def _diagonal(brutos: list[tuple[str, float, float]]) -> float:
+    lats = [item[1] for item in brutos]
+    lons = [item[2] for item in brutos]
+    return _metros((min(lats), min(lons)), (max(lats), max(lons)))
+
+
+def _fatias(brutos: list[tuple[str, float, float]]) -> list[list[tuple[str, float, float]]]:
+    """Janelas curtas. O casamento da cidade inteira não cabe numa malha só."""
+    if len(brutos) < 2:
+        return []
+    fatias: list[list[tuple[str, float, float]]] = []
+    atual = [brutos[0]]
+    for ponto in brutos[1:]:
+        proposto = atual + [ponto]
+        if len(proposto) > _FATIA_N or (len(atual) >= 2 and _diagonal(proposto) > _FATIA_M):
+            fatias.append(atual)
+            atual = [atual[-1], ponto]
+        else:
+            atual = proposto
+    if len(atual) >= 2:
+        fatias.append(atual)
+    return fatias
+
+
+def _enxugar(linha: list[Any], tol_m: float = _ENXUGAR_M) -> list[list[float]]:
+    """Douglas-Peucker em metros. Quina de quarteirão permanece."""
+    pontos: list[list[float]] = []
+    for par in linha or []:
+        if not isinstance(par, (list, tuple)) or len(par) < 2:
+            continue
+        try:
+            item = [round(float(par[0]), 5), round(float(par[1]), 5)]
+        except (TypeError, ValueError):
+            continue
+        if not pontos or item != pontos[-1]:
+            pontos.append(item)
+    if len(pontos) < 3:
+        return pontos
+    from shapely.geometry import LineString
+
+    from .cobertura import TO_UTM, TO_WGS
+
+    xy: list[tuple[float, float]] = []
+    for lat, lon in pontos:
+        x, y = TO_UTM.transform(lon, lat)
+        if xy and math.hypot(x - xy[-1][0], y - xy[-1][1]) < 0.4:
+            continue
+        xy.append((float(x), float(y)))
+    if len(xy) < 3:
+        return pontos
+    geom = LineString(xy).simplify(tol_m, preserve_topology=False)
+    saida: list[list[float]] = []
+    for x, y in geom.coords:
+        lon, lat = TO_WGS.transform(x, y)
+        par = [round(float(lat), 5), round(float(lon), 5)]
+        if not saida or par != saida[-1]:
+            saida.append(par)
+    return saida if len(saida) >= 2 else []
+
+
+def _colar(grupos: list[list[list[float]]]) -> list[list[list[float]]]:
+    saida: list[list[list[float]]] = []
+    for grupo in grupos:
+        if len(grupo) < 2:
+            continue
+        if not saida:
+            saida.append([list(par) for par in grupo])
+            continue
+        fim = saida[-1][-1]
+        ini = grupo[0]
+        if _metros((float(fim[0]), float(fim[1])), (float(ini[0]), float(ini[1]))) <= 20:
+            if fim == list(ini):
+                saida[-1].extend(list(par) for par in grupo[1:])
+            else:
+                saida[-1].extend(list(par) for par in grupo)
+        else:
+            saida.append([list(par) for par in grupo])
+    return saida
+
+
+def casar_trilha(
+    brutos: list[tuple[str, float, float]],
+    ruas_de: Any | None = None,
+) -> list[list[list[float]]]:
+    """Polilinhas já na via. Vão sem caminho não entra como reta."""
+    buscar = _ruas_proximas if ruas_de is None else ruas_de
+    grupos: list[list[list[float]]] = []
+    for fatia in _fatias(brutos):
+        ruas = buscar(fatia) if buscar else None
+        for linha in _linhas_visuais(fatia, ruas):
+            if len(linha) >= 2:
+                grupos.append(linha)
+    return [item for item in (_enxugar(linha) for linha in _colar(grupos)) if len(item) >= 2]
+
+
+def _partir_salvas(
+    linhas: list[Any],
+    setores: list[dict[str, Any]],
+) -> tuple[list[list[list[float]]], list[list[list[float]]]]:
+    dentro: list[list[list[float]]] = []
+    fora: list[list[list[float]]] = []
+    for linha in linhas or []:
+        coords = []
+        for par in linha:
+            if not isinstance(par, (list, tuple)) or len(par) < 2:
+                continue
+            try:
+                coords.append((float(par[0]), float(par[1])))
+            except (TypeError, ValueError):
+                continue
+        if len(coords) < 2:
+            continue
+        if not setores:
+            dentro.append([[lat, lon] for lat, lon in coords])
+            continue
+        parte_dentro, parte_fora = _partir_trilha(coords, setores)
+        dentro.extend(_simplificar(parte) for parte in parte_dentro if len(parte) >= 2)
+        fora.extend(_simplificar(parte) for parte in parte_fora if len(parte) >= 2)
+    return dentro, fora
+
+
+def atualizar_trilha(
+    con: Any,
+    data: str,
+    turno: str,
+    placa: str,
+    *,
+    completo: bool = False,
+) -> None:
+    """Casa a placa uma vez e grava o desenho. A leitura do mapa não refaz o HMM."""
+    from datetime import date as dia_tipo
+
+    from .live_db import gravar_trilha_visual, ler_trilhas_visuais
+
+    rows = con.execute(
+        "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
+        (data, turno, placa),
+    ).fetchall()
+    brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
+    if len(brutos) < 2:
+        gravar_trilha_visual(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
+        return
+    chave = _norm_placa(placa)
+    guardada = None if completo else ler_trilhas_visuais(con, data, turno).get(chave)
+    if guardada and guardada.get("ate") and guardada.get("linhas"):
+        ate = str(guardada["ate"])
+        indice = 0
+        while indice < len(brutos) and brutos[indice][0] <= ate:
+            indice += 1
+        if indice >= len(brutos):
+            return
+        cauda = casar_trilha(brutos[max(0, indice - 3) :])
+        linhas = [item for item in (_enxugar(linha) for linha in _colar(list(guardada["linhas"]) + cauda)) if len(item) >= 2]
+    else:
+        linhas = casar_trilha(brutos)
+    try:
+        dia = dia_tipo.fromisoformat(data)
+        setores = _setores_do_turno(dia, turno)
+    except (TypeError, ValueError):
+        setores = []
+    dentro, fora = _partir_salvas(linhas, setores)
+    gravar_trilha_visual(con, data, turno, placa, linhas, dentro, fora, brutos[-1][0])
+
+
+def _gravar_trilha_simples(con: Any, data: str, turno: str, placa: str, brutos: list[tuple[str, float, float]]) -> dict[str, Any]:
+    """Desenho sem HMM, para o histórico que ainda não foi regravado. Não liga vão longo."""
+    from datetime import date as dia_tipo
+
+    from .live_db import gravar_trilha_visual
+
+    linhas = [item for item in (_enxugar(linha) for linha in _linhas_visuais(brutos, None)) if len(item) >= 2]
+    try:
+        setores = _setores_do_turno(dia_tipo.fromisoformat(data), turno)
+    except (TypeError, ValueError):
+        setores = []
+    dentro, fora = _partir_salvas(linhas, setores)
+    ate = brutos[-1][0] if brutos else ""
+    gravar_trilha_visual(con, data, turno, placa, linhas, dentro, fora, ate)
+    return {"placa": placa, "linhas": linhas, "dentro": dentro, "fora": fora, "ate": ate}
+
+
 _SETORES_TURNO: dict[tuple[str, str], list[dict[str, Any]]] = {}
 _POLIGONOS_PRONTOS: dict[tuple[tuple[str, int], ...], list[tuple[str, Any, float]]] = {}
 
@@ -515,17 +701,23 @@ def _linhas_recortadas(
     e a saída. Um vão fora do setor não é religado, e dois pulsos externos não
     desenham uma reta atravessando o setor. Sem polígono, não há o que recortar.
     """
+    if not aneis:
+        return []
+    return _recortar_prontas(_linhas_visuais(pontos, ruas), aneis)
+
+
+def _recortar_prontas(linhas: list[Any], aneis: list[list[list[float]]]) -> list[list[list[float]]]:
+    """Corta polilinhas já prontas no polígono. Não casa pulso de novo."""
     from shapely.geometry import LineString, Point
 
     if not aneis:
         return []
-
     geoms = _poligonos_oficiais([{"poligonos": aneis}])
     if not geoms:
         return []
     saida: list[list[list[float]]] = []
-    for linha in _linhas_visuais(pontos, ruas):
-        coords = [(float(par[0]), float(par[1])) for par in linha if len(par) >= 2]
+    for linha in linhas or []:
+        coords = [(float(par[0]), float(par[1])) for par in linha if isinstance(par, (list, tuple)) and len(par) >= 2]
         if len(coords) < 2:
             continue
         dentro = [any(pronto.covers(Point(lon, lat)) for _geom, pronto in geoms) for lat, lon in coords]
@@ -571,48 +763,67 @@ def trilhas(
     dia, pedido = _dia_turno(data, turno)
     filtro_placa = str(placa or "").strip().upper()
     filtro_rota = str(rota or "").strip().upper()
+    from .live_db import ler_trilhas_visuais
+
+    from .dificil_acesso import eh_basculante
+
     con = conectar()
     try:
-        rows = con.execute(
+        salvas = ler_trilhas_visuais(con, dia.isoformat(), pedido)
+        resumo = con.execute(
             """
-            SELECT placa, ts, lat, lon FROM ponto
+            SELECT placa, COUNT(*) AS n, MAX(ts) AS mx
+            FROM ponto
             WHERE data = ? AND turno = ?
-            ORDER BY placa, ts
+            GROUP BY placa
             """,
             (dia.isoformat(), pedido),
         ).fetchall()
+        cursor = ""
+        pontos_originais = 0
+        faltam: list[str] = []
+        for row in resumo:
+            pontos_originais += int(row["n"] or 0)
+            mx = str(row["mx"] or "")
+            if mx > cursor:
+                cursor = mx
+            placa_txt = str(row["placa"] or "")
+            if eh_basculante(placa_txt) or _norm_placa(placa_txt) in salvas:
+                continue
+            faltam.append(placa_txt)
+        if faltam:
+            marcas = ",".join("?" for _ in faltam)
+            brutos_por: dict[str, list[tuple[str, float, float]]] = {}
+            for row in con.execute(
+                f"""
+                SELECT placa, ts, lat, lon FROM ponto
+                WHERE data = ? AND turno = ? AND placa IN ({marcas})
+                ORDER BY placa, ts
+                """,
+                [dia.isoformat(), pedido, *faltam],
+            ):
+                brutos_por.setdefault(str(row["placa"] or ""), []).append(
+                    (str(row["ts"] or ""), float(row["lat"]), float(row["lon"]))
+                )
+            for placa_txt, brutos in brutos_por.items():
+                salvas[_norm_placa(placa_txt)] = _gravar_trilha_simples(
+                    con, dia.isoformat(), pedido, placa_txt, brutos
+                )
+            con.commit()
+        veiculos = []
+        visuais = 0
+        for chave in sorted(salvas):
+            salvo = salvas[chave]
+            placa_txt = str(salvo.get("placa") or chave)
+            if eh_basculante(placa_txt):
+                continue
+            linhas = list(salvo.get("dentro") or [])
+            fora = list(salvo.get("fora") or [])
+            visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
+            if linhas or fora:
+                veiculos.append({"placa": placa_txt, "linhas": linhas, "deslocamento": fora})
     finally:
         con.close()
-    por_placa: dict[str, list[tuple[str, float, float]]] = {}
-    cursor = ""
-    for row in rows:
-        placa = str(row["placa"] or "")
-        ts = str(row["ts"] or "")
-        por_placa.setdefault(placa, []).append((ts, float(row["lat"]), float(row["lon"])))
-        if ts > cursor:
-            cursor = ts
-    veiculos = []
-    visuais = 0
-    setores = _setores_do_turno(dia, pedido)
-    from .dificil_acesso import eh_basculante
-
-    for placa, brutos in por_placa.items():
-        if eh_basculante(placa):
-            continue
-        linhas = _linhas_visuais(brutos, _ruas_proximas(brutos))
-        fora = []
-        if setores and linhas:
-            dentro = []
-            for linha in linhas:
-                coords = [(float(par[0]), float(par[1])) for par in linha]
-                parte_dentro, parte_fora = _partir_trilha(coords, setores)
-                dentro.extend(parte_dentro)
-                fora.extend(parte_fora)
-            linhas = [_simplificar(parte) for parte in dentro if len(parte) >= 2]
-            fora = [_simplificar(parte) for parte in fora if len(parte) >= 2]
-        visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
-        if linhas or fora:
-            veiculos.append({"placa": placa, "linhas": linhas, "deslocamento": fora})
     if filtro_placa:
         veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() == filtro_placa]
     if filtro_rota:
@@ -623,7 +834,7 @@ def trilhas(
         "data": dia.isoformat(),
         "turno": pedido,
         "cursor": cursor,
-        "pontos_originais": len(rows),
+        "pontos_originais": pontos_originais,
         "pontos_visuais": visuais,
         "veiculos": veiculos,
     }
@@ -1260,6 +1471,8 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         for forma in _formas_placa(placa):
             if forma not in formas:
                 formas.append(forma)
+    from .live_db import ler_trilhas_visuais
+
     con = conectar()
     try:
         marcas = ",".join("?" for _ in formas)
@@ -1271,6 +1484,7 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
             """,
             [data, turno, *formas],
         ).fetchall()
+        salvas = ler_trilhas_visuais(con, data, turno)
     finally:
         con.close()
     por_placa: dict[str, list[tuple[str, float, float]]] = {}
@@ -1281,15 +1495,20 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         if str(setor.get("codigo") or "").upper() == codigo:
             aneis = setor.get("aneis") or []
             break
-    ruas = _ruas_do_codigo(codigo)
     saida = []
     for item in executores:
         placa = str(item.get("placa") or "")
-        brutos = por_placa.get(_norm_placa(placa)) or []
+        chave = _norm_placa(placa)
+        brutos = por_placa.get(chave) or []
         copia = dict(item)
-        copia["linhas"] = (
-            _linhas_recortadas(brutos, aneis, ruas) if aneis else _linhas_visuais(brutos, ruas)
-        )
+        salvo = salvas.get(chave)
+        if salvo and salvo.get("linhas"):
+            base = salvo["linhas"]
+            copia["linhas"] = _recortar_prontas(base, aneis) if aneis else base
+        elif aneis:
+            copia["linhas"] = _linhas_recortadas(brutos, aneis, None)
+        else:
+            copia["linhas"] = [linha for linha in (_enxugar(item_linha) for item_linha in _linhas_visuais(brutos, None)) if len(linha) >= 2]
         saida.append(copia)
     return saida
 

@@ -8,6 +8,7 @@ No Render, se OUTPUT_DIR não for mudado, esses arquivos continuam em
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -338,6 +339,17 @@ def _schema(con: sqlite3.Connection) -> None:
             lon REAL NOT NULL,
             PRIMARY KEY (data, turno, placa, ts)
         );
+        CREATE TABLE IF NOT EXISTS trilha (
+            data TEXT NOT NULL,
+            turno TEXT NOT NULL,
+            placa TEXT NOT NULL,
+            linhas TEXT NOT NULL DEFAULT '[]',
+            dentro TEXT NOT NULL DEFAULT '[]',
+            fora TEXT NOT NULL DEFAULT '[]',
+            ate TEXT NOT NULL DEFAULT '',
+            atualizado_em TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (data, turno, placa)
+        );
         """
     )
     colunas = {str(row[1]) for row in con.execute("PRAGMA table_info(turno)")}
@@ -633,6 +645,66 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 tem_geo,
             ),
         )
+
+
+def _json_linhas(texto: str) -> list[Any]:
+    try:
+        bruto = json.loads(texto or "[]")
+    except json.JSONDecodeError:
+        return []
+    return bruto if isinstance(bruto, list) else []
+
+
+def gravar_trilha_visual(
+    con: sqlite3.Connection,
+    data: str,
+    turno: str,
+    placa: str,
+    linhas: list[Any],
+    dentro: list[Any],
+    fora: list[Any],
+    ate: str,
+) -> None:
+    corpo = json.dumps(linhas, separators=(",", ":"))
+    miolo = json.dumps(dentro, separators=(",", ":"))
+    resto = json.dumps(fora, separators=(",", ":"))
+    con.execute(
+        """
+        INSERT INTO trilha (data, turno, placa, linhas, dentro, fora, ate, atualizado_em)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(data, turno, placa) DO UPDATE SET
+            linhas = excluded.linhas,
+            dentro = excluded.dentro,
+            fora = excluded.fora,
+            ate = excluded.ate,
+            atualizado_em = excluded.atualizado_em
+        """,
+        (data, turno, placa, corpo, miolo, resto, ate, agora_iso()),
+    )
+
+
+def ler_trilhas_visuais(con: sqlite3.Connection, data: str, turno: str) -> dict[str, dict[str, Any]]:
+    """Desenho já casado. A chave é a placa sem hífen."""
+    saida: dict[str, dict[str, Any]] = {}
+    try:
+        rows = con.execute(
+            "SELECT placa, linhas, dentro, fora, ate FROM trilha WHERE data = ? AND turno = ?",
+            (data, turno),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return saida
+    for row in rows:
+        chave = "".join(ch for ch in str(row["placa"] or "").upper() if ch.isalnum())
+        if not chave:
+            continue
+        saida[chave] = {
+            "placa": str(row["placa"] or ""),
+            "linhas": _json_linhas(str(row["linhas"] or "")),
+            "dentro": _json_linhas(str(row["dentro"] or "")),
+            "fora": _json_linhas(str(row["fora"] or "")),
+            "ate": str(row["ate"] or ""),
+        }
+    return saida
 
 
 def inserir_pontos(

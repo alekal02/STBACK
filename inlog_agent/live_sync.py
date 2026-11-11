@@ -518,6 +518,20 @@ def reconciliar_rotas_previstas(con, dia: date, turno: str) -> dict[str, Any]:
     }
 
 
+def _desenho_da_placa(con: Any, data: str, turno: str, placa: str, *, completo: bool) -> None:
+    """Grava a polilinha casada junto com o ponto. A consulta do mapa só lê."""
+    from .dificil_acesso import eh_basculante
+
+    if eh_basculante(placa):
+        return
+    try:
+        from .live_mapa import atualizar_trilha
+
+        atualizar_trilha(con, data, turno, placa, completo=completo)
+    except Exception as exc:
+        print(f"Trajetória de {placa} não gravada: {exc}", flush=True)
+
+
 def ciclo_gps(
     output_dir: Path,
     data: str | None,
@@ -705,6 +719,7 @@ def ciclo_gps(
                         for item in recebidos:
                             if str(item.get("timestamp") or "") > cursor:
                                 pontos_novos.append(item)
+                        _desenho_da_placa(con, dia.isoformat(), pedido, str(placa["placa"]), completo=False)
         finally:
             if inicio_pesada:
                 _RECONSTRUINDO = False
@@ -947,6 +962,9 @@ def reconciliar_buracos(
             gravados = inserir_pontos(con, dia.isoformat(), pedido, placa, recebidos)
             novos += gravados
             con.commit()
+            if gravados and not eh_basculante(placa, veiculo):
+                _desenho_da_placa(con, dia.isoformat(), pedido, placa, completo=True)
+                con.commit()
             if not gravados or eh_basculante(placa, veiculo):
                 continue
             for item in recebidos:
@@ -1339,6 +1357,7 @@ def _importar_pontos_json(con, output_dir: Path, dia: date, turno: str) -> None:
         if not placa or not pontos:
             continue
         inserir_pontos(con, dia.isoformat(), turno, placa, pontos)
+        _desenho_da_placa(con, dia.isoformat(), turno, placa, completo=True)
         maior = max((str(p.get("timestamp") or "") for p in pontos if p.get("timestamp")), default="")
         marcar_placa(
             con,
@@ -1803,6 +1822,7 @@ def rebuscar_historico_turno(
             recebidos = item["pontos"]
             if recebidos and not item["erro"]:
                 novos = inserir_pontos(con, dia.isoformat(), pedido, item["placa"], recebidos)
+                _desenho_da_placa(con, dia.isoformat(), pedido, item["placa"], completo=True)
                 maior = max(str(ponto.get("timestamp") or "") for ponto in recebidos)
                 row = con.execute(
                     "SELECT last_gps_timestamp FROM placa WHERE data = ? AND turno = ? AND placa = ?",
@@ -1991,6 +2011,7 @@ def reprocessar_rotas_historicas(
                 if not recebidos:
                     continue
                 novos += inserir_pontos(con, dia.isoformat(), pedido, chave, recebidos)
+                _desenho_da_placa(con, dia.isoformat(), pedido, chave, completo=True)
                 marcar_placa(con, dia.isoformat(), pedido, chave, veiculo=chave)
         pontos_gps = int(
             con.execute(
@@ -2383,6 +2404,8 @@ def _baixar_desde_inicio(
         )
         return [], 0
     gravados = inserir_pontos(con, dia.isoformat(), turno, placa, recebidos)
+    if gravados:
+        _desenho_da_placa(con, dia.isoformat(), turno, placa, completo=True)
     cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
     from .dificil_acesso import eh_basculante
 

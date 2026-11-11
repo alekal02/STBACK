@@ -104,3 +104,38 @@ def test_sincronizacao_solta_o_banco_antes_de_casar_a_linha(tmp_path, monkeypatc
         buscar_historico=historico,
     )
     assert vistos == ["SCH-9B28"]
+
+
+def test_linha_casada_grava_em_transacao_curta(tmp_path, monkeypatch):
+    banco = tmp_path / "sagtrack.db"
+    monkeypatch.setenv("SAGTRACK_LIVE_DB", str(banco))
+    from inlog_agent.live_mapa import atualizar_trilha, casar_trilha
+
+    escritor = conectar(banco)
+    for indice, ts in enumerate(("2026-11-11T08:00:00", "2026-11-11T08:00:30")):
+        escritor.execute(
+            "INSERT INTO ponto (data, turno, placa, ts, lat, lon) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-11-11", "diurno", "SCH-9B28", ts, -16.82, -49.25 - indice * 0.001),
+        )
+    escritor.commit()
+    escritor.execute("BEGIN IMMEDIATE")
+    durante: list[bool] = []
+
+    def casar(brutos, ruas_de=None):
+        durante.append(escritor.in_transaction)
+        return casar_trilha(brutos, lambda _fatia: [])
+
+    monkeypatch.setattr("inlog_agent.live_mapa.casar_trilha", casar)
+    atualizar_trilha(escritor, "2026-11-11", "diurno", "SCH-9B28", completo=True)
+    assert durante == [False]
+    assert not escritor.in_transaction
+    leitor = conectar(banco, leitura=True)
+    try:
+        salva = leitor.execute(
+            "SELECT placa FROM trilha WHERE data = ? AND turno = ? AND placa = ?",
+            ("2026-11-11", "diurno", "SCH-9B28"),
+        ).fetchone()
+    finally:
+        leitor.close()
+    escritor.close()
+    assert salva is not None

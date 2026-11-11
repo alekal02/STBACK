@@ -340,6 +340,31 @@ def _partir_salvas(
     return dentro, fora
 
 
+def _gravar_linha_curta(
+    con: Any,
+    data: str,
+    turno: str,
+    placa: str,
+    linhas: list[Any],
+    dentro: list[Any],
+    fora: list[Any],
+    ate: str,
+) -> None:
+    """A linha já casada entra e sai numa transação só dela."""
+    from .live_db import gravar_trilha_visual
+
+    if con.in_transaction:
+        con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        gravar_trilha_visual(con, data, turno, placa, linhas, dentro, fora, ate)
+        con.commit()
+    except Exception:
+        if con.in_transaction:
+            con.rollback()
+        raise
+
+
 def atualizar_trilha(
     con: Any,
     data: str,
@@ -351,15 +376,17 @@ def atualizar_trilha(
     """Casa a placa uma vez e grava o desenho. A leitura do mapa não refaz o HMM."""
     from datetime import date as dia_tipo
 
-    from .live_db import gravar_trilha_visual, ler_trilhas_visuais
+    from .live_db import ler_trilhas_visuais
 
+    if con.in_transaction:
+        con.commit()
     rows = con.execute(
         "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
         (data, turno, placa),
     ).fetchall()
     brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
     if len(brutos) < 2:
-        gravar_trilha_visual(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
+        _gravar_linha_curta(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
         return
     chave = _norm_placa(placa)
     guardada = None if completo else ler_trilhas_visuais(con, data, turno).get(chave)
@@ -380,7 +407,7 @@ def atualizar_trilha(
     except (TypeError, ValueError):
         setores = []
     dentro, fora = _partir_salvas(linhas, setores)
-    gravar_trilha_visual(con, data, turno, placa, linhas, dentro, fora, brutos[-1][0])
+    _gravar_linha_curta(con, data, turno, placa, linhas, dentro, fora, brutos[-1][0])
 
 
 def _gravar_trilha_simples(con: Any, data: str, turno: str, placa: str, brutos: list[tuple[str, float, float]]) -> dict[str, Any]:

@@ -185,3 +185,4 @@ def test_leitura_usa_a_trilha_gravada(tmp_path, monkeypatch):
     assert pacote["veiculos"]
     assert pacote["veiculos"][0]["placa"] == "SCH-9B28"
     assert pacote["veiculos"][0]["tipo"] == "compactador"
+    assert pacote["veiculos"][0]["linhas"] == [curva]

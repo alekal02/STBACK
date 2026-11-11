@@ -19,6 +19,8 @@ TO_WGS = Transformer.from_crs(31982, 4326, always_xy=True)
 RAIO_M = 45.0
 PASSO_M = 40.0
 SALTO_GPS_M = 160.0
+# Outra pista da mesma avenida. Rua de outro nome, mesmo perto, não entra.
+PISTA_DUPLA_M = 40.0
 FEITA_MIN = 90.0
 PARCIAL_MIN = 45.0
 # Rua deitada sobre a divisa do polígono; se for percorrida, entra no percentual; se não for, não conta como pendência.
@@ -801,20 +803,78 @@ def _mesma_via(a: LineString, b: LineString, rumo_a: float, rumo_b: float) -> bo
     return _delta_rumo(rumo_a, rumo_b) <= math.pi / 4
 
 
+def _normalizar_nome_via(texto: str) -> str:
+    import unicodedata
+
+    cru = unicodedata.normalize("NFKD", str(texto or ""))
+    cru = "".join(ch for ch in cru if not unicodedata.combining(ch))
+    return " ".join(cru.upper().split())
+
+
+def _pista_irma(
+    a: int,
+    b: int,
+    segmentos: list[LineString],
+    nomes: list[str],
+) -> bool:
+    """Outra pista da mesma avenida: mesmo nome, paralela, de 1 m a 40 m."""
+    if a == b or not nomes or a >= len(nomes) or b >= len(nomes):
+        return False
+    nome = nomes[a]
+    if not nome or nomes[b] != nome:
+        return False
+    dist = segmentos[a].distance(segmentos[b])
+    if dist <= 1.0 or dist > PISTA_DUPLA_M:
+        return False
+    rumo_a = _rumo_segmento(segmentos[a])
+    rumo_b = _rumo_segmento(segmentos[b])
+    if rumo_a is None or rumo_b is None:
+        return False
+    return _delta_rumo(rumo_a, rumo_b) <= math.pi / 4
+
+
+def _expandir_pista_dupla(
+    indices: set[int],
+    segmentos: list[LineString],
+    nomes: list[str],
+) -> set[int]:
+    """O trecho da rota conta quando o caminhão passou na outra pista da mesma avenida."""
+    if not indices or not nomes or not any(nomes):
+        return set(indices)
+    from shapely.strtree import STRtree
+
+    arvore = STRtree(segmentos)
+    extra: set[int] = set()
+    for i in indices:
+        if i >= len(nomes) or not nomes[i]:
+            continue
+        try:
+            vizinhos = [int(j) for j in arvore.query(segmentos[i].buffer(PISTA_DUPLA_M))]
+        except Exception:
+            vizinhos = list(range(len(segmentos)))
+        for j in vizinhos:
+            if j in indices or j in extra:
+                continue
+            if _pista_irma(i, j, segmentos, nomes):
+                extra.add(j)
+    return set(indices) | extra
+
+
 def _associar_percurso(
     pontos: list[dict[str, Any]],
     segmentos: list[LineString],
+    nomes: list[str] | None = None,
 ) -> tuple[set[int], bool, dict[int, set[int]], dict[int, dict[str, Any]]]:
     """Associa cada passo do GPS à via oficial percorrida.
 
     O raio de 45 m só limita a busca. O passo entra se a direção e a velocidade
     de coleta concordam e a projeção cobre a via: 8 m, ou a própria peça quando
     ela é mais curta. Curva e retorno que encostam na via percorrida entram no
-    mesmo passo. Via paralela que não encosta continua sem crédito. Pulso
-    espaçado casa na malha por HMM: a sequência, a direção e a velocidade de
-    coleta escolhem a rua. Vão sem caminho plausível não marca trecho.
-    Duas vias distintas só ficam sem crédito quando nenhuma está claramente
-    mais perto que a outra.
+    mesmo passo. Via paralela de outro nome continua sem crédito. As duas pistas
+    da mesma avenida, até 40 m, contam juntas. Pulso espaçado casa na malha por
+    HMM: a sequência, a direção e a velocidade de coleta escolhem a rua. Vão sem
+    caminho plausível não marca trecho. Duas vias distintas só ficam sem crédito
+    quando nenhuma está claramente mais perto que a outra.
     """
     from shapely.ops import nearest_points
     from shapely.strtree import STRtree
@@ -922,12 +982,20 @@ def _associar_percurso(
                 else:
                     ainda.append((distancia, indice))
             resto = ainda
-        if any(distancia <= melhor_dist * 2.0 for distancia, _indice in resto):
-            ambiguo = True
-            continue
+        disputa = [(distancia, indice) for distancia, indice in resto if distancia <= melhor_dist * 2.0]
+        if disputa:
+            mesma_avenida = bool(nomes) and all(
+                _pista_irma(melhor, indice, segmentos, nomes) for _distancia, indice in disputa
+            )
+            if not mesma_avenida:
+                ambiguo = True
+                continue
+            for _distancia, indice in disputa:
+                mesmos.add(indice)
         for indice in mesmos:
             passos.setdefault(indice, set()).add(passo_id)
         comprovados |= mesmos
+    comprovados = _expandir_pista_dupla(comprovados, segmentos, nomes or [])
     return comprovados, ambiguo, passos, info
 
 
@@ -1134,17 +1202,29 @@ def _classe_presenca(
 
 
 def _segmentos_oficiais(ruas: list[Any]) -> list[LineString]:
+    segmentos, _nomes = _segmentos_com_nome(ruas, None)
+    return segmentos
+
+
+def _segmentos_com_nome(
+    ruas: list[Any],
+    nomes: list[str] | None,
+) -> tuple[list[LineString], list[str]]:
     segmentos: list[LineString] = []
-    for rua in ruas or []:
+    saida: list[str] = []
+    for i, rua in enumerate(ruas or []):
         if rua is None or getattr(rua, "is_empty", True):
             continue
+        nome = _normalizar_nome_via(nomes[i]) if nomes and i < len(nomes) else ""
         tipo = getattr(rua, "geom_type", "")
         partes = list(rua.geoms) if tipo == "MultiLineString" else [rua]
         for parte in partes:
             if getattr(parte, "geom_type", "") != "LineString" or parte.length < 2:
                 continue
-            segmentos.extend(_cortar(parte, PASSO_M))
-    return segmentos
+            pecas = _cortar(parte, PASSO_M)
+            segmentos.extend(pecas)
+            saida.extend([nome] * len(pecas))
+    return segmentos, saida
 
 
 def _perto_das_vias(pontos: list[dict[str, Any]], segmentos: list[LineString]) -> list[dict[str, Any]]:
@@ -1375,11 +1455,13 @@ def cobertura_compartilhada(
     ruas: list[Any],
     veiculos: list[dict[str, Any]],
     geom_setor=None,
+    nomes: list[str] | None = None,
 ) -> dict[str, Any]:
     """União dos trechos oficiais em que o GPS percorreu a via.
 
-    Proximidade de 45 m não credita sozinha uma rua paralela. O principal é quem
-    tem a maior cobertura contínua; uma diferença menor que um trecho da malha
+    Proximidade de 45 m não credita sozinha uma rua paralela de outro nome.
+    A outra pista da mesma avenida, paralela e até 40 m, entra no percentual.
+    O principal é quem tem a maior cobertura contínua; uma diferença menor que um trecho da malha
     não troca o caminhão por ruído. Apoio efetivo exige exclusiva interna com
     progressão de coleta: uma corrida seguida na sequência do GPS, não um par
     de passos nem duas visitas separadas. Via de contorno percorrida entra no
@@ -1387,7 +1469,7 @@ def cobertura_compartilhada(
     Exclusiva sem essa progressão fica não
     confirmada, e não vira cobertura sobreposta. A união não soma duas vezes.
     """
-    segmentos = _segmentos_oficiais(ruas)
+    segmentos, nomes_seg = _segmentos_com_nome(ruas, nomes)
     vazio_exec: list[dict[str, Any]] = []
     if not segmentos:
         return _pacote_cobertura(0.0, [], [], vazio_exec, [], 0.0)
@@ -1418,7 +1500,7 @@ def cobertura_compartilhada(
             )
             continue
         proximos = _indices_cobertos(segmentos, pontos)
-        percorridos, ambiguo, passos_via, passos_info = _associar_percurso(pontos, segmentos)
+        percorridos, ambiguo, passos_via, passos_info = _associar_percurso(pontos, segmentos, nomes_seg)
         if percorridos:
             indices = percorridos
             classe, motivo = "executor", "percurso comprovado ao longo da via oficial"

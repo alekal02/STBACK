@@ -768,67 +768,47 @@ def trilhas(
     dia, pedido = _dia_turno(data, turno)
     filtro_placa = str(placa or "").strip().upper()
     filtro_rota = str(rota or "").strip().upper()
-    from .live_db import ler_trilhas_visuais
-
-    from .dificil_acesso import eh_basculante
-
     con = conectar()
     try:
-        salvas = ler_trilhas_visuais(con, dia.isoformat(), pedido)
         resumo = con.execute(
             """
-            SELECT placa, COUNT(*) AS n, MAX(ts) AS mx
+            SELECT COUNT(*) AS n, MAX(ts) AS mx
             FROM ponto
             WHERE data = ? AND turno = ?
-            GROUP BY placa
             """,
             (dia.isoformat(), pedido),
-        ).fetchall()
-        cursor = ""
-        pontos_originais = 0
-        faltam: list[str] = []
-        for row in resumo:
-            pontos_originais += int(row["n"] or 0)
-            mx = str(row["mx"] or "")
-            if mx > cursor:
-                cursor = mx
-            placa_txt = str(row["placa"] or "")
-            if eh_basculante(placa_txt) or _norm_placa(placa_txt) in salvas:
-                continue
-            faltam.append(placa_txt)
-        if faltam:
-            marcas = ",".join("?" for _ in faltam)
-            brutos_por: dict[str, list[tuple[str, float, float]]] = {}
-            for row in con.execute(
-                f"""
-                SELECT placa, ts, lat, lon FROM ponto
-                WHERE data = ? AND turno = ? AND placa IN ({marcas})
-                ORDER BY placa, ts
-                """,
-                [dia.isoformat(), pedido, *faltam],
-            ):
-                brutos_por.setdefault(str(row["placa"] or ""), []).append(
-                    (str(row["ts"] or ""), float(row["lat"]), float(row["lon"]))
-                )
-            for placa_txt, brutos in brutos_por.items():
-                salvas[_norm_placa(placa_txt)] = _gravar_trilha_simples(
-                    con, dia.isoformat(), pedido, placa_txt, brutos
-                )
-            con.commit()
-        veiculos = []
-        visuais = 0
-        for chave in sorted(salvas):
-            salvo = salvas[chave]
-            placa_txt = str(salvo.get("placa") or chave)
-            if eh_basculante(placa_txt):
-                continue
-            linhas = list(salvo.get("dentro") or [])
-            fora = list(salvo.get("fora") or [])
-            visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
-            if linhas or fora:
-                veiculos.append({"placa": placa_txt, "linhas": linhas, "deslocamento": fora})
+        ).fetchone()
+        pontos_originais = int(resumo["n"] or 0) if resumo else 0
+        cursor = str(resumo["mx"] or "") if resumo else ""
     finally:
         con.close()
+    from .trajetoria import trajetos_do_turno
+
+    veiculos = []
+    visuais = 0
+    setores = _setores_do_turno(dia, pedido)
+    for placa, trajeto in trajetos_do_turno(dia, pedido).items():
+        if trajeto.tipo == "basculante" or not setores:
+            linhas = [list(linha) for linha in trajeto.linhas]
+            fora: list[list[list[float]]] = []
+        else:
+            linhas = []
+            fora = []
+            for linha in trajeto.linhas:
+                coords = [(float(par[0]), float(par[1])) for par in linha]
+                parte_dentro, parte_fora = _partir_trilha(coords, setores)
+                linhas.extend(_simplificar(parte) for parte in parte_dentro if len(parte) >= 2)
+                fora.extend(_simplificar(parte) for parte in parte_fora if len(parte) >= 2)
+        visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
+        if trajeto.n_pontos or linhas or fora:
+            veiculos.append(
+                {
+                    "placa": placa,
+                    "tipo": trajeto.tipo,
+                    "linhas": linhas,
+                    "deslocamento": fora,
+                }
+            )
     if filtro_placa:
         veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() == filtro_placa]
     if filtro_rota:
@@ -969,8 +949,8 @@ def dificil_acesso(data: str | None, turno: str | None) -> dict[str, Any]:
 
     areas = areas_dificil()
     areas_marcadas = anotar_programacao(areas, dia, pedido)
-    anotar_cobertura(areas_marcadas, bruto)
-    marcar_atividade(areas_marcadas, bruto)
+    anotar_cobertura(areas_marcadas, bruto, dia=dia, turno=pedido)
+    marcar_atividade(areas_marcadas, bruto, dia=dia, turno=pedido)
     from .live_sync import agora_brt
     from .live_turno import situacao_pelo_relogio
 
@@ -1100,14 +1080,26 @@ def dificil_acesso_v2(data: str | None, turno: str | None) -> dict[str, Any]:
     try:
         areas = areas_dificil()
         areas_marcadas = anotar_programacao(areas, dia, pedido)
-        anotar_cobertura(areas_marcadas, bruto)
-        marcar_atividade(areas_marcadas, bruto)
+        anotar_cobertura(areas_marcadas, bruto, dia=dia, turno=pedido)
+        marcar_atividade(areas_marcadas, bruto, dia=dia, turno=pedido)
+        from .dificil_acesso import codigo_da_frota
+        from .trajetoria import trajetos_do_turno
+
+        pecas_por_codigo: dict[str, list] = {}
+        for trajeto in trajetos_do_turno(dia, pedido).values():
+            if trajeto.tipo != "basculante":
+                continue
+            codigo = codigo_da_frota(trajeto.placa)
+            if codigo:
+                pecas_por_codigo.setdefault(codigo, []).extend(trajeto.pecas)
         malha = malha_areas_dificil()
         areas_v2: list[dict[str, Any]] = []
         for area in areas_marcadas:
             try:
                 info = malha.get(str(area.get("id") or "")) or {}
-                areas_v2.append(montar_area_v2(area, bruto, BASCULANTES, info))
+                areas_v2.append(
+                    montar_area_v2(area, bruto, BASCULANTES, info, pecas_por_codigo)
+                )
             except Exception as exc:
                 print(f"Área V2 {area.get('nome')}: {exc}", flush=True)
                 copia = dict(area)
@@ -1120,7 +1112,14 @@ def dificil_acesso_v2(data: str | None, turno: str | None) -> dict[str, Any]:
         veiculos = []
         for item in BASCULANTES:
             try:
-                veiculos.append(montar_veiculo_v2(item, bruto.get(item["codigo"]) or [], areas_v2))
+                veiculos.append(
+                    montar_veiculo_v2(
+                        item,
+                        bruto.get(item["codigo"]) or [],
+                        areas_v2,
+                        pecas_por_codigo.get(item["codigo"]) or [],
+                    )
+                )
             except Exception as exc:
                 print(f"Veículo V2 {item.get('placa')}: {exc}", flush=True)
                 veiculos.append(
@@ -1228,7 +1227,8 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
         ).fetchall()
     finally:
         con.close()
-    from .dificil_acesso import eh_basculante
+
+    from .trajetoria import aproximar_na_via
 
     setores = _setores_do_turno(dia, pedido)
     pontos = []
@@ -1238,10 +1238,9 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
         if ts > cursor:
             cursor = ts
         placa = str(row["placa"] or "")
-        if eh_basculante(placa):
-            continue
         lat = float(row["lat"])
         lon = float(row["lon"])
+        lat, lon = aproximar_na_via(lat, lon)
         pontos.append(
             {
                 "placa": placa,

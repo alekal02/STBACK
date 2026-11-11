@@ -462,6 +462,7 @@ def montar_area_v2(
     series: dict[str, list[tuple[str, float, float]]],
     basculantes: tuple[dict[str, str], ...] | list[dict[str, str]],
     malha_info: dict[str, Any] | None = None,
+    pecas_por_codigo: dict[str, list[list[tuple[str, float, float]]]] | None = None,
 ) -> dict[str, Any]:
     """Copia a área V1 e acrescenta acessos + passagens. Falha → listas vazias."""
     item = dict(area)
@@ -476,15 +477,21 @@ def montar_area_v2(
         codigo = basc["codigo"]
         placa = basc["placa"]
         try:
-            pas = passagens_do_veiculo(
-                series.get(codigo) or [],
-                geom,
-                acessos,
-                codigo=codigo,
-                placa=placa,
-                area_id=str(area.get("id") or ""),
-                area_nome=str(area.get("nome") or ""),
-            )
+            pecas = None if pecas_por_codigo is None else pecas_por_codigo.get(codigo) or []
+            fontes = pecas if pecas is not None else [series.get(codigo) or []]
+            pas = []
+            for fonte in fontes:
+                pas.extend(
+                    passagens_do_veiculo(
+                        fonte,
+                        geom,
+                        acessos,
+                        codigo=codigo,
+                        placa=placa,
+                        area_id=str(area.get("id") or ""),
+                        area_nome=str(area.get("nome") or ""),
+                    )
+                )
         except Exception as exc:
             print(f"Passagens V2 {placa} / {area.get('nome')}: {exc}", flush=True)
             pas = []
@@ -513,11 +520,13 @@ def montar_veiculo_v2(
     basc: dict[str, str],
     serie: list[tuple[str, float, float]],
     areas_v2: list[dict[str, Any]],
+    pecas: list[list[tuple[str, float, float]]] | None = None,
 ) -> dict[str, Any]:
     """Trechos e marcadores E/S do veículo. Uma trajetória, várias áreas."""
     placa = basc["placa"]
     codigo = basc["codigo"]
     cor = cor_da_placa(placa)
+    fontes = pecas if pecas is not None else [serie]
     marcadores: list[dict[str, Any]] = []
     minhas_passagens: list[dict[str, Any]] = []
     geoms = []
@@ -565,7 +574,10 @@ def montar_veiculo_v2(
                     }
                 )
         try:
-            trechos_por_area[str(area.get("id") or "")] = trechos_do_veiculo(serie, geom, pas_area)
+            trechos_area: list[dict[str, Any]] = []
+            for fonte in fontes:
+                trechos_area.extend(trechos_do_veiculo(fonte, geom, pas_area))
+            trechos_por_area[str(area.get("id") or "")] = trechos_area
         except Exception as exc:
             print(f"Trechos V2 {placa}: {exc}", flush=True)
             trechos_por_area[str(area.get("id") or "")] = []
@@ -576,12 +588,14 @@ def montar_veiculo_v2(
         from shapely.ops import unary_union
 
         geom_uniao = unary_union(geoms) if geoms else None
-        trechos = trechos_do_veiculo(serie, geom_uniao, minhas_passagens)
+        trechos = []
+        for fonte in fontes:
+            trechos.extend(trechos_do_veiculo(fonte, geom_uniao, minhas_passagens))
     except Exception as exc:
         print(f"União trechos V2 {placa}: {exc}", flush=True)
         trechos = []
 
-    if not trechos and serie:
+    if not trechos and pecas is None and serie:
         coords = []
         for _ts, lat, lon in sorted(set(serie), key=lambda i: (i[0], i[1], i[2])):
             par = _coord(lat, lon)

@@ -715,10 +715,10 @@ def ciclo_gps(
                         lon=lon,
                         telemetria=classificar_telemetria(maior, momento),
                     )
+                    for item in recebidos:
+                        if str(item.get("timestamp") or "") > cursor:
+                            pontos_novos.append(item)
                     if not bascula:
-                        for item in recebidos:
-                            if str(item.get("timestamp") or "") > cursor:
-                                pontos_novos.append(item)
                         _desenho_da_placa(con, dia.isoformat(), pedido, str(placa["placa"]), completo=False)
         finally:
             if inicio_pesada:
@@ -936,8 +936,6 @@ def reconciliar_buracos(
     inicio_fatia = time.perf_counter()
     con = conectar()
     try:
-        from .dificil_acesso import eh_basculante
-
         while fila and aberto:
             if orcamento_s is not None and time.perf_counter() - inicio_fatia >= orcamento_s:
                 break
@@ -962,10 +960,12 @@ def reconciliar_buracos(
             gravados = inserir_pontos(con, dia.isoformat(), pedido, placa, recebidos)
             novos += gravados
             con.commit()
+            from .dificil_acesso import eh_basculante
+
             if gravados and not eh_basculante(placa, veiculo):
                 _desenho_da_placa(con, dia.isoformat(), pedido, placa, completo=True)
                 con.commit()
-            if not gravados or eh_basculante(placa, veiculo):
+            if not gravados:
                 continue
             for item in recebidos:
                 lido = _parse_ts(str(item.get("timestamp") or ""))
@@ -1462,7 +1462,24 @@ def _recalcular_oficial(
             rota["codigo"] = codigo
         rotas.append(rota)
     _anexar_geometria_visual(setores, caminhoes, rotas)
+    _aplicar_linha_nas_rotas(dia, turno, rotas)
     return rotas
+
+
+def _aplicar_linha_nas_rotas(dia: date, turno: str, rotas: list[dict[str, Any]]) -> None:
+    """O percentual da rota é a linha casada de todos os veículos, basculante incluso."""
+    from .trajetoria import percentual_das_rotas
+
+    codigos = [str(rota.get("codigo") or "") for rota in rotas if str(rota.get("codigo") or "").strip()]
+    try:
+        valores = percentual_das_rotas(dia, turno, codigos)
+    except Exception as exc:
+        print(f"Linha casada das rotas indisponível: {exc}", flush=True)
+        return
+    for rota in rotas:
+        codigo = str(rota.get("codigo") or "").strip().upper()
+        if codigo in valores and valores[codigo] is not None:
+            rota["percentual"] = valores[codigo]
 
 
 _EXIBICAO_OFICIAL: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}
@@ -2196,7 +2213,12 @@ def _cobertura_visual(setor: dict[str, Any], caminhoes: list[dict[str, Any]]) ->
         )
     if not veiculos:
         return None
-    return cobertura_compartilhada(ruas, veiculos, setor.get("_geom") or setor.get("geom"))
+    return cobertura_compartilhada(
+        ruas,
+        veiculos,
+        setor.get("_geom") or setor.get("geom"),
+        setor.get("_nomes") or setor.get("nomes"),
+    )
 
 
 def _anexar_geometria_visual(
@@ -2475,10 +2497,7 @@ def _bootstrap_placas_novas(
             buscar_historico,
             ponto_pertence,
         )
-        from .dificil_acesso import eh_basculante
-
-        if not eh_basculante(placa, str(row["veiculo"] or "")):
-            novos.extend(extras)
+        novos.extend(extras)
         gravados_total += gravados
         if extras or gravados:
             print(
@@ -2514,10 +2533,7 @@ def _bootstrap_placas_novas(
             buscar_historico,
             ponto_pertence,
         )
-        from .dificil_acesso import eh_basculante
-
-        if not eh_basculante(placa, veiculo):
-            novos.extend(extras)
+        novos.extend(extras)
         gravados_total += gravados
         if extras or gravados:
             print(

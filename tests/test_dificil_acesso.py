@@ -277,14 +277,14 @@ def test_cenario_do_primeiro_gps_ate_recorrencia(monkeypatch, tmp_path):
     assert cbt018["poligonos"] == []
     assert cbt018["situacao"] == DIFICIL
     placas_trilha = {item["placa"] for item in trilhas(dia, "diurno")["veiculos"]}
-    assert "SCN-4B49" not in placas_trilha
+    assert "SCN-4B49" in placas_trilha
 
     con = conectar()
     rotas = con.execute("SELECT percentual, status, grupo FROM rota").fetchall()
     con.close()
     assert rotas
     assert all(row["percentual"] == 0 and row["status"] == "N\u00e3o iniciada" and row["grupo"] == "nao" for row in rotas)
-    assert chamadas == []
+    assert chamadas == ["rota", "rota", "rota"]
     _limpar_cache_frota()
 
 

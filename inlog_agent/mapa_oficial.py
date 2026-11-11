@@ -177,6 +177,10 @@ def geometrias_inlog(dia: date | None = None) -> dict[str, list[dict[str, Any]]]
 
 
 def carregar_vias() -> list[Any]:
+    return [linha for _nome, linha in carregar_vias_nomeadas()]
+
+
+def carregar_vias_nomeadas() -> list[tuple[str, Any]]:
     arquivo = _sincronizar_gpkg()
     if not arquivo:
         return []
@@ -187,8 +191,12 @@ def carregar_vias() -> list[Any]:
         return []
     cols = _colunas(con, tabela)
     geom_col = _achar_coluna(cols, "geom", "geometry") or "geom"
-    linhas = []
-    for (blob,) in con.execute(f"SELECT {_quote(geom_col)} FROM {_quote(tabela)}"):
+    col_nome = _achar_coluna(cols, "name", "nome")
+    select = _quote(geom_col) if not col_nome else f"{_quote(geom_col)}, {_quote(col_nome)}"
+    linhas: list[tuple[str, Any]] = []
+    for row in con.execute(f"SELECT {select} FROM {_quote(tabela)}"):
+        blob = row[0]
+        nome = str(row[1] or "").strip() if col_nome else ""
         if not blob:
             continue
         try:
@@ -200,7 +208,7 @@ def carregar_vias() -> list[Any]:
         partes = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
         for parte in partes:
             if parte.geom_type == "LineString" and len(parte.coords) >= 2:
-                linhas.append(parte)
+                linhas.append((nome, parte))
     con.close()
     return linhas
 
@@ -227,24 +235,26 @@ def _vias_wgs(linhas: list[Any], limite: int = 80) -> list[list[list[float]]]:
 def _anexar_vias(setores: list[dict[str, Any]]) -> None:
     from shapely.strtree import STRtree
 
-    malha = carregar_vias()
+    malha = carregar_vias_nomeadas()
     if not malha:
         return
-    arvore = STRtree(malha)
+    arvore = STRtree([linha for _nome, linha in malha])
     for setor in setores:
         geom = setor.get("geom")
         if geom is None:
             setor["ruas"] = []
+            setor["nomes"] = []
             setor["vias"] = []
             continue
         zona = geom.buffer(FOLGA_RECORTE_M)
         recorte = []
+        nomes = []
         try:
             indices = list(arvore.query(zona, predicate="intersects"))
         except TypeError:
-            indices = [i for i, linha in enumerate(malha) if linha.intersects(zona)]
+            indices = [i for i, (_nome, linha) in enumerate(malha) if linha.intersects(zona)]
         for idx in indices:
-            linha = malha[int(idx)]
+            nome, linha = malha[int(idx)]
             inter = linha.intersection(zona)
             if inter.is_empty:
                 continue
@@ -252,7 +262,9 @@ def _anexar_vias(setores: list[dict[str, Any]]) -> None:
             for parte in partes:
                 if parte.geom_type == "LineString" and parte.length >= 10:
                     recorte.append(parte)
+                    nomes.append(nome)
         setor["ruas"] = recorte
+        setor["nomes"] = nomes
         setor["vias"] = _vias_wgs(recorte)
 
 

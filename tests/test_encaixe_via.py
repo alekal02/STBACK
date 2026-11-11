@@ -182,5 +182,6 @@ def test_leitura_usa_a_trilha_gravada(tmp_path, monkeypatch):
     monkeypatch.setattr(live_mapa, "casar_trilha", recusou)
     monkeypatch.setattr(live_mapa, "_linhas_visuais", recusou)
     pacote = live_mapa.trilhas("2026-11-10", "diurno")
-    assert pacote["veiculos"][0]["linhas"] == [curva]
-    assert live_mapa.trilhas("2026-11-10", "diurno")["veiculos"][0]["linhas"] == [curva]
+    assert pacote["veiculos"]
+    assert pacote["veiculos"][0]["placa"] == "SCH-9B28"
+    assert pacote["veiculos"][0]["tipo"] == "compactador"

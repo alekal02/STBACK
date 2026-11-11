@@ -832,3 +832,27 @@ def test_painel_encerrado_mantem_o_snapshot_oficial():
             os.environ.pop("SAGTRACK_LIVE_DB", None)
         else:
             os.environ["SAGTRACK_LIVE_DB"] = anterior
+
+
+def test_pista_dupla_da_mesma_avenida_conta():
+    propria = _rua(0, 0, 1200, 0)
+    outra_pista = _rua(0, 30, 1200, 30)
+    pontos = _pontos(propria, datetime(2026, 10, 19, 8, 0))
+    resultado = cobertura_compartilhada(
+        [propria, outra_pista],
+        [_veiculo("AAA1A11", pontos)],
+        nomes=["Avenida São João", "Avenida São João"],
+    )
+    assert resultado["percentual"] >= 95
+
+
+def test_rua_paralela_de_outro_nome_nao_conta():
+    propria = _rua(0, 0, 1200, 0)
+    vizinha = _rua(0, 30, 1200, 30)
+    pontos = _pontos(propria, datetime(2026, 10, 19, 8, 0))
+    resultado = cobertura_compartilhada(
+        [propria, vizinha],
+        [_veiculo("AAA1A11", pontos)],
+        nomes=["Avenida São João", "Rua 32"],
+    )
+    assert 40 <= resultado["percentual"] <= 60

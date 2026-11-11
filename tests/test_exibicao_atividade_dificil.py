@@ -119,6 +119,14 @@ def _preparar(monkeypatch, tmp_path, area, malha):
     mapa._AREAS = None
     monkeypatch.setattr(mapa, "areas_dificil", lambda: [area])
     monkeypatch.setattr("inlog_agent.mapa_oficial.malha_areas_dificil", lambda: malha)
+    ruas = []
+    for info in malha.values():
+        ruas.extend(list(info.get("ruas") or []))
+    monkeypatch.setattr("inlog_agent.trajetoria.rede_oficial", lambda ruas=list(ruas): list(ruas))
+    import inlog_agent.trajetoria as tr
+
+    tr._CACHE.clear()
+    tr._REDE = None
     return mapa
 
 

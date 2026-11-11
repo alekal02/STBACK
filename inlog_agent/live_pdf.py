@@ -319,7 +319,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
             canvas.Canvas.save(self)
 
     pdf = _Folha(buf, pagesize=A4)
-    pdf.setTitle("SEGTRACK — Relatório Operacional de Conclusão de Rotas")
+    pdf.setTitle("SEGTRACK — Relatório operacional de vias percorridas")
     pdf.setAuthor("SEGTRACK")
     pdf.setSubject(f"{_data_br(estado.get('data'))} · {str(estado.get('turno') or '').capitalize()}")
     largura, altura = A4
@@ -448,7 +448,7 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
         y -= 5 * mm
     y -= 3 * mm
     pdf.setFont(fonte, 9)
-    pdf.drawString(14 * mm, y + 1 * mm, "EXECUÇÃO GERAL")
+    pdf.drawString(14 * mm, y + 1 * mm, "VIAS PERCORRIDAS")
     pdf.setFont(forte, 22)
     pdf.drawString(52 * mm, y - 1 * mm, f"{int(resumo.get('percentual_geral') or 0)}%")
     y -= 14 * mm
@@ -475,8 +475,8 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
     pdf.setFillColorRGB(0.1, 0.16, 0.2)
     pdf.drawString(14 * mm, y, "Rotas da operação")
     y -= 6 * mm
-    colunas = [14, 29, 64, 82, 102, 124, 162]
-    cabecalhos = ["ROTA", "VEÍCULO", "PLACA", "INÍCIO", "EXECUÇÃO", "STATUS", "ÚLTIMO GPS"]
+    colunas = [14, 29, 64, 82, 102, 138, 162]
+    cabecalhos = ["ROTA", "VEÍCULO", "PLACA", "INÍCIO", "VIAS PERCORRIDAS", "STATUS", "ÚLTIMO GPS"]
     pdf.setFont(forte, 7)
     for xcol, texto in zip(colunas, cabecalhos):
         pdf.drawString(xcol * mm, y, texto)
@@ -563,7 +563,7 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
     saida = (detalhe or {}).get("saida") or {}
     fatos = [
         ("Status", _texto(rota.get("status"))),
-        ("Execução", _pct(rota.get("percentual"))),
+        ("Vias percorridas", _pct(rota.get("percentual"))),
         ("Veículo", _texto(rota.get("veiculo"))),
         ("Placa", _texto(rota.get("placa"))),
         ("Início", _texto(rota.get("inicio"))),
@@ -593,7 +593,7 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
         pdf.drawString(14 * mm, y - 6 * mm, "OBSERVAÇÃO DE TELEMETRIA")
         pdf.setFont(fonte, 8)
         pdf.drawString(14 * mm, y - 10.5 * mm, "Há registros de GPS associados ao veículo fora da área oficial desta rota.")
-        pdf.drawString(14 * mm, y - 14.5 * mm, "Esses registros são informativos e não interferem no percentual de execução.")
+        pdf.drawString(14 * mm, y - 14.5 * mm, "A passagem desses veículos na via oficial entra nas vias percorridas.")
         extra = _texto_fora(fora)
         if extra:
             pdf.setFillColorRGB(0.35, 0.42, 0.46)

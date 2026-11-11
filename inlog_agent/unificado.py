@@ -507,7 +507,12 @@ def _cobertura_dos_candidatos(
         )
     if not veiculos:
         return None
-    return cobertura_compartilhada(ruas, veiculos, geom)
+    return cobertura_compartilhada(
+        ruas,
+        veiculos,
+        geom,
+        setor.get("nomes") or setor.get("_nomes"),
+    )
 
 
 def _caminhao_de_executor(item: dict[str, Any]) -> dict[str, Any]:
@@ -661,6 +666,7 @@ def _analisar_setor(
         "caminhao": None,
         "_geom": setor.get("geom"),
         "_ruas": setor.get("ruas") or [],
+        "_nomes": list(setor.get("nomes") or []),
     }
     if not clips:
         return base
@@ -2048,7 +2054,7 @@ def _cards_conclusao(rotas: list[dict[str, Any]], vazia: str = "") -> str:
             f"<p class='turno'>{_esc(setor.get('frequencia') or '—')}</p>"
             f"<div class='trilha'><i class='{classe}' style='width:{largura:.0f}%'></i></div>"
             "<dl>"
-            f"<div><dt>Conclusão</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
+            f"<div><dt>Vias percorridas</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
             f"<div><dt>Caminhão</dt><dd>{_esc(cam.get('veiculo') or '—')}</dd></div>"
             f"<div><dt>Placa</dt><dd>{_esc(cam.get('placa') or '—')}</dd></div>"
             f"<div><dt>Empresa GPS</dt><dd>SEGTRACK</dd></div>"

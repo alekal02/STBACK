@@ -65,9 +65,53 @@ class Trajeto:
 
 
 def tipo_da_placa(placa: str) -> str:
-    from .dificil_acesso import eh_basculante
+    from .cadastro_frota import tipo_de
 
-    return "basculante" if eh_basculante(placa) else "compactador"
+    return tipo_de(placa)
+
+
+def entra_no_percentual(placa: str, veiculo: str = "") -> bool:
+    """Compactador ou basculante. PM, trator, van e os demais ficam de fora."""
+    from .dificil_acesso import eh_coleta
+
+    return eh_coleta(placa, veiculo)
+
+
+def placas_do_percentual(dia: date, turno: str) -> list[dict[str, str]]:
+    """Placas do turno que entram nas vias percorridas, com o nome do veículo."""
+    import sqlite3
+
+    from .cadastro_frota import tipo_de
+    from .live_db import conectar
+
+    pedido = str(turno or "").strip().lower()
+    try:
+        con = conectar(leitura=True)
+    except sqlite3.Error:
+        return []
+    try:
+        linhas = con.execute(
+            "SELECT placa, veiculo FROM placa WHERE data = ? AND turno = ? ORDER BY placa",
+            (dia.isoformat(), pedido),
+        ).fetchall()
+    except sqlite3.Error:
+        linhas = []
+    finally:
+        con.close()
+    saida: list[dict[str, str]] = []
+    for row in linhas:
+        placa = str(row["placa"] or "")
+        veiculo = str(row["veiculo"] or "")
+        if not placa or not entra_no_percentual(placa, veiculo):
+            continue
+        saida.append(
+            {
+                "placa": placa,
+                "veiculo": veiculo,
+                "tipo": tipo_de(placa),
+            }
+        )
+    return saida
 
 
 def _hora(texto: str) -> datetime | None:
@@ -693,15 +737,20 @@ def trajetos_do_turno(dia: date, turno: str) -> dict[str, Trajeto]:
 
 
 def percentual_das_rotas(dia: date, turno: str, codigos: list[str]) -> dict[str, float]:
-    """Percentual de cada rota pela linha já casada. Basculante entra na mesma conta."""
+    """Percentual pela linha casada. Só compactador e basculante entram na conta."""
     from shapely.ops import unary_union
     from shapely.strtree import STRtree
 
+    from .dificil_acesso import norm_placa
     from .mapa_oficial import carregar_setores
     from .unificado import _casa_turno
 
+    nomes = {item["placa"]: item["veiculo"] for item in placas_do_percentual(dia, turno)}
+    liberadas = {norm_placa(placa) for placa in nomes}
     pecas: list[LineString] = []
-    for trajeto in trajetos_do_turno(dia, turno).values():
+    for placa, trajeto in trajetos_do_turno(dia, turno).items():
+        if norm_placa(placa) not in liberadas and not entra_no_percentual(placa, ""):
+            continue
         geom = trajeto.geom
         if geom is None or geom.is_empty:
             continue

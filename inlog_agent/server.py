@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hmac
 import json
 import mimetypes
@@ -1270,10 +1271,17 @@ class Handler(BaseHTTPRequestHandler):
         content_type: str,
         extra: dict[str, str] | None = None,
     ) -> None:
+        cabecalhos = dict(extra or {})
+        aceita = (self.headers.get("Accept-Encoding") or "").lower()
+        if body and "gzip" in aceita and "Content-Encoding" not in cabecalhos:
+            body = gzip.compress(body, compresslevel=5)
+            cabecalhos["Content-Encoding"] = "gzip"
+            vary = cabecalhos.get("Vary", "")
+            cabecalhos["Vary"] = f"{vary}, Accept-Encoding" if vary else "Accept-Encoding"
         try:
             self.send_response(status)
             self._cors()
-            for chave, valor in (extra or {}).items():
+            for chave, valor in cabecalhos.items():
                 self.send_header(chave, valor)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -1643,6 +1651,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         try:
+            if path == "/api/frota/cadastro":
+                from .cadastro_frota import listar
+
+                self._json(200, {"veiculos": listar()}, self._no_store())
+                return
             if path == "/api/frota/operacoes":
                 self._json(200, listar_operacoes(), self._no_store())
                 return
@@ -1719,6 +1732,15 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         try:
+            if method == "PUT" and path == "/api/frota/cadastro":
+                from .cadastro_frota import definir
+
+                self._json(
+                    200,
+                    definir(str(payload.get("placa") or ""), str(payload.get("tipo") or "")),
+                    self._no_store(),
+                )
+                return
             if method == "POST" and path == "/api/frota/operacoes":
                 self._json(200, criar_operacao(payload), self._no_store())
                 return

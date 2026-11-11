@@ -796,7 +796,7 @@ def trilhas(
     filtro_placa = str(placa or "").strip().upper()
     filtro_rota = str(rota or "").strip().upper()
     from .live_db import ler_trilhas_visuais
-    from .trajetoria import casar_pulsos, tipo_da_placa
+    from .trajetoria import tipo_da_placa
 
     con = conectar(leitura=True)
     try:
@@ -811,86 +811,32 @@ def trilhas(
         pontos_originais = int(resumo["n"] or 0) if resumo else 0
         cursor = str(resumo["mx"] or "") if resumo else ""
         salvas = ler_trilhas_visuais(con, dia.isoformat(), pedido)
-        prontas = {
-            chave
-            for chave, item in salvas.items()
-            if item.get("linhas") or item.get("dentro") or item.get("fora")
-        }
-        placas = [
-            str(row["placa"] or "")
-            for row in con.execute(
-                "SELECT DISTINCT placa FROM ponto WHERE data = ? AND turno = ?",
-                (dia.isoformat(), pedido),
-            )
-            if str(row["placa"] or "").strip() and _norm_placa(row["placa"]) not in prontas
-        ]
-        faltam: dict[str, list[tuple[str, float, float]]] = {}
-        nome: dict[str, str] = {}
-        if placas:
-            marcas = ",".join("?" for _ in placas)
-            for row in con.execute(
-                f"""
-                SELECT placa, ts, lat, lon FROM ponto
-                WHERE data = ? AND turno = ? AND placa IN ({marcas})
-                ORDER BY placa, ts
-                """,
-                [dia.isoformat(), pedido, *placas],
-            ):
-                placa = str(row["placa"] or "")
-                chave = _norm_placa(placa)
-                nome.setdefault(chave, placa)
-                faltam.setdefault(chave, []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
     finally:
         con.close()
 
     veiculos = []
     visuais = 0
-    for chave in prontas:
-        item = salvas[chave]
-        linhas = [list(linha) for linha in (item.get("dentro") or item.get("linhas") or [])]
-        fora = [list(linha) for linha in (item.get("fora") or [])]
+    for chave, item in salvas.items():
+        tipo = tipo_da_placa(str(item.get("placa") or chave))
+        if tipo not in {"compactador", "basculante"}:
+            continue
+        if tipo == "basculante":
+            linhas = item.get("linhas") or item.get("dentro") or []
+            fora: list[list[list[float]]] = []
+        else:
+            linhas = item.get("dentro") or item.get("linhas") or []
+            fora = item.get("fora") or []
+        if not linhas and not fora:
+            continue
         visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
         veiculos.append(
             {
                 "placa": str(item.get("placa") or chave),
-                "tipo": tipo_da_placa(str(item.get("placa") or chave)),
+                "tipo": tipo,
                 "linhas": linhas,
                 "deslocamento": fora,
             }
         )
-    if faltam:
-        setores = _setores_do_turno(dia, pedido)
-        for chave, serie in faltam.items():
-            placa = nome.get(chave) or chave
-            tipo = tipo_da_placa(placa)
-            if tipo == "basculante":
-                trajeto = casar_pulsos(serie, None, dia, pedido)
-                linhas = [list(linha) for linha in trajeto.linhas]
-                fora = []
-                entrou = bool(trajeto.n_pontos or linhas)
-            else:
-                linhas = []
-                fora = []
-                for linha in _linhas_visuais(serie, None):
-                    coords = [(float(par[0]), float(par[1])) for par in linha]
-                    if not setores:
-                        if len(coords) >= 2:
-                            linhas.append([[lat, lon] for lat, lon in coords])
-                        continue
-                    parte_dentro, parte_fora = _partir_trilha(coords, setores)
-                    linhas.extend(_simplificar(parte) for parte in parte_dentro if len(parte) >= 2)
-                    fora.extend(_simplificar(parte) for parte in parte_fora if len(parte) >= 2)
-                entrou = bool(linhas or fora or len(serie) >= 2)
-            visuais += sum(len(linha) for linha in linhas) + sum(len(linha) for linha in fora)
-            if entrou:
-                veiculos.append(
-                    {
-                        "placa": placa,
-                        "tipo": tipo,
-                        "linhas": linhas,
-                        "deslocamento": fora,
-                    }
-                )
     if filtro_placa:
         veiculos = [item for item in veiculos if str(item.get("placa") or "").upper() == filtro_placa]
     if filtro_rota:
@@ -1310,6 +1256,7 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
     finally:
         con.close()
 
+    from .cadastro_frota import tipo_de
     from .trajetoria import aproximar_na_via
 
     setores = _setores_do_turno(dia, pedido)
@@ -1320,12 +1267,16 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
         if ts > cursor:
             cursor = ts
         placa = str(row["placa"] or "")
+        tipo = tipo_de(placa)
+        if tipo not in {"compactador", "basculante"}:
+            continue
         lat = float(row["lat"])
         lon = float(row["lon"])
         lat, lon = aproximar_na_via(lat, lon)
         pontos.append(
             {
                 "placa": placa,
+                "tipo": tipo,
                 "ts": ts,
                 "lat": lat,
                 "lon": lon,

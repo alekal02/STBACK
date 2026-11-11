@@ -195,7 +195,24 @@ def test_area_programada_sem_atividade_fica_oculta_e_fora_da_programacao_aparece
     )
     con.commit()
     con.close()
-    _inserir(mapa, "2026-10-12", "diurno", "ABC1D23", _pontos(CENTRO, datetime(2026, 10, 12, 8, 0)))
+    pontos_coleta = _pontos(CENTRO, datetime(2026, 10, 12, 8, 0))
+    _inserir(mapa, "2026-10-12", "diurno", "ABC1D23", pontos_coleta)
+    from inlog_agent.live_db import conectar, gravar_trilha_visual
+
+    linha = [[item["latitude"], item["longitude"]] for item in pontos_coleta]
+    con = conectar()
+    gravar_trilha_visual(
+        con,
+        "2026-10-12",
+        "diurno",
+        "ABC1D23",
+        [linha],
+        [linha],
+        [],
+        pontos_coleta[-1]["timestamp"],
+    )
+    con.commit()
+    con.close()
 
     sem_basculante = mapa.dificil_acesso("2026-10-12", "diurno")
     assert sem_basculante["areas"][0]["programada"] is True
@@ -215,9 +232,35 @@ def test_area_programada_sem_atividade_fica_oculta_e_fora_da_programacao_aparece
     assert area["id"] in cbt018["trechos_por_area"]
     assert "ABC1D23" not in {item["placa"] for item in pacote["veiculos"]}
 
+    from inlog_agent.live_db import conectar, gravar_trilha_visual
+
+    con = conectar()
+    gravar_trilha_visual(
+        con,
+        "2026-10-12",
+        "diurno",
+        "ABC1D23",
+        [[[-16.82, -49.25], [-16.821, -49.251]]],
+        [[[-16.82, -49.25], [-16.821, -49.251]]],
+        [],
+        "2026-10-12T08:05:00",
+    )
+    gravar_trilha_visual(
+        con,
+        "2026-10-12",
+        "diurno",
+        "SDM-4D87",
+        [[[-16.82, -49.25], [-16.821, -49.251]]],
+        [[[-16.82, -49.25], [-16.821, -49.251]]],
+        [],
+        "2026-10-12T08:05:00",
+    )
+    con.commit()
+    con.close()
     trilhas = mapa.trilhas("2026-10-12", "diurno")
     placas = {item["placa"] for item in trilhas["veiculos"]}
-    assert "ABC1D23" in placas
+    assert "SDM-4D87" in placas
+    assert "ABC1D23" not in placas
     assert not any(placa.startswith("SCN") for placa in placas)
     body, _etag = mapa.geometria_bytes("2026-10-12", "diurno")
     assert "DIFICIL" not in body.decode("utf-8").upper()

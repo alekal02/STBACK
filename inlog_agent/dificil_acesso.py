@@ -56,6 +56,18 @@ def eh_basculante(placa: str, veiculo: str = "") -> bool:
     return codigo_da_frota(placa, veiculo) is not None
 
 
+def eh_coleta(placa: str, veiculo: str = "") -> bool:
+    """Compactador ou basculante, pelo campo tipo do cadastro.
+
+    O modelo do veículo não entra nessa conta. Quem não está no cadastro
+    fica de fora, inclusive o IVECO que ainda não foi marcado.
+    """
+    del veiculo
+    from .cadastro_frota import tipo_de
+
+    return tipo_de(placa) in {"compactador", "basculante"}
+
+
 def _norm_area(texto: str) -> str:
     bruto = (texto or "").strip().upper()
     return (

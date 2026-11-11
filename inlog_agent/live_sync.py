@@ -520,10 +520,6 @@ def reconciliar_rotas_previstas(con, dia: date, turno: str) -> dict[str, Any]:
 
 def _desenho_da_placa(con: Any, data: str, turno: str, placa: str, *, completo: bool) -> None:
     """Grava a polilinha casada junto com o ponto. A consulta do mapa só lê."""
-    from .dificil_acesso import eh_basculante
-
-    if eh_basculante(placa):
-        return
     try:
         from .live_mapa import atualizar_trilha
 
@@ -719,8 +715,7 @@ def ciclo_gps(
                         if str(item.get("timestamp") or "") > cursor:
                             pontos_novos.append(item)
                     con.commit()
-                    if not bascula:
-                        _desenho_da_placa(con, dia.isoformat(), pedido, str(placa["placa"]), completo=False)
+                    _desenho_da_placa(con, dia.isoformat(), pedido, str(placa["placa"]), completo=False)
         finally:
             if inicio_pesada:
                 _RECONSTRUINDO = False
@@ -963,9 +958,7 @@ def reconciliar_buracos(
             gravados = inserir_pontos(con, dia.isoformat(), pedido, placa, recebidos)
             novos += gravados
             con.commit()
-            from .dificil_acesso import eh_basculante
-
-            if gravados and not eh_basculante(placa, veiculo):
+            if gravados:
                 _desenho_da_placa(con, dia.isoformat(), pedido, placa, completo=True)
                 con.commit()
             if not gravados:
@@ -1429,10 +1422,12 @@ def _recalcular_oficial(
 
     placas = ler_placas(con, dia.isoformat(), turno)
     caminhoes = []
-    from .dificil_acesso import eh_basculante
+    from .dificil_acesso import eh_basculante, eh_coleta
 
     for placa in placas:
         if eh_basculante(str(placa["placa"]), str(placa["veiculo"] or "")):
+            continue
+        if not eh_coleta(str(placa["placa"]), str(placa["veiculo"] or "")):
             continue
         pontos = ler_pontos_placa(con, dia.isoformat(), turno, placa["placa"])
         if len(pontos) < 8:

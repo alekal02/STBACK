@@ -942,10 +942,13 @@ def ler_view(
                 "concluido_em": row["concluido_em"] if "concluido_em" in row.keys() else "",
             }
         )
+    from .cadastro_frota import tipo_de
+
     posicoes = [
         {
             "placa": row["placa"],
             "veiculo": row["veiculo"],
+            "tipo": tipo_de(str(row["placa"] or "")),
             "lat": row["ultimo_lat"],
             "lon": row["ultimo_lon"],
             "ultimo_gps": row["last_gps_timestamp"],

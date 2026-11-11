@@ -8,6 +8,7 @@ from inlog_agent.cobertura import TO_UTM, TO_WGS
 from inlog_agent.trajetoria import (
     casar_pulsos,
     cortar_turno,
+    entra_no_percentual,
     limpar_pulsos,
     percentual_da_linha,
 )
@@ -128,3 +129,36 @@ def test_diurno_nao_credita_rota_de_noturno(monkeypatch):
     assert trajetoria.percentual_das_rotas(date(2026, 11, 11), "diurno", ["66DN", "70AN"]) == {}
     noturno = trajetoria.percentual_das_rotas(date(2026, 11, 11), "noturno", ["66DN"])
     assert noturno.get("66DN", 0) >= 90
+
+
+def test_so_coleta_entra_no_percentual():
+    assert not entra_no_percentual("PM-001", "PM-001")
+    assert not entra_no_percentual("PM-34", "PM-34")
+    assert not entra_no_percentual("TAR-6461", "Trator EX854 - 32316461")
+    assert not entra_no_percentual("CGZ-0015", "TRATOR CORTADOR DE GRAMA GIRO ZERO HUSQVARNA Z560X")
+    assert not entra_no_percentual("SCZ-4A29", "IVECO/DAILY 65CD")
+    assert entra_no_percentual("SCH-9B28", "VW/18.260 CRM 4X2 4P")
+    assert entra_no_percentual("VCK-0D86", "VW/26.260 CRM 6X2 4P")
+    assert entra_no_percentual("SCN-4E19", "IVECO/TECTOR 15-210")
+    assert entra_no_percentual("SCN-4B49", "IVECO/TECTOR 24-280")
+    assert entra_no_percentual("SCN-1G89", "CBT012")
+
+
+def test_percentual_nao_conta_apoio(monkeypatch):
+    from inlog_agent import trajetoria
+
+    sul = _rua(0, 0, 200, 0)
+    inicio = datetime(2026, 11, 11, 8, 0, 0)
+    pontos = [_pulso(sul, dist, inicio + timedelta(seconds=12 * i)) for i, dist in enumerate(range(0, 201, 40))]
+    trajeto = casar_pulsos(pontos, [sul], date(2026, 11, 11), "diurno")
+    setor = {
+        "codigo": "01AD",
+        "frequencia": "SEG/QUA/SEX - DIURNO",
+        "geom": sul.buffer(80),
+        "ruas": [sul],
+        "nomes": ["Avenida Brasil"],
+    }
+    monkeypatch.setattr(trajetoria, "trajetos_do_turno", lambda *_args, **_kwargs: {"PM-001": trajeto, "TAR-6461": trajeto})
+    monkeypatch.setattr(trajetoria, "placas_do_percentual", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("inlog_agent.mapa_oficial.carregar_setores", lambda *_args, **_kwargs: [setor])
+    assert trajetoria.percentual_das_rotas(date(2026, 11, 11), "diurno", ["01AD"]) == {}

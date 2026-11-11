@@ -119,7 +119,7 @@ def areas_dificil() -> list[dict[str, Any]]:
 
 def _codigos_persistidos(dia: date, turno: str) -> list[str] | None:
     try:
-        con = conectar()
+        con = conectar(leitura=True)
     except RuntimeError:
         return None
     try:
@@ -768,7 +768,7 @@ def trilhas(
     dia, pedido = _dia_turno(data, turno)
     filtro_placa = str(placa or "").strip().upper()
     filtro_rota = str(rota or "").strip().upper()
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         resumo = con.execute(
             """
@@ -860,7 +860,7 @@ def _ler_pontos_basculante(dia: date, turno: str) -> tuple[dict[str, list[tuple[
 
     bruto: dict[str, list[tuple[str, float, float]]] = {item["codigo"]: [] for item in BASCULANTES}
     instavel = False
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         placas = _placas_basculante(con, dia.isoformat(), turno)
         for row in con.execute(
@@ -1214,7 +1214,7 @@ def atualizacoes(data: str | None, turno: str | None, since: str | None) -> dict
     cursor_cliente = (since or "").strip()
     if not cursor_cliente:
         raise ValueError("Informe since com o cursor que o navegador já recebeu.")
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         rows = con.execute(
             """
@@ -1347,7 +1347,7 @@ def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
     from .dificil_acesso import eh_basculante
     from .live_db import caminho_banco, ler_pontos_placa
 
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         n_pontos = int(
             con.execute(
@@ -1441,7 +1441,7 @@ def _placas_executoras(data: str, turno: str, codigo: str) -> set[str] | None:
     """None quando a rota não está gravada. Conjunto vazio não filtra por engano o mapa geral."""
     from .cobertura import ler_executores_json
 
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         row = con.execute(
             "SELECT placa, executores_json FROM rota WHERE data = ? AND turno = ? AND codigo = ?",
@@ -1477,7 +1477,7 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
                 formas.append(forma)
     from .live_db import ler_trilhas_visuais
 
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         marcas = ",".join("?" for _ in formas)
         rows = con.execute(
@@ -1581,7 +1581,7 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     codigo = str(rota or "").strip().upper()
     if not codigo:
         raise ValueError("Informe a rota.")
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         row = con.execute(
             """

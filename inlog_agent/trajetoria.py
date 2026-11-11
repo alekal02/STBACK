@@ -655,7 +655,7 @@ def trajetos_do_turno(dia: date, turno: str) -> dict[str, Trajeto]:
     """Uma passagem pelo banco. Tracks e difícil acesso leem este dicionário."""
     from .live_db import caminho_banco, conectar
 
-    con = conectar()
+    con = conectar(leitura=True)
     try:
         rows = con.execute(
             """

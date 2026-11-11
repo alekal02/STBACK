@@ -718,6 +718,7 @@ def ciclo_gps(
                     for item in recebidos:
                         if str(item.get("timestamp") or "") > cursor:
                             pontos_novos.append(item)
+                    con.commit()
                     if not bascula:
                         _desenho_da_placa(con, dia.isoformat(), pedido, str(placa["placa"]), completo=False)
         finally:
@@ -730,6 +731,8 @@ def ciclo_gps(
             ponto["xy"] = _xy(ponto)
         codigos = codigos_com_ponto_novo(pontos_novos, caixas)
         atualizadas: list[dict[str, Any]] = []
+        # Solta a escrita antes do cálculo das rotas. O /tracks lê em paralelo.
+        con.commit()
         if codigos:
             funcao = recalcular or _recalcular_oficial
             atualizadas = funcao(con, output_dir, dia, pedido, codigos)
@@ -2426,8 +2429,6 @@ def _baixar_desde_inicio(
         )
         return [], 0
     gravados = inserir_pontos(con, dia.isoformat(), turno, placa, recebidos)
-    if gravados:
-        _desenho_da_placa(con, dia.isoformat(), turno, placa, completo=True)
     cursor = max(str(ponto["timestamp"]) for ponto in recebidos if ponto.get("timestamp"))
     from .dificil_acesso import eh_basculante
 
@@ -2452,6 +2453,9 @@ def _baixar_desde_inicio(
         telemetria=classificar_telemetria(cursor, momento),
     )
     limpar_falha_consulta(con, dia.isoformat(), turno, placa)
+    con.commit()
+    if gravados:
+        _desenho_da_placa(con, dia.isoformat(), turno, placa, completo=True)
     return recebidos, gravados
 
 

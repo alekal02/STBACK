@@ -264,14 +264,24 @@ def plano_armazenamento() -> dict[str, str]:
     }
 
 
-def conectar(caminho: Path | None = None) -> sqlite3.Connection:
+def conectar(caminho: Path | None = None, *, leitura: bool = False) -> sqlite3.Connection:
+    """Abre o banco em WAL.
+
+    A leitura do mapa não pede trava de escrita. A sincronização pode gravar
+    ao mesmo tempo; o leitor espera até 30 s se precisar, e segue no snapshot
+    já commitado.
+    """
     banco = caminho or caminho_banco()
-    banco.parent.mkdir(parents=True, exist_ok=True)
+    if not leitura:
+        banco.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(banco), timeout=30, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=30000")
+    if leitura:
+        con.execute("PRAGMA query_only=ON")
+        return con
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA busy_timeout=5000")
     _schema(con)
     return con
 

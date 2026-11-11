@@ -706,13 +706,18 @@ def _linhas_recortadas(
     return _recortar_prontas(_linhas_visuais(pontos, ruas), aneis)
 
 
-def _recortar_prontas(linhas: list[Any], aneis: list[list[list[float]]]) -> list[list[list[float]]]:
+def _recortar_prontas(
+    linhas: list[Any],
+    aneis: list[list[list[float]]],
+    geoms: list[Any] | None = None,
+) -> list[list[list[float]]]:
     """Corta polilinhas já prontas no polígono. Não casa pulso de novo."""
     from shapely.geometry import LineString, Point
 
     if not aneis:
         return []
-    geoms = _poligonos_oficiais([{"poligonos": aneis}])
+    if geoms is None:
+        geoms = _poligonos_oficiais([{"poligonos": aneis}])
     if not geoms:
         return []
     saida: list[list[list[float]]] = []
@@ -1495,6 +1500,7 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         if str(setor.get("codigo") or "").upper() == codigo:
             aneis = setor.get("aneis") or []
             break
+    geoms = _poligonos_oficiais([{"poligonos": aneis}]) if aneis else []
     saida = []
     for item in executores:
         placa = str(item.get("placa") or "")
@@ -1504,9 +1510,9 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         salvo = salvas.get(chave)
         if salvo and salvo.get("linhas"):
             base = salvo["linhas"]
-            copia["linhas"] = _recortar_prontas(base, aneis) if aneis else base
+            copia["linhas"] = _recortar_prontas(base, aneis, geoms) if aneis else base
         elif aneis:
-            copia["linhas"] = _linhas_recortadas(brutos, aneis, None)
+            copia["linhas"] = _recortar_prontas(_linhas_visuais(brutos, None), aneis, geoms)
         else:
             copia["linhas"] = [linha for linha in (_enxugar(item_linha) for item_linha in _linhas_visuais(brutos, None)) if len(linha) >= 2]
         saida.append(copia)
@@ -1619,6 +1625,8 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     tem_apoio = any(str(item.get("papel") or "") == "apoio" for item in info["executores"])
     if tem_apoio:
         leitura = _comparacao_vazia("O snapshot já registra o apoio efetivo.")
+    elif info["executores"]:
+        leitura = _comparacao_vazia("O snapshot não registra apoio efetivo.")
     else:
         leitura = _comparar_com_snapshot(
             info,

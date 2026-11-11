@@ -309,16 +309,38 @@ def _metros(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * r * math.asin(math.sqrt(min(1.0, h)))
 
 
-def _linhas_visuais(brutos: list[tuple[str, float, float]]) -> list[list[list[float]]]:
+def _linhas_visuais(
+    brutos: list[tuple[str, float, float]],
+    ruas: list[Any] | None = None,
+) -> list[list[list[float]]]:
+    """Pulsos próximos continuam na corda. Vão de um minuto segue a via, ou quebra."""
+    malha = None
+    salto = _GAP_M
+    if ruas and _tem_salto(brutos, 160.0):
+        from .encaixe_via import Malha, SALTO_RETO_M
+
+        malha = Malha(ruas)
+        salto = SALTO_RETO_M
     grupos: list[list[tuple[float, float]]] = []
     atual: list[tuple[float, float]] = []
     anterior = ""
     anterior_xy: tuple[float, float] | None = None
     for ts, lat, lon in brutos:
         quebra = False
+        dist = _metros(anterior_xy, (lat, lon)) if atual and anterior_xy is not None else 0.0
+        if malha is not None and atual and anterior_xy is not None and dist > salto:
+            caminho = malha.trilha(anterior_xy, (lat, lon), _gap_segundos(anterior, ts))
+            if caminho:
+                for par in caminho[1:]:
+                    if not atual or par != atual[-1]:
+                        atual.append(par)
+                anterior = ts
+                anterior_xy = (lat, lon)
+                continue
+            quebra = True
         if atual and anterior and _gap_segundos(anterior, ts) > 600:
             quebra = True
-        if atual and anterior_xy is not None and _metros(anterior_xy, (lat, lon)) > _GAP_M:
+        if atual and anterior_xy is not None and dist > _GAP_M:
             quebra = True
         if quebra:
             grupos.append(atual)
@@ -329,6 +351,73 @@ def _linhas_visuais(brutos: list[tuple[str, float, float]]) -> list[list[list[fl
     if atual:
         grupos.append(atual)
     return [_simplificar(grupo) for grupo in grupos if len(grupo) >= 2]
+
+
+_VIAS_CIDADE: tuple[list[Any], Any] | None = None
+_RUAS_SETOR: dict[str, list[Any]] | None = None
+
+
+def _ruas_do_codigo(codigo: str) -> list[Any]:
+    """Vias oficiais do setor, uma vez por processo."""
+    global _RUAS_SETOR
+    if _RUAS_SETOR is None:
+        from .mapa_oficial import carregar_setores
+
+        _RUAS_SETOR = {
+            str(setor.get("codigo") or "").upper(): list(setor.get("ruas") or [])
+            for setor in carregar_setores()
+        }
+    return list(_RUAS_SETOR.get(str(codigo or "").upper()) or [])
+
+
+def _ruas_proximas(pontos: list[tuple[str, float, float]]) -> list[Any]:
+    """Vias no retângulo do veículo. Trajeto curto e denso não abre a malha."""
+    if not pontos or not _tem_salto(pontos, 160.0):
+        return []
+    global _VIAS_CIDADE
+    if _VIAS_CIDADE is None:
+        from shapely.strtree import STRtree
+
+        from .mapa_oficial import carregar_vias
+
+        linhas = carregar_vias()
+        _VIAS_CIDADE = (linhas, STRtree(linhas) if linhas else None)
+    linhas, arvore = _VIAS_CIDADE
+    if not linhas or arvore is None:
+        return []
+    from shapely.geometry import box
+
+    from .cobertura import TO_UTM
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for _ts, lat, lon in pontos:
+        try:
+            x, y = TO_UTM.transform(float(lon), float(lat))
+        except (TypeError, ValueError):
+            continue
+        xs.append(float(x))
+        ys.append(float(y))
+    if not xs:
+        return []
+    if math.hypot(max(xs) - min(xs), max(ys) - min(ys)) > 2500:
+        return []
+    zona = box(min(xs) - 80, min(ys) - 80, max(xs) + 80, max(ys) + 80)
+    try:
+        indices = [int(item) for item in arvore.query(zona)]
+    except Exception:
+        return []
+    return [linhas[indice] for indice in indices]
+
+
+def _tem_salto(brutos: list[tuple[str, float, float]], salto_m: float) -> bool:
+    anterior: tuple[float, float] | None = None
+    for _ts, lat, lon in brutos:
+        atual = (lat, lon)
+        if anterior is not None and _metros(anterior, atual) > salto_m:
+            return True
+        anterior = atual
+    return False
 
 
 def _poligonos_oficiais(areas: list[dict[str, Any]]) -> list[tuple[Any, Any]]:
@@ -428,6 +517,7 @@ def trechos_internos_dificil(
 def _linhas_recortadas(
     pontos: list[tuple[str, float, float]],
     aneis: list[list[list[float]]],
+    ruas: list[Any] | None = None,
 ) -> list[list[list[float]]]:
     """Desenho da rota: só o que entra no polígono oficial.
 
@@ -445,7 +535,7 @@ def _linhas_recortadas(
     if not geoms:
         return []
     saida: list[list[list[float]]] = []
-    for linha in _linhas_visuais(pontos):
+    for linha in _linhas_visuais(pontos, ruas):
         coords = [(float(par[0]), float(par[1])) for par in linha if len(par) >= 2]
         if len(coords) < 2:
             continue
@@ -520,7 +610,7 @@ def trilhas(
     for placa, brutos in por_placa.items():
         if eh_basculante(placa):
             continue
-        linhas = _linhas_visuais(brutos)
+        linhas = _linhas_visuais(brutos, _ruas_proximas(brutos))
         fora = []
         if setores and linhas:
             dentro = []
@@ -1202,12 +1292,15 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         if str(setor.get("codigo") or "").upper() == codigo:
             aneis = setor.get("aneis") or []
             break
+    ruas = _ruas_do_codigo(codigo)
     saida = []
     for item in executores:
         placa = str(item.get("placa") or "")
         brutos = por_placa.get(_norm_placa(placa)) or []
         copia = dict(item)
-        copia["linhas"] = _linhas_recortadas(brutos, aneis) if aneis else _linhas_visuais(brutos)
+        copia["linhas"] = (
+            _linhas_recortadas(brutos, aneis, ruas) if aneis else _linhas_visuais(brutos, ruas)
+        )
         saida.append(copia)
     return saida
 

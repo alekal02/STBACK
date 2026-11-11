@@ -76,7 +76,7 @@ def _validar(data: str | None, turno: str | None) -> tuple[date, str]:
 def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     """Uma transação de leitura. O desenho usa só este dicionário."""
     from .live_db import percentuais_outro_turno
-    from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos
+    from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos, _ruas_proximas
     from .live_report import _exibir_classificacao, _hora_curta, _periodo_padrao, _resumo
     from .live_turno import resumo_guardado
     from .mapa_oficial import _freq_do_dia
@@ -112,7 +112,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
         pontos.setdefault(str(row["placa"] or ""), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
     veiculos = []
     for placa, serie in pontos.items():
-        linhas_visuais = _linhas_visuais(serie)
+        linhas_visuais = _linhas_visuais(serie, _ruas_proximas(serie))
         if linhas_visuais:
             veiculos.append({"placa": placa, "linhas": linhas_visuais})
     _aplicar_recorte_basculante(veiculos, pontos, dia, pedido)

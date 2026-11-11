@@ -240,25 +240,33 @@ def test_gps_com_salto_e_ponto_isolado_nao_inventa_trecho():
         "timestamp": "2026-10-19T08:40:00",
         "tz": "BRT",
     }
-    isolados = []
-    for i, dist in enumerate((0, 250, 500, 750)):
-        ponto = ruas[0].interpolate(dist)
-        lon, lat = TO_WGS.transform(ponto.x, ponto.y)
-        isolados.append(
-            {
-                "latitude": lat,
-                "longitude": lon,
-                "timestamp": f"2026-10-19T07:{10 + i:02d}:00",
-                "tz": "BRT",
-            }
-        )
+
+    def _na_via(intervalo_min: int) -> list[dict]:
+        serie = []
+        for i, dist in enumerate((0, 250, 500, 750)):
+            ponto = ruas[0].interpolate(dist)
+            lon, lat = TO_WGS.transform(ponto.x, ponto.y)
+            momento = datetime(2026, 10, 19, 7, 10) + timedelta(minutes=intervalo_min * i)
+            serie.append(
+                {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "timestamp": momento.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "tz": "BRT",
+                }
+            )
+        return serie
+
     com_falha = cobertura_compartilhada(ruas, [_veiculo("AAA1A11", validos + [salto])])
     assert com_falha["percentual"] < 80
     assert com_falha["executores"]
-    vazio = cobertura_compartilhada(ruas, [_veiculo("ZZZ9Z99", isolados)])
+    vazio = cobertura_compartilhada(ruas, [_veiculo("ZZZ9Z99", _na_via(10))])
     assert vazio["percentual"] == 0
     assert vazio["executores"] == []
     assert "ZZZ9Z99" in vazio["nao_confirmados"]
+    no_minuto = cobertura_compartilhada(ruas, [_veiculo("VCK0D86", _na_via(1))])
+    assert 35 < no_minuto["percentual"] < 70
+    assert no_minuto["executores"]
     ficha = next(item for item in vazio["auditoria"] if item["placa"] == "ZZZ9Z99")
     assert ficha["entra_na_uniao"] is False
 

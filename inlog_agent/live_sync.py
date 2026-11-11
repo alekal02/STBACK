@@ -1679,10 +1679,11 @@ def rebuscar_historico_turno(
     buscar_historico: Callable[..., list[dict[str, Any]]] | None = None,
     recalcular: Callable[..., list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Busca de novo o GPS do turno na Fulltrack e recalcula as rotas que ele toca.
+    """Busca de novo o GPS do turno e recalcula pelo mesmo pipeline da sincronização.
 
-    A consulta é data + turno + placa, do início operacional até agora.
-    Ponto repetido entra com INSERT OR IGNORE. Não reabre turno já gravado.
+    O ponto bruto entra com INSERT OR IGNORE, sem duplicar. A conclusão não
+    grava a corda: pulso espaçado segue a via oficial e o trecho só conta como
+    executado quando esse caminho cabe. Não reabre turno já gravado.
     """
     from .config import parse_data
     from .live_turno import fim_da_consulta, inicio_operacional

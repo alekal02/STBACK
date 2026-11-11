@@ -313,14 +313,13 @@ def _linhas_visuais(
     brutos: list[tuple[str, float, float]],
     ruas: list[Any] | None = None,
 ) -> list[list[list[float]]]:
-    """Pulsos próximos continuam na corda. Vão de um minuto segue a via, ou quebra."""
-    malha = None
-    salto = _GAP_M
-    if ruas and _tem_salto(brutos, 160.0):
-        from .encaixe_via import Malha, SALTO_RETO_M
+    """Corda curta sobre a via. Pulso espaçado casa na malha; sem caminho, a reta não entra."""
+    if ruas and _tem_salto(brutos, 70.0):
+        from .encaixe_via import Malha
 
         malha = Malha(ruas)
-        salto = SALTO_RETO_M
+        if malha.arestas:
+            return [_simplificar(grupo) for grupo in malha.desenhar(brutos) if len(grupo) >= 2]
     grupos: list[list[tuple[float, float]]] = []
     atual: list[tuple[float, float]] = []
     anterior = ""
@@ -328,16 +327,6 @@ def _linhas_visuais(
     for ts, lat, lon in brutos:
         quebra = False
         dist = _metros(anterior_xy, (lat, lon)) if atual and anterior_xy is not None else 0.0
-        if malha is not None and atual and anterior_xy is not None and dist > salto:
-            caminho = malha.trilha(anterior_xy, (lat, lon), _gap_segundos(anterior, ts))
-            if caminho:
-                for par in caminho[1:]:
-                    if not atual or par != atual[-1]:
-                        atual.append(par)
-                anterior = ts
-                anterior_xy = (lat, lon)
-                continue
-            quebra = True
         if atual and anterior and _gap_segundos(anterior, ts) > 600:
             quebra = True
         if atual and anterior_xy is not None and dist > _GAP_M:
@@ -372,7 +361,7 @@ def _ruas_do_codigo(codigo: str) -> list[Any]:
 
 def _ruas_proximas(pontos: list[tuple[str, float, float]]) -> list[Any]:
     """Vias no retângulo do veículo. Trajeto curto e denso não abre a malha."""
-    if not pontos or not _tem_salto(pontos, 160.0):
+    if not pontos or not _tem_salto(pontos, 70.0):
         return []
     global _VIAS_CIDADE
     if _VIAS_CIDADE is None:

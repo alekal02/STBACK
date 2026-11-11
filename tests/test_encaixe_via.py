@@ -74,6 +74,48 @@ def test_dois_caminhos_iguais_nao_marcam_trecho():
     assert _linhas_visuais(brutos, ruas) == []
 
 
+def test_canto_curto_segue_a_rua_e_nao_corta_o_quarteirao():
+    ruas = [_rua(0, 0, 0, 120), _rua(0, 0, 120, 0)]
+    inicio = datetime(2026, 11, 10, 9, 0)
+    pontos = [
+        _pulso(0, 70, inicio),
+        _pulso(70, 0, inicio + timedelta(seconds=40)),
+    ]
+    resultado = cobertura_compartilhada(ruas, [{"placa": "QWE1A23", "veiculo": "QWE", "pontos": pontos}])
+    assert resultado["percentual"] > 50
+    assert _perto(resultado["trechos_feitos"], 0, 0) < 25
+    assert _perto(resultado["trechos_feitos"], 35, 35) > 30
+    brutos = [(item["timestamp"], item["latitude"], item["longitude"]) for item in pontos]
+    linhas = _linhas_visuais(brutos, ruas)
+    assert linhas
+    assert _perto(linhas, 0, 0) < 25
+    assert _perto(linhas, 35, 35) > 30
+
+
+def test_sequencia_na_grade_escolhe_o_lado_mais_proximo():
+    ruas = [
+        _rua(0, 0, 200, 0),
+        _rua(0, 70, 200, 70),
+        _rua(0, 0, 0, 70),
+        _rua(200, 0, 200, 70),
+    ]
+    inicio = datetime(2026, 11, 10, 9, 0)
+    pontos = [
+        _pulso(0, 35, inicio),
+        _pulso(100, 42, inicio + timedelta(seconds=50)),
+        _pulso(200, 35, inicio + timedelta(seconds=100)),
+    ]
+    resultado = cobertura_compartilhada(ruas, [{"placa": "RBM2G21", "veiculo": "RBM", "pontos": pontos}])
+    assert resultado["percentual"] > 20
+    assert _perto(resultado["trechos_feitos"], 120, 70) < 20
+    assert _perto(resultado["trechos_feitos"], 100, 15) > 40
+    brutos = [(item["timestamp"], item["latitude"], item["longitude"]) for item in pontos]
+    linhas = _linhas_visuais(brutos, ruas)
+    assert linhas
+    assert _perto(linhas, 100, 70) < 20
+    assert _perto(linhas, 100, 15) > 40
+
+
 def test_vao_de_dez_minutos_nao_liga_os_pulsos():
     ruas = [_rua(0, 0, 400, 0)]
     inicio = datetime(2026, 11, 10, 9, 0)

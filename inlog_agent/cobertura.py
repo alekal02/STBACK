@@ -810,9 +810,9 @@ def _associar_percurso(
     O raio de 45 m só limita a busca. O passo entra se a direção e a velocidade
     de coleta concordam e a projeção cobre a via: 8 m, ou a própria peça quando
     ela é mais curta. Curva e retorno que encostam na via percorrida entram no
-    mesmo passo. Via paralela que não encosta continua sem crédito. Salto acima
-    de 160 m não vira reta: o caminho na via entra se for único e couber no
-    minuto, em velocidade de coleta. Vão maior ou atalho ambíguo não marca trecho.
+    mesmo passo. Via paralela que não encosta continua sem crédito. Pulso
+    espaçado casa na malha por HMM: a sequência, a direção e a velocidade de
+    coleta escolhem a rua. Vão sem caminho plausível não marca trecho.
     Duas vias distintas só ficam sem crédito quando nenhuma está claramente
     mais perto que a outra.
     """
@@ -837,31 +837,36 @@ def _associar_percurso(
     info: dict[int, dict[str, Any]] = {}
     ambiguo = False
     passo_id = 0
-    malha_via = None
-    for (t0, p0), (t1, p1) in zip(marcas, marcas[1:]):
+    from .encaixe_via import CORDA, SALTO_MALHA_M, Malha, Passo
+
+    casados = None
+    if any(
+        math.hypot(p1[0] - p0[0], p1[1] - p0[1]) >= SALTO_MALHA_M and 1 <= (t1 - t0).total_seconds() <= 180
+        for (t0, p0), (t1, p1) in zip(marcas, marcas[1:])
+    ):
+        malha_via = Malha(segmentos)
+        if malha_via.arestas:
+            casados = malha_via.casar([(par, instante.timestamp()) for instante, par in marcas], max_kmh=VEL_COLETA_MAX)
+    for indice_vao, ((t0, p0), (t1, p1)) in enumerate(zip(marcas, marcas[1:])):
         segundos = (t1 - t0).total_seconds()
         if segundos < 1 or segundos > 180:
             continue
         dist = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
         if dist < 8:
             continue
-        if dist > SALTO_GPS_M:
-            if malha_via is None:
-                from .encaixe_via import Malha
-
-                malha_via = Malha(segmentos)
-            passo = malha_via.inferir(p0, p1, segundos, max_kmh=VEL_COLETA_MAX)
-            if passo is None:
-                continue
+        item = casados[indice_vao] if casados is not None else CORDA
+        if isinstance(item, Passo):
             passo_id += 1
             info[passo_id] = {
                 "t0": t0,
-                "vel": passo.metros / segundos * 3.6,
+                "vel": item.metros / segundos * 3.6,
                 "rumo": math.atan2(p1[1] - p0[1], p1[0] - p0[0]),
             }
-            for indice in passo.indices:
+            for indice in item.indices:
                 passos.setdefault(indice, set()).add(passo_id)
-            comprovados.update(passo.indices)
+            comprovados.update(item.indices)
+            continue
+        if dist > SALTO_GPS_M or item is None:
             continue
         vel = dist / segundos * 3.6
         if vel > VEL_COLETA_MAX:

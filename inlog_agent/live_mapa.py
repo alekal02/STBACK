@@ -859,6 +859,124 @@ def trilhas(
     }
 
 
+def _json_array(texto: str) -> str:
+    bruto = str(texto or "").strip()
+    if len(bruto) >= 2 and bruto[0] == "[" and bruto[-1] == "]":
+        return bruto
+    return "[]"
+
+
+def _array_cheio(texto: str) -> bool:
+    return _json_array(texto) not in {"[]"}
+
+
+def _pontos_no_array(texto: str) -> int:
+    """Conta pares [lat, lon] sem montar a lista."""
+    n = 0
+    i = 0
+    tamanho = len(texto)
+    while i < tamanho:
+        if texto[i] != "[":
+            i += 1
+            continue
+        fim = texto.find("]", i + 1)
+        if fim < 0:
+            return n
+        miolo = texto[i + 1 : fim]
+        if "," in miolo and "[" not in miolo:
+            n += 1
+            i = fim + 1
+            continue
+        i += 1
+    return n
+
+
+def corpo_trilhas(
+    data: str | None,
+    turno: str | None,
+    placa: str | None = None,
+    rota: str | None = None,
+) -> bytes:
+    """O mesmo pacote de `trilhas`, montado em cima do JSON já gravado."""
+    dia, pedido = _dia_turno(data, turno)
+    filtro_placa = str(placa or "").strip().upper()
+    filtro_rota = str(rota or "").strip().upper()
+    from .trajetoria import tipo_da_placa
+
+    con = conectar(leitura=True)
+    try:
+        resumo = con.execute(
+            """
+            SELECT COUNT(*) AS n, MAX(ts) AS mx
+            FROM ponto
+            WHERE data = ? AND turno = ?
+            """,
+            (dia.isoformat(), pedido),
+        ).fetchone()
+        pontos_originais = int(resumo["n"] or 0) if resumo else 0
+        cursor = str(resumo["mx"] or "") if resumo else ""
+        try:
+            rows = con.execute(
+                "SELECT placa, linhas, dentro, fora FROM trilha WHERE data = ? AND turno = ?",
+                (dia.isoformat(), pedido),
+            ).fetchall()
+        except Exception:
+            rows = []
+    finally:
+        con.close()
+
+    permitidas = _placas_executoras(dia.isoformat(), pedido, filtro_rota) if filtro_rota else None
+    visuais = 0
+    partes: list[str] = []
+    for row in rows:
+        marca = str(row["placa"] or "")
+        tipo = tipo_da_placa(marca)
+        if tipo not in {"compactador", "basculante"}:
+            continue
+        if filtro_placa and marca.upper() != filtro_placa:
+            continue
+        if permitidas is not None and _norm_placa(marca) not in permitidas:
+            continue
+        if tipo == "basculante":
+            linhas = row["linhas"] if _array_cheio(str(row["linhas"] or "")) else str(row["dentro"] or "")
+            fora = "[]"
+        else:
+            linhas = row["dentro"] if _array_cheio(str(row["dentro"] or "")) else str(row["linhas"] or "")
+            fora = str(row["fora"] or "")
+        linhas = _json_array(linhas)
+        fora = _json_array(fora)
+        if linhas == "[]" and fora == "[]":
+            continue
+        visuais += _pontos_no_array(linhas) + _pontos_no_array(fora)
+        partes.append(
+            '{"placa":'
+            + json.dumps(marca, ensure_ascii=False)
+            + ',"tipo":'
+            + json.dumps(tipo)
+            + ',"linhas":'
+            + linhas
+            + ',"deslocamento":'
+            + fora
+            + "}"
+        )
+    texto = (
+        '{"data":'
+        + json.dumps(dia.isoformat())
+        + ',"turno":'
+        + json.dumps(pedido)
+        + ',"cursor":'
+        + json.dumps(cursor)
+        + ',"pontos_originais":'
+        + str(pontos_originais)
+        + ',"pontos_visuais":'
+        + str(visuais)
+        + ',"veiculos":['
+        + ",".join(partes)
+        + "]}"
+    )
+    return texto.encode("utf-8")
+
+
 def _trechos_por_area(
     serie: list[tuple[str, float, float]],
     areas: list[dict[str, Any]],

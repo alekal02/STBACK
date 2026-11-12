@@ -6,11 +6,14 @@ from shapely.geometry import LineString, Point
 
 from inlog_agent.cobertura import TO_UTM, TO_WGS
 from inlog_agent.trajetoria import (
+    _ligar,
+    _projetar,
     casar_pulsos,
     cortar_turno,
     entra_no_percentual,
     limpar_pulsos,
     percentual_da_linha,
+    rede_oficial,
 )
 
 
@@ -72,6 +75,24 @@ def test_casamento_segue_a_esquina_e_nao_a_corda():
         for x, y in parte.coords:
             assert malha.distance(Point(x, y)) < 15
     assert trajeto.geom.length > 600
+
+
+def test_camadas_somadas_ligam_o_cruzamento_e_a_ponta_a_8m(monkeypatch):
+    from inlog_agent import mapa_oficial, trajetoria
+
+    horizontal = _rua(0, 0, 200, 0)
+    vertical = _rua(80, -60, 80, 60)
+    ponta = _rua(200, 7, 280, 7)
+    monkeypatch.setattr(trajetoria, "_REDE", None)
+    monkeypatch.setattr(trajetoria, "_linhas_osm", lambda: [horizontal])
+    monkeypatch.setattr(mapa_oficial, "carregar_vias", lambda: [vertical, ponta])
+    rede = rede_oficial()
+    origem = _projetar(rede, horizontal.coords[0][0], horizontal.coords[0][1], None, None)
+    alto = _projetar(rede, vertical.coords[-1][0], vertical.coords[-1][1], None, None)
+    fim = _projetar(rede, ponta.coords[-1][0], ponta.coords[-1][1], None, None)
+    assert origem is not None and alto is not None and fim is not None
+    assert _ligar(rede, origem, alto, 400) is not None
+    assert _ligar(rede, origem, fim, 400) is not None
 
 
 def test_percentual_da_linha_casada_nao_casa_de_novo():
@@ -142,6 +163,28 @@ def test_so_coleta_entra_no_percentual():
     assert entra_no_percentual("SCN-4E19", "IVECO/TECTOR 15-210")
     assert entra_no_percentual("SCN-4B49", "IVECO/TECTOR 24-280")
     assert entra_no_percentual("SCN-1G89", "CBT012")
+
+
+def test_vao_curto_na_rua_sem_saida_liga_e_o_longo_nao():
+    beco = _rua(0, 0, 0, 40)
+    oeste = _rua(0, 0, -250, 0)
+    sobe = _rua(-250, 0, -250, 80)
+    alto = _rua(-250, 80, 18, 80)
+    desce = _rua(18, 80, 18, 0)
+    ruas = [beco, oeste, sobe, alto, desce]
+    inicio = datetime(2026, 11, 11, 8, 0, 0)
+    curto = [
+        _pulso(beco, 38, inicio),
+        _pulso(desce, 42, inicio + timedelta(seconds=60)),
+    ]
+    trajeto = casar_pulsos(curto, ruas, date(2026, 11, 11), "diurno")
+    assert trajeto.geom is not None and trajeto.geom.length > 400
+    assert trajeto.geom.distance(Point(_X, _Y + 38)) < 8
+    longo = [
+        _pulso(beco, 38, inicio),
+        _pulso(desce, 42, inicio + timedelta(seconds=120)),
+    ]
+    assert not casar_pulsos(longo, ruas, date(2026, 11, 11), "diurno").linhas
 
 
 def test_intervalo_acima_de_dez_minutos_nao_liga():

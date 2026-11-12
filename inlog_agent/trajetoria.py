@@ -1,10 +1,13 @@
 """Um motor de trajetória para compactador e basculante.
 
 Ordem: corte do turno, limpeza dos pulsos, caminho na malha completa.
-A malha OSM é ligada nos cruzamentos e só então recebe as ruas oficiais.
+As ruas oficiais somam à malha OSM e só então as camadas se ligam:
+cruzamento entre camadas vira nó, e ponta a até 8 m cola na outra.
 Entre dois pulsos o desenho segue essa malha, não só a via da rota.
 Até 10 minutos o vão liga. O teto de 60 km/h usa a reta do GPS bruto.
-Velocidade baixa liga só se o caminho couber em 1,5× a reta mais 30 m.
+A folga de 1,5× a reta mais 30 m vale só no vão acima de 90 s e com
+velocidade baixa. Até 90 s, liga se o caminho couber no teto de 60 km/h:
+a ré e a rua sem saída entram.
 A malha ignora mão única: a aresta vale nos dois sentidos, e a ré entra.
 Com um caminho só, ele entra inteiro. Com dois ou mais, só os trechos
 comuns. O percentual credita a via oficial que essa linha percorreu.
@@ -37,6 +40,7 @@ VEL_MAX = 60.0
 FATOR_CAMINHO = 1.65
 FATOR_LENTO = 1.5
 FOLGA_LENTA_M = 30.0
+VAO_RETA_S = 90.0
 FOLGA_CAMINHO_M = 45.0
 JUNTA_PULSO_S = 5.0
 MARGEM_CAMINHO = 0.40
@@ -637,10 +641,9 @@ def rede_oficial() -> Rede:
         return _REDE
     from .mapa_oficial import carregar_vias
 
-    osm = _ligar_cruzamentos(_linhas_osm())
-    oficiais = _ligar_cruzamentos(list(carregar_vias()))
-    osm.extend(oficiais)
-    _REDE = construir_rede(osm)
+    camadas = list(_linhas_osm())
+    camadas.extend(carregar_vias())
+    _REDE = construir_rede(_ligar_cruzamentos(camadas, folga_m=8.0))
     return _REDE
 
 
@@ -839,6 +842,19 @@ def _linhas_de_geom(geom: Any) -> list[LineString]:
     return []
 
 
+def _usa_reta_lenta(dt: float, vel_gps: float) -> bool:
+    """1,5× a reta + 30 m só no vão longo e lento. Até 90 s vale o teto de 60 km/h."""
+    return dt > VAO_RETA_S and vel_gps < VEL_BAIXA
+
+
+def _limite_do_vao(dt: float, dist_gps: float, salto: float, teto_m: float, vel_gps: float) -> float:
+    if _usa_reta_lenta(dt, vel_gps):
+        return dist_gps * FATOR_LENTO + FOLGA_LENTA_M
+    if dt > 0:
+        return teto_m
+    return max(salto * FATOR_CAMINHO, salto + FOLGA_CAMINHO_M)
+
+
 def _ligar(rede: Rede, origem: _Snap, destino: _Snap, limite: float) -> tuple[LineString, list[LineString]] | None:
     """Caminho na malha. Vários caminhos viáveis devolvem só o trecho comum."""
     achado = _caminho(rede, origem, destino, limite, set(), False)
@@ -986,12 +1002,7 @@ def casar_pulsos(
             anterior = snap
             ts_anterior = ts
             continue
-        if dt > 0 and vel_gps < VEL_BAIXA:
-            limite = dist_gps * FATOR_LENTO + FOLGA_LENTA_M
-        elif dt > 0:
-            limite = teto_m
-        else:
-            limite = max(salto * FATOR_CAMINHO, salto + FOLGA_CAMINHO_M)
+        limite = _limite_do_vao(dt, dist_gps, salto, teto_m, vel_gps)
         ligado = _ligar(malha, anterior, snap, limite)
         if ligado is None:
             if salto < 2:
@@ -1005,7 +1016,7 @@ def casar_pulsos(
             ts_anterior = ts
             continue
         cheio, partes = ligado
-        if dt > 0 and vel_gps < VEL_BAIXA:
+        if _usa_reta_lenta(dt, vel_gps):
             if cheio.length > dist_gps * FATOR_LENTO + FOLGA_LENTA_M + 1:
                 fechar()
                 coords = [(snap.x, snap.y)]
@@ -1013,6 +1024,8 @@ def casar_pulsos(
                 anterior = snap
                 ts_anterior = ts
                 continue
+            partes = [cheio] if cheio.length >= 8 else partes
+        elif dt > 0 and vel_gps < VEL_BAIXA:
             partes = [cheio] if cheio.length >= 8 else partes
         elif dt > 0 and cheio.length > teto_m + 1:
             fechar()

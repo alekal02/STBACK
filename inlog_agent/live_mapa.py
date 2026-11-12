@@ -48,6 +48,12 @@ def _poligonos() -> list[dict[str, Any]]:
     with _LOCK:
         if _POLIGONOS is not None:
             return _POLIGONOS
+        _POLIGONOS = _ler_poligonos()
+        print(f"GPKG polígonos: 1 leitura, {len(_POLIGONOS)} setores.", flush=True)
+        return _POLIGONOS
+
+
+def _ler_poligonos() -> list[dict[str, Any]]:
     from .mapa_oficial import (
         _achar_coluna,
         _colunas,
@@ -94,11 +100,7 @@ def _poligonos() -> list[dict[str, Any]]:
         finally:
             con.close()
     saida.sort(key=lambda row: row["codigo"])
-    with _LOCK:
-        if _POLIGONOS is None:
-            _POLIGONOS = saida
-            print(f"GPKG polígonos: 1 leitura, {len(saida)} setores.", flush=True)
-        return _POLIGONOS
+    return saida
 
 
 def areas_dificil() -> list[dict[str, Any]]:

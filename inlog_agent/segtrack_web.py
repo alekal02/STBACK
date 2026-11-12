@@ -12,6 +12,7 @@ from playwright.sync_api import Page, Playwright, sync_playwright
 from .navegador import abrir_contexto
 
 from .config import Settings, hora_com_segundos, janela_datetime
+from .fulltrack_api import PLACAS_COLETA
 from .gps import extract_points, filtrar_pontos_periodo, utc_para_brt_texto
 
 CHROME_UA = (
@@ -86,6 +87,8 @@ def _em_aparecida(lat: Any, lon: Any, endereco: str = "") -> bool:
 
 def _parece_compactador_rsd(item: dict[str, Any], placas_inlog: set[str] | None = None) -> bool:
     placa = "".join(ch for ch in str(item.get("placa") or item.get("texto") or "").upper() if ch.isalnum())
+    if placa in PLACAS_COLETA:
+        return True
     if placas_inlog and placa in placas_inlog:
         return True
     blob = " ".join(

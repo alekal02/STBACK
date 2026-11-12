@@ -507,12 +507,7 @@ def _cobertura_dos_candidatos(
         )
     if not veiculos:
         return None
-    return cobertura_compartilhada(
-        ruas,
-        veiculos,
-        geom,
-        setor.get("nomes") or setor.get("_nomes"),
-    )
+    return cobertura_compartilhada(ruas, veiculos, geom)
 
 
 def _caminhao_de_executor(item: dict[str, Any]) -> dict[str, Any]:
@@ -666,7 +661,6 @@ def _analisar_setor(
         "caminhao": None,
         "_geom": setor.get("geom"),
         "_ruas": setor.get("ruas") or [],
-        "_nomes": list(setor.get("nomes") or []),
     }
     if not clips:
         return base
@@ -1039,17 +1033,9 @@ def _codigos_vizinhos(a: str, b: str) -> bool:
     return False
 
 
-def _turno_flexivel(freq: str) -> bool:
-    """FREQUÊNCIA com DIURNO e NOTURNO (ex.: DOM - DIURNO/NOTURNO): qualquer turno do dia."""
-    blob = (freq or "").upper()
-    return "DIURNO" in blob and "NOTURNO" in blob
-
-
 def _casa_turno(freq: str, turno: str | None) -> bool:
     pedido = (turno or "").strip().lower()
     if pedido not in {"diurno", "noturno"}:
-        return True
-    if _turno_flexivel(freq):
         return True
     noturno = "NOTURNO" in (freq or "").upper()
     if pedido == "noturno":
@@ -1057,97 +1043,11 @@ def _casa_turno(freq: str, turno: str | None) -> bool:
     return not noturno
 
 
-def _pct_rota(rota: dict[str, Any]) -> float:
-    try:
-        return float(rota.get("percentual") or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def filtrar_rotas_frequencia_atual(
-    rotas: list[dict[str, Any]],
-    dia: date,
-    turno: str,
-) -> list[dict[str, Any]]:
-    """Ao carregar estado salvo: some rota cuja FREQUÊNCIA atual no GPKG não cobre o dia/turno.
-
-    Códigos fora do GPKG (observados ad hoc) e apoios continuam visíveis.
-    A frequência gravada no SQLite é atualizada pela do GPKG.
-    """
-    pedido = (turno or "").strip().lower()
-    freq_por_codigo: dict[str, str] = {}
-    for setor in carregar_setores(None):
-        codigo = str(setor.get("codigo") or "").upper()
-        if codigo:
-            freq_por_codigo[codigo] = str(setor.get("frequencia") or "")
-    programadas = {
-        str(rota.get("codigo") or "").upper()
-        for rota in obter_rotas_previstas(dia, pedido)
-        if str(rota.get("codigo") or "").strip()
-    }
-    saida: list[dict[str, Any]] = []
-    for rota in rotas:
-        if not isinstance(rota, dict):
-            saida.append(rota)
-            continue
-        codigo = str(rota.get("codigo") or "").upper()
-        if codigo in freq_por_codigo and codigo not in programadas:
-            if str(rota.get("grupo") or "") == "apoio":
-                item = dict(rota)
-                item["frequencia"] = freq_por_codigo[codigo]
-                item["na_grade"] = False
-                saida.append(item)
-            continue
-        item = dict(rota)
-        if codigo in freq_por_codigo:
-            item["frequencia"] = freq_por_codigo[codigo]
-        saida.append(item)
-    return saida
-
-
-def ajustar_rotas_turno_flexivel(
-    rotas: list[dict[str, Any]],
-    turno: str,
-    pct_outro: dict[str, float],
-) -> list[dict[str, Any]]:
-    """DIURNO/NOTURNO: conta só onde rodou; sem execução, 'Não iniciada' no turno atual; nunca em dobro."""
-    pedido = (turno or "").strip().lower()
-    saida: list[dict[str, Any]] = []
-    for rota in rotas:
-        if not isinstance(rota, dict):
-            saida.append(rota)
-            continue
-        if not _turno_flexivel(str(rota.get("frequencia") or "")):
-            saida.append(rota)
-            continue
-        codigo = str(rota.get("codigo") or "").upper()
-        eu = _pct_rota(rota)
-        outro = float(pct_outro.get(codigo) or 0)
-        if eu <= 0 and outro > 0:
-            # Feita no outro turno: some da lista (não vira "Não iniciada" aqui).
-            continue
-        if eu > 0 and outro > eu:
-            item = dict(rota)
-            item["na_grade"] = False
-            saida.append(item)
-            continue
-        if eu > 0 and outro == eu and pedido == "noturno":
-            # Empate: a contagem fica no diurno.
-            item = dict(rota)
-            item["na_grade"] = False
-            saida.append(item)
-            continue
-        saida.append(rota)
-    return saida
-
-
 def _mesmo_ciclo(a: dict[str, Any], b: dict[str, Any]) -> bool:
     fa = str(a.get("frequencia") or "").upper()
     fb = str(b.get("frequencia") or "").upper()
     if fa and fb and fa == fb:
         return True
-    if _turno_flexivel(fa) or _turno_flexivel(fb):
-        return _turno_flexivel(fa) and _turno_flexivel(fb)
     def turno(freq: str) -> str:
         if "NOTURNO" in freq:
             return "N"
@@ -2054,7 +1954,7 @@ def _cards_conclusao(rotas: list[dict[str, Any]], vazia: str = "") -> str:
             f"<p class='turno'>{_esc(setor.get('frequencia') or '—')}</p>"
             f"<div class='trilha'><i class='{classe}' style='width:{largura:.0f}%'></i></div>"
             "<dl>"
-            f"<div><dt>Vias percorridas</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
+            f"<div><dt>Conclusão</dt><dd class='{classe}'>{pct:.0f}%</dd></div>"
             f"<div><dt>Caminhão</dt><dd>{_esc(cam.get('veiculo') or '—')}</dd></div>"
             f"<div><dt>Placa</dt><dd>{_esc(cam.get('placa') or '—')}</dd></div>"
             f"<div><dt>Empresa GPS</dt><dd>SEGTRACK</dd></div>"

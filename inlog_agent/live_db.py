@@ -8,7 +8,6 @@ No Render, se OUTPUT_DIR não for mudado, esses arquivos continuam em
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
@@ -264,24 +263,14 @@ def plano_armazenamento() -> dict[str, str]:
     }
 
 
-def conectar(caminho: Path | None = None, *, leitura: bool = False) -> sqlite3.Connection:
-    """Abre o banco em WAL.
-
-    A leitura do mapa não pede trava de escrita. A sincronização pode gravar
-    ao mesmo tempo; o leitor espera até 30 s se precisar, e segue no snapshot
-    já commitado.
-    """
+def conectar(caminho: Path | None = None) -> sqlite3.Connection:
     banco = caminho or caminho_banco()
-    if not leitura:
-        banco.parent.mkdir(parents=True, exist_ok=True)
+    banco.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(banco), timeout=30, check_same_thread=False)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA busy_timeout=30000")
-    if leitura:
-        con.execute("PRAGMA query_only=ON")
-        return con
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA busy_timeout=5000")
     _schema(con)
     return con
 
@@ -349,17 +338,6 @@ def _schema(con: sqlite3.Connection) -> None:
             lon REAL NOT NULL,
             PRIMARY KEY (data, turno, placa, ts)
         );
-        CREATE TABLE IF NOT EXISTS trilha (
-            data TEXT NOT NULL,
-            turno TEXT NOT NULL,
-            placa TEXT NOT NULL,
-            linhas TEXT NOT NULL DEFAULT '[]',
-            dentro TEXT NOT NULL DEFAULT '[]',
-            fora TEXT NOT NULL DEFAULT '[]',
-            ate TEXT NOT NULL DEFAULT '',
-            atualizado_em TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (data, turno, placa)
-        );
         """
     )
     colunas = {str(row[1]) for row in con.execute("PRAGMA table_info(turno)")}
@@ -407,28 +385,10 @@ def _schema(con: sqlite3.Connection) -> None:
         "trechos_feitos": "TEXT",
         "trechos_faltando": "TEXT",
         "executores_json": "TEXT NOT NULL DEFAULT ''",
-        "turno_origem": "TEXT NOT NULL DEFAULT ''",
-        "data_turno": "TEXT NOT NULL DEFAULT ''",
-        "concluido_em": "TEXT NOT NULL DEFAULT ''",
     }
     for nome, tipo in extras_rota.items():
         if nome not in colunas_rota:
             con.execute(f"ALTER TABLE rota ADD COLUMN {nome} {tipo}")
-    # Default seguro: origem = chave atual. Não altera percentual nem status.
-    con.execute(
-        """
-        UPDATE rota
-        SET data_turno = data
-        WHERE data_turno IS NULL OR TRIM(data_turno) = ''
-        """
-    )
-    con.execute(
-        """
-        UPDATE rota
-        SET turno_origem = turno
-        WHERE turno_origem IS NULL OR TRIM(turno_origem) = ''
-        """
-    )
     colunas_placa = {str(row[1]) for row in con.execute("PRAGMA table_info(placa)")}
     extras_placa = {
         "consulta_ate": "TEXT NOT NULL DEFAULT ''",
@@ -534,36 +494,11 @@ def garantir_rotas_previstas(
 
 def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dict[str, Any]]) -> None:
     quando = agora_iso()
-    from .live_virada import carimbar_origem, marcar_conclusao
-
     for rota in rotas:
         codigo = str(rota.get("codigo") or "").upper()
         if not codigo:
             continue
         tem_geo = 1 if rota.get("_geo") else 0
-        anterior = con.execute(
-            """
-            SELECT grupo, concluido_em, data_turno, turno_origem, inicio
-            FROM rota WHERE data = ? AND turno = ? AND codigo = ?
-            """,
-            (data, turno, codigo),
-        ).fetchone()
-        preparado = carimbar_origem(rota, data, turno)
-        if anterior is not None:
-            if not str(preparado.get("data_turno") or "").strip():
-                preparado["data_turno"] = str(anterior["data_turno"] or data)
-            if not str(preparado.get("turno_origem") or "").strip():
-                preparado["turno_origem"] = str(anterior["turno_origem"] or turno)
-            if not str(preparado.get("inicio") or "").strip() and anterior["inicio"]:
-                preparado["inicio"] = anterior["inicio"]
-        preparado = marcar_conclusao(
-            preparado,
-            anterior={"concluido_em": anterior["concluido_em"]} if anterior is not None else None,
-        )
-        # Primeira execução carimba origem; depois não sobrescreve com vazio.
-        data_turno = str(preparado.get("data_turno") or data or "")
-        turno_origem = str(preparado.get("turno_origem") or turno or "")
-        concluido_em = str(preparado.get("concluido_em") or "")
         con.execute(
             """
             INSERT INTO rota (
@@ -571,9 +506,8 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 percentual, inicio, ultimo_gps, tempo_em_rota, km_coleta, km_oficial,
                 na_grade, atualizado_em,
                 entrada_lat, entrada_lon, entrada_hora, saida_lat, saida_lon, saida_hora,
-                trechos_feitos, trechos_faltando, executores_json,
-                turno_origem, data_turno, concluido_em
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                trechos_feitos, trechos_faltando, executores_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(data, turno, codigo) DO UPDATE SET
                 rota = excluded.rota,
                 frequencia = excluded.frequencia,
@@ -582,10 +516,7 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 status = excluded.status,
                 grupo = excluded.grupo,
                 percentual = excluded.percentual,
-                inicio = CASE
-                    WHEN excluded.inicio != '' THEN excluded.inicio
-                    ELSE rota.inicio
-                END,
+                inicio = excluded.inicio,
                 ultimo_gps = excluded.ultimo_gps,
                 tempo_em_rota = excluded.tempo_em_rota,
                 km_coleta = excluded.km_coleta,
@@ -600,50 +531,35 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 saida_hora = CASE WHEN ? = 1 THEN excluded.saida_hora ELSE rota.saida_hora END,
                 trechos_feitos = CASE WHEN ? = 1 THEN excluded.trechos_feitos ELSE rota.trechos_feitos END,
                 trechos_faltando = CASE WHEN ? = 1 THEN excluded.trechos_faltando ELSE rota.trechos_faltando END,
-                executores_json = CASE WHEN ? = 1 THEN excluded.executores_json ELSE rota.executores_json END,
-                turno_origem = CASE
-                    WHEN rota.turno_origem IS NULL OR TRIM(rota.turno_origem) = '' THEN excluded.turno_origem
-                    ELSE rota.turno_origem
-                END,
-                data_turno = CASE
-                    WHEN rota.data_turno IS NULL OR TRIM(rota.data_turno) = '' THEN excluded.data_turno
-                    ELSE rota.data_turno
-                END,
-                concluido_em = CASE
-                    WHEN excluded.concluido_em != '' THEN excluded.concluido_em
-                    ELSE rota.concluido_em
-                END
+                executores_json = CASE WHEN ? = 1 THEN excluded.executores_json ELSE rota.executores_json END
             """,
             (
                 data,
                 turno,
                 codigo,
-                preparado.get("rota") or "",
-                preparado.get("frequencia") or "",
-                preparado.get("veiculo") or "",
-                preparado.get("placa") or "",
-                preparado.get("status") or "",
-                preparado.get("grupo") or "",
-                float(preparado.get("percentual") or 0),
-                preparado.get("inicio") or "",
-                preparado.get("ultimo_gps") or "",
-                preparado.get("tempo_em_rota") or "",
-                preparado.get("km_coleta") or "",
-                preparado.get("km_oficial") or "",
-                1 if preparado.get("na_grade") else 0,
+                rota.get("rota") or "",
+                rota.get("frequencia") or "",
+                rota.get("veiculo") or "",
+                rota.get("placa") or "",
+                rota.get("status") or "",
+                rota.get("grupo") or "",
+                float(rota.get("percentual") or 0),
+                rota.get("inicio") or "",
+                rota.get("ultimo_gps") or "",
+                rota.get("tempo_em_rota") or "",
+                rota.get("km_coleta") or "",
+                rota.get("km_oficial") or "",
+                1 if rota.get("na_grade") else 0,
                 quando,
-                preparado.get("entrada_lat"),
-                preparado.get("entrada_lon"),
-                preparado.get("entrada_hora") or "",
-                preparado.get("saida_lat"),
-                preparado.get("saida_lon"),
-                preparado.get("saida_hora") or "",
-                preparado.get("trechos_feitos") or "[]",
-                preparado.get("trechos_faltando") or "[]",
-                preparado.get("executores_json") or "",
-                turno_origem,
-                data_turno,
-                concluido_em,
+                rota.get("entrada_lat"),
+                rota.get("entrada_lon"),
+                rota.get("entrada_hora") or "",
+                rota.get("saida_lat"),
+                rota.get("saida_lon"),
+                rota.get("saida_hora") or "",
+                rota.get("trechos_feitos") or "[]",
+                rota.get("trechos_faltando") or "[]",
+                rota.get("executores_json") or "",
                 tem_geo,
                 tem_geo,
                 tem_geo,
@@ -655,112 +571,6 @@ def gravar_rotas(con: sqlite3.Connection, data: str, turno: str, rotas: list[dic
                 tem_geo,
             ),
         )
-
-
-def _json_linhas(texto: str) -> list[Any]:
-    try:
-        bruto = json.loads(texto or "[]")
-    except json.JSONDecodeError:
-        return []
-    return bruto if isinstance(bruto, list) else []
-
-
-def gravar_trilha_visual(
-    con: sqlite3.Connection,
-    data: str,
-    turno: str,
-    placa: str,
-    linhas: list[Any],
-    dentro: list[Any],
-    fora: list[Any],
-    ate: str,
-) -> None:
-    corpo = json.dumps(linhas, separators=(",", ":"))
-    miolo = json.dumps(dentro, separators=(",", ":"))
-    resto = json.dumps(fora, separators=(",", ":"))
-    con.execute(
-        """
-        INSERT INTO trilha (data, turno, placa, linhas, dentro, fora, ate, atualizado_em)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(data, turno, placa) DO UPDATE SET
-            linhas = excluded.linhas,
-            dentro = excluded.dentro,
-            fora = excluded.fora,
-            ate = excluded.ate,
-            atualizado_em = excluded.atualizado_em
-        """,
-        (data, turno, placa, corpo, miolo, resto, ate, agora_iso()),
-    )
-
-
-def _trilha_de_row(row: sqlite3.Row) -> tuple[str, dict[str, Any]] | None:
-    chave = "".join(ch for ch in str(row["placa"] or "").upper() if ch.isalnum())
-    if not chave:
-        return None
-    return chave, {
-        "placa": str(row["placa"] or ""),
-        "linhas": _json_linhas(str(row["linhas"] or "")),
-        "dentro": _json_linhas(str(row["dentro"] or "")),
-        "fora": _json_linhas(str(row["fora"] or "")),
-        "ate": str(row["ate"] or ""),
-    }
-
-
-def ler_trilhas_visuais(con: sqlite3.Connection, data: str, turno: str) -> dict[str, dict[str, Any]]:
-    """Desenho já casado. A chave é a placa sem hífen."""
-    saida: dict[str, dict[str, Any]] = {}
-    try:
-        rows = con.execute(
-            "SELECT placa, linhas, dentro, fora, ate FROM trilha WHERE data = ? AND turno = ?",
-            (data, turno),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return saida
-    for row in rows:
-        item = _trilha_de_row(row)
-        if item:
-            saida[item[0]] = item[1]
-    return saida
-
-
-def ler_trilhas_placas(
-    con: sqlite3.Connection,
-    data: str,
-    turno: str,
-    placas: list[str],
-) -> dict[str, dict[str, Any]]:
-    """Só as placas pedidas. Evita abrir o JSON de toda a frota ao trocar de rota."""
-    formas: list[str] = []
-    vistos: set[str] = set()
-    for placa in placas:
-        texto = str(placa or "").strip().upper()
-        chave = "".join(ch for ch in texto if ch.isalnum())
-        candidatos = [texto, chave]
-        if len(chave) == 7:
-            candidatos.append(f"{chave[:3]}-{chave[3:]}")
-        for item in candidatos:
-            if item and item not in vistos:
-                vistos.add(item)
-                formas.append(item)
-    if not formas:
-        return {}
-    saida: dict[str, dict[str, Any]] = {}
-    marcas = ",".join("?" for _ in formas)
-    try:
-        rows = con.execute(
-            f"""
-            SELECT placa, linhas, dentro, fora, ate FROM trilha
-            WHERE data = ? AND turno = ? AND placa IN ({marcas})
-            """,
-            [data, turno, *formas],
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return saida
-    for row in rows:
-        item = _trilha_de_row(row)
-        if item:
-            saida[item[0]] = item[1]
-    return saida
 
 
 def inserir_pontos(
@@ -917,19 +727,6 @@ def ler_pontos_placa(con: sqlite3.Connection, data: str, turno: str, placa: str)
     ]
 
 
-def percentuais_outro_turno(con: sqlite3.Connection, data: str, turno: str) -> dict[str, float]:
-    """Cobertura do turno irmão, para rotas DIURNO/NOTURNO não contarem em dobro."""
-    pedido = (turno or "").strip().lower()
-    outro = "noturno" if pedido == "diurno" else "diurno"
-    return {
-        str(row[0] or "").upper(): float(row[1] or 0)
-        for row in con.execute(
-            "SELECT codigo, percentual FROM rota WHERE data = ? AND turno = ?",
-            (data, outro),
-        )
-    }
-
-
 def ler_view(
     con: sqlite3.Connection,
     data: str,
@@ -983,18 +780,12 @@ def ler_view(
                 "saida_lat": row["saida_lat"],
                 "saida_lon": row["saida_lon"],
                 "saida_hora": row["saida_hora"] or "",
-                "turno_origem": row["turno_origem"] if "turno_origem" in row.keys() else (row["turno"] or ""),
-                "data_turno": row["data_turno"] if "data_turno" in row.keys() else (row["data"] or ""),
-                "concluido_em": row["concluido_em"] if "concluido_em" in row.keys() else "",
             }
         )
-    from .cadastro_frota import tipo_de
-
     posicoes = [
         {
             "placa": row["placa"],
             "veiculo": row["veiculo"],
-            "tipo": tipo_de(str(row["placa"] or "")),
             "lat": row["ultimo_lat"],
             "lon": row["ultimo_lon"],
             "ultimo_gps": row["last_gps_timestamp"],

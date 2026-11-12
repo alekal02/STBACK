@@ -16,6 +16,15 @@ APARECIDA_LAT = (-16.98, -16.68)
 APARECIDA_LON = (-49.42, -49.05)
 TIPOS_CAMINHAO = {3, 9, 12, 25, 28}
 RAIO_BASE_M = 800.0
+# Caminhões de coleta incluídos na mesma regra do mapa e do percentual.
+PLACAS_COLETA = {
+    "RBL0C01",
+    "SCW4F36",
+    "SDI1H97",
+    "SDJ6C47",
+    "SDN9G76",
+    "SDO5B17",
+}
 
 
 class FulltrackSemDados(RuntimeError):
@@ -276,6 +285,8 @@ def _compactador_rsd_aparecida(
     placa = _norm_placa(str(item.get("ras_vei_placa") or ""))
     if not placa:
         return False
+    if placa in PLACAS_COLETA:
+        return True
     if placas_inlog and placa in placas_inlog:
         return True
     try:

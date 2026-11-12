@@ -249,7 +249,7 @@ def test_historico_pesado_marca_base_pela_posicao_atual(ambiente, monkeypatch):
         "ras_vei_placa": "GAR1A11",
         "ras_eve_latitude": "-19.92",
         "ras_eve_longitude": "-43.94",
-        "ras_eve_data_gps": (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+        "ras_eve_data_gps": "2026-10-28 12:00:00",
     }
     _preparar(monkeypatch, pontos={}, eventos=[evento], falhas=["GAR1A11"])
     linha = _por_placa(mapear_operacoes())["GAR-1A11"]

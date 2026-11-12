@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import hmac
 import json
 import mimetypes
@@ -1271,17 +1270,10 @@ class Handler(BaseHTTPRequestHandler):
         content_type: str,
         extra: dict[str, str] | None = None,
     ) -> None:
-        cabecalhos = dict(extra or {})
-        aceita = (self.headers.get("Accept-Encoding") or "").lower()
-        if body and "gzip" in aceita and "Content-Encoding" not in cabecalhos:
-            body = gzip.compress(body, compresslevel=5)
-            cabecalhos["Content-Encoding"] = "gzip"
-            vary = cabecalhos.get("Vary", "")
-            cabecalhos["Vary"] = f"{vary}, Accept-Encoding" if vary else "Accept-Encoding"
         try:
             self.send_response(status)
             self._cors()
-            for chave, valor in cabecalhos.items():
+            for chave, valor in (extra or {}).items():
                 self.send_header(chave, valor)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -1292,14 +1284,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def _mapa_vivo(self, path: str, qs: dict[str, list[str]]) -> None:
-        from .live_mapa import (
-            atualizacoes,
-            detalhe_rota,
-            dificil_acesso,
-            dificil_acesso_v2,
-            geometria_bytes,
-            trilhas,
-        )
+        from .live_mapa import atualizacoes, detalhe_rota, dificil_acesso, geometria_bytes, trilhas
 
         data = (qs.get("data") or [None])[0]
         turno = (qs.get("turno") or ["diurno"])[0]
@@ -1329,10 +1314,6 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     sem_cache,
                 )
-                return
-            # V2 antes do V1: endswith("/dificil-acesso") também casa com ".../v2".
-            if path.endswith("/dificil-acesso/v2") or path.endswith("/areas-dificil-acesso/v2"):
-                self._json(200, dificil_acesso_v2(data, turno), sem_cache)
                 return
             if path.endswith("/dificil-acesso"):
                 self._json(200, dificil_acesso(data, turno), sem_cache)
@@ -1651,11 +1632,6 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         try:
-            if path == "/api/frota/cadastro":
-                from .cadastro_frota import listar
-
-                self._json(200, {"veiculos": listar()}, self._no_store())
-                return
             if path == "/api/frota/operacoes":
                 self._json(200, listar_operacoes(), self._no_store())
                 return
@@ -1732,15 +1708,6 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         try:
-            if method == "PUT" and path == "/api/frota/cadastro":
-                from .cadastro_frota import definir
-
-                self._json(
-                    200,
-                    definir(str(payload.get("placa") or ""), str(payload.get("tipo") or "")),
-                    self._no_store(),
-                )
-                return
             if method == "POST" and path == "/api/frota/operacoes":
                 self._json(200, criar_operacao(payload), self._no_store())
                 return
@@ -1913,40 +1880,6 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             return
-        if path == "/api/live-report/virada":
-            from .live_virada import ler_estado_virada
-
-            qs = parse_qs(parsed.query)
-            try:
-                settings = load_settings()
-                job = JOB.snapshot()
-                self._json(
-                    200,
-                    ler_estado_virada(
-                        settings.output_dir,
-                        (qs.get("data") or [None])[0],
-                        (qs.get("turno") or ["diurno"])[0],
-                        job_rodando=bool(job.get("rodando") and job.get("nome") == "unificado"),
-                    ),
-                    self._no_store(),
-                )
-            except ValueError as exc:
-                self._json(400, {"ok": False, "erro": str(exc), "falha": str(exc)})
-            except Exception as exc:
-                self._json(
-                    200,
-                    {
-                        "ok": False,
-                        "vazio": True,
-                        "falha": str(exc),
-                        "aviso": "Falha na atualização.",
-                        "rotas": [],
-                        "rotas_turno_anterior": [],
-                        "turno_anterior": {},
-                        "resumo": {},
-                    },
-                )
-            return
         if path == "/api/live-report/operacao.pdf":
             qs = parse_qs(parsed.query)
             try:
@@ -1967,8 +1900,6 @@ class Handler(BaseHTTPRequestHandler):
             "/api/live-report/track-updates",
             "/api/live-report/route-detail",
             "/api/live-report/dificil-acesso",
-            "/api/live-report/dificil-acesso/v2",
-            "/api/live-report/areas-dificil-acesso/v2",
         }:
             self._mapa_vivo(path, parse_qs(parsed.query))
             return
@@ -2247,32 +2178,6 @@ class Handler(BaseHTTPRequestHandler):
                     data_pedido,
                     aplicar=aplicar,
                     usuario=usuario,
-                )
-            except Exception as exc:
-                self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
-                return
-            status = 200 if resultado.get("ok") else (
-                409 if resultado.get("erro") == "Atualização ao vivo em andamento" else 400
-            )
-            self._json(status, resultado, self._no_store())
-            return
-        if path == "/api/admin/rebuscar-historico":
-            if not self._exigir(
-                "POST",
-                admin=True,
-                erro_admin="Somente administradores podem rebusar o histórico do turno.",
-            ):
-                return
-            corpo = payload if isinstance(payload, dict) else {}
-            from .config import load_settings
-            from .live_sync import rebuscar_historico_turno
-
-            try:
-                resultado = rebuscar_historico_turno(
-                    load_settings().output_dir,
-                    str(corpo.get("data") or ""),
-                    str(corpo.get("turno") or ""),
-                    corpo.get("placas") if corpo.get("placas") not in (None, "", []) else corpo.get("placa"),
                 )
             except Exception as exc:
                 self._json(400, {"ok": False, "erro": str(exc)}, self._no_store())
@@ -2577,13 +2482,8 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         usada = porta or settings.porta or _porta_do_ambiente(None)
     except Exception:
         usada = _porta_do_ambiente(porta)
-    from .cadastro_frota import garantir
     from .frota import importar_na_subida
 
-    try:
-        garantir()
-    except Exception as exc:
-        print(f"Cadastro da frota: {exc}", flush=True)
     importar_na_subida()
     padrao_host = "0.0.0.0" if os.getenv("PORT") else "127.0.0.1"
     usado_host = (host or os.getenv("HOST") or padrao_host).strip() or padrao_host

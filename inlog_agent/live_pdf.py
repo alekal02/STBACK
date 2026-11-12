@@ -75,12 +75,11 @@ def _validar(data: str | None, turno: str | None) -> tuple[date, str]:
 
 def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     """Uma transação de leitura. O desenho usa só este dicionário."""
-    from .live_db import percentuais_outro_turno
-    from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos, _ruas_proximas
+    from .live_mapa import _linhas_geojson, _linhas_visuais, _marco, _poligonos
     from .live_report import _exibir_classificacao, _hora_curta, _periodo_padrao, _resumo
     from .live_turno import resumo_guardado
     from .mapa_oficial import _freq_do_dia
-    from .unificado import _casa_turno, ajustar_rotas_turno_flexivel, filtrar_rotas_frequencia_atual
+    from .unificado import _casa_turno
 
     dia, pedido = _validar(data, turno)
     con = _leitura()
@@ -99,11 +98,9 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
             "SELECT placa, ts, lat, lon FROM ponto WHERE data = ? AND turno = ? ORDER BY placa, ts",
             (dia.isoformat(), pedido),
         ).fetchall()
-        pct_outro = percentuais_outro_turno(con, dia.isoformat(), pedido)
     finally:
         con.close()
-    rotas = filtrar_rotas_frequencia_atual([_rota_lida(row) for row in linhas], dia, pedido)
-    rotas = ajustar_rotas_turno_flexivel(rotas, pedido, pct_outro)
+    rotas = [_rota_lida(row) for row in linhas]
     rotas.sort(key=_ordem_codigo)
     if not rotas:
         raise ValueError("Ainda não há estado salvo deste turno.")
@@ -112,7 +109,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
         pontos.setdefault(str(row["placa"] or ""), []).append((str(row["ts"] or ""), float(row["lat"]), float(row["lon"])))
     veiculos = []
     for placa, serie in pontos.items():
-        linhas_visuais = _linhas_visuais(serie, _ruas_proximas(serie))
+        linhas_visuais = _linhas_visuais(serie)
         if linhas_visuais:
             veiculos.append({"placa": placa, "linhas": linhas_visuais})
     _aplicar_recorte_basculante(veiculos, pontos, dia, pedido)
@@ -149,9 +146,7 @@ def ler_pacote(data: str | None, turno: str | None) -> dict[str, Any]:
     resumo = _resumo(rotas)
     guardado = resumo_guardado(cab["resumo_json"]) if situacao == "ENCERRADO" and "resumo_json" in cab.keys() else None
     if guardado:
-        for chave in ("primeiro_gps", "ultimo_gps", "aberto_em", "fechado_em", "duracao_operacional"):
-            if guardado.get(chave) not in (None, ""):
-                resumo[chave] = guardado[chave]
+        resumo = guardado
     atualizado = str(cab["atualizado_em"] or cab["ultima_sincronizacao"] or "")
     estado = _exibir_classificacao({
         "data": dia.isoformat(),
@@ -319,7 +314,7 @@ def renderizar(pacote: dict[str, Any]) -> bytes:
             canvas.Canvas.save(self)
 
     pdf = _Folha(buf, pagesize=A4)
-    pdf.setTitle("SEGTRACK — Relatório operacional de vias percorridas")
+    pdf.setTitle("SEGTRACK — Relatório Operacional de Conclusão de Rotas")
     pdf.setAuthor("SEGTRACK")
     pdf.setSubject(f"{_data_br(estado.get('data'))} · {str(estado.get('turno') or '').capitalize()}")
     largura, altura = A4
@@ -448,7 +443,7 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
         y -= 5 * mm
     y -= 3 * mm
     pdf.setFont(fonte, 9)
-    pdf.drawString(14 * mm, y + 1 * mm, "VIAS PERCORRIDAS")
+    pdf.drawString(14 * mm, y + 1 * mm, "EXECUÇÃO GERAL")
     pdf.setFont(forte, 22)
     pdf.drawString(52 * mm, y - 1 * mm, f"{int(resumo.get('percentual_geral') or 0)}%")
     y -= 14 * mm
@@ -475,8 +470,8 @@ def _pagina_resumo(pdf, pacote, rotas, apoios, fonte, forte, largura, altura, mm
     pdf.setFillColorRGB(0.1, 0.16, 0.2)
     pdf.drawString(14 * mm, y, "Rotas da operação")
     y -= 6 * mm
-    colunas = [14, 29, 64, 82, 102, 138, 162]
-    cabecalhos = ["ROTA", "VEÍCULO", "PLACA", "INÍCIO", "VIAS PERCORRIDAS", "STATUS", "ÚLTIMO GPS"]
+    colunas = [14, 29, 64, 82, 102, 124, 162]
+    cabecalhos = ["ROTA", "VEÍCULO", "PLACA", "INÍCIO", "EXECUÇÃO", "STATUS", "ÚLTIMO GPS"]
     pdf.setFont(forte, 7)
     for xcol, texto in zip(colunas, cabecalhos):
         pdf.drawString(xcol * mm, y, texto)
@@ -563,7 +558,7 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
     saida = (detalhe or {}).get("saida") or {}
     fatos = [
         ("Status", _texto(rota.get("status"))),
-        ("Vias percorridas", _pct(rota.get("percentual"))),
+        ("Execução", _pct(rota.get("percentual"))),
         ("Veículo", _texto(rota.get("veiculo"))),
         ("Placa", _texto(rota.get("placa"))),
         ("Início", _texto(rota.get("inicio"))),
@@ -593,7 +588,7 @@ def _pagina_rota(pdf, rota, detalhe, imagem, itens, fonte, forte, largura, altur
         pdf.drawString(14 * mm, y - 6 * mm, "OBSERVAÇÃO DE TELEMETRIA")
         pdf.setFont(fonte, 8)
         pdf.drawString(14 * mm, y - 10.5 * mm, "Há registros de GPS associados ao veículo fora da área oficial desta rota.")
-        pdf.drawString(14 * mm, y - 14.5 * mm, "A passagem desses veículos na via oficial entra nas vias percorridas.")
+        pdf.drawString(14 * mm, y - 14.5 * mm, "Esses registros são informativos e não interferem no percentual de execução.")
         extra = _texto_fora(fora)
         if extra:
             pdf.setFillColorRGB(0.35, 0.42, 0.46)

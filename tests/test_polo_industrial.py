@@ -10,14 +10,10 @@ from inlog_agent.unificado import _linha, obter_rotas_previstas
 def test_domingo_diurno_so_programa_polo_industrial():
     domingo = date(2026, 10, 18)
     diurno = obter_rotas_previstas(domingo, "diurno")
-    codigos = [rota["codigo"] for rota in diurno]
-    assert codigos == ["86BN", "POLO INDUSTRIAL"]
-    por_codigo = {rota["codigo"]: rota for rota in diurno}
-    assert por_codigo["POLO INDUSTRIAL"]["frequencia"] == "DOM"
-    assert por_codigo["86BN"]["frequencia"] == "DOM - DIURNO/NOTURNO"
+    assert [rota["codigo"] for rota in diurno] == ["POLO INDUSTRIAL"]
+    assert diurno[0]["frequencia"] == "DOM"
     segunda = obter_rotas_previstas(date(2026, 10, 19), "diurno")
     assert "POLO INDUSTRIAL" not in {rota["codigo"] for rota in segunda}
-    assert "86BN" not in {rota["codigo"] for rota in segunda}
 
 
 def test_codigo_polo_industrial_nao_vira_vazio():

@@ -187,17 +187,11 @@ def _duracao(abertura: str, fechamento: str) -> str:
 
 def montar_resumo(con, dia: date, turno: str, fechado_em: str) -> dict[str, Any]:
     """A mesma conta de _resumo. Não grava nas rotas."""
-    from .live_db import ler_view, percentuais_outro_turno
+    from .live_db import ler_view
     from .live_report import _resumo
-    from .unificado import ajustar_rotas_turno_flexivel, filtrar_rotas_frequencia_atual
 
     view = ler_view(con, dia.isoformat(), turno)
-    rotas = filtrar_rotas_frequencia_atual((view or {}).get("rotas") or [], dia, turno)
-    rotas = ajustar_rotas_turno_flexivel(
-        rotas,
-        turno,
-        percentuais_outro_turno(con, dia.isoformat(), turno),
-    )
+    rotas = (view or {}).get("rotas") or []
     resumo = _resumo(rotas)
     extremo = con.execute(
         "SELECT MIN(ts), MAX(ts) FROM ponto WHERE data = ? AND turno = ?",

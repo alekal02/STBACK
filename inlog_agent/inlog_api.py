@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -10,22 +9,16 @@ from playwright.sync_api import Page
 
 from .config import janela_datetime, limitar_janela_api
 
+API_KEY = "0ff6134bec254f9ba1f96d15082d20f2"
 BASE = "https://consorcioaparecida.inlog.com.br/Rastreamento/Apresentacao"
 EDITOR = f"{BASE}/EditorRotas"
 RAST = f"{BASE}/RastreamentoGeral"
 
 
-def _api_key() -> str:
-    chave = (os.getenv("INLOG_API_KEY") or "").strip()
-    if not chave:
-        raise RuntimeError("Variável obrigatória ausente: INLOG_API_KEY")
-    return chave
-
-
 def _headers() -> dict[str, str]:
     return {
         "Content-Type": "application/json; charset=utf-8",
-        "x-api-key": _api_key(),
+        "x-api-key": API_KEY,
         "Accept": "application/json, text/plain, */*",
     }
 

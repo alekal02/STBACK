@@ -1,8 +1,7 @@
 """Trajetoria e cobertura dos basculantes de dificil acesso.
 
-Usa so os pontos ja gravados no turno. Nao consulta a Segtrack. A passagem
-do basculante na via oficial entra no percentual da rota pela mesma linha
-casada dos demais veículos. A cobertura de cada
+Usa so os pontos ja gravados no turno. Nao consulta a Segtrack e nao
+altera o percentual das rotas dos compactadores. A cobertura de cada
 poligono sai do motor homologado, na uniao das vias oficiais daquele
 setor. Entrada, saida e permanencia sao lidas desses pontos contra os
 poligonos oficiais. Nada disso regrava GPS, geometria ou turno encerrado.
@@ -54,18 +53,6 @@ def codigo_da_frota(placa: str, veiculo: str = "") -> str | None:
 
 def eh_basculante(placa: str, veiculo: str = "") -> bool:
     return codigo_da_frota(placa, veiculo) is not None
-
-
-def eh_coleta(placa: str, veiculo: str = "") -> bool:
-    """Compactador ou basculante, pelo campo tipo do cadastro.
-
-    O modelo do veículo não entra nessa conta. Quem não está no cadastro
-    fica de fora, inclusive o IVECO que ainda não foi marcado.
-    """
-    del veiculo
-    from .cadastro_frota import tipo_de
-
-    return tipo_de(placa) in {"compactador", "basculante"}
 
 
 def _norm_area(texto: str) -> str:
@@ -569,88 +556,58 @@ def cobertura_dos_basculantes(
     geom,
     series: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Percentual do polígono pela linha já casada na via. A mesma via não entra duas vezes.
+    """Percentual do polígono. A mesma via não entra duas vezes.
 
-    Sem vias oficiais não há percentual. Sem linha dentro do polígono a cobertura fica em zero.
+    Sem vias oficiais não há percentual. Sem GPS válido a cobertura fica em zero
+    e nenhuma via de fora do polígono é acrescentada.
     """
     if not ruas or geom is None:
         return {"calculado": False, "percentual": None}
-    from shapely.ops import unary_union
+    from .cobertura import cobertura_compartilhada
 
-    from .trajetoria import casar_pulsos, percentual_da_linha
-
-    geoms = []
+    veiculos = []
     for item in series or []:
-        pontos = item.get("pontos") or []
-        if len(pontos) < 2:
+        placa = str(item.get("placa") or "").strip()
+        pontos = [ponto for ponto in (item.get("pontos") or []) if isinstance(ponto, dict)]
+        if not placa or len(pontos) < 2:
             continue
-        casado = casar_pulsos(pontos, ruas)
-        if casado.geom is not None and not casado.geom.is_empty:
-            geoms.append(casado.geom)
-    if not geoms:
-        return {"calculado": True, "percentual": 0.0}
-    valor = percentual_da_linha(unary_union(geoms), ruas, geom)
-    if valor is None:
-        return {"calculado": False, "percentual": None}
-    return {"calculado": True, "percentual": valor}
+        veiculos.append(
+            {
+                "placa": placa,
+                "veiculo": str(item.get("veiculo") or placa),
+                "pontos": pontos,
+            }
+        )
+    pacote = cobertura_compartilhada(ruas, veiculos, geom)
+    return {
+        "calculado": bool(pacote.get("calculado")),
+        "percentual": pacote.get("percentual"),
+    }
 
 
 _COBERTURA_AREA: dict[tuple, Any] = {}
-
-
-def _geometrias_casadas(
-    series: dict[str, list[tuple[str, float, float]]],
-    dia: date | None,
-    turno: str | None,
-) -> list[Any]:
-    """A mesma linha de /tracks. Sem dia, casa a série recebida na malha oficial."""
-    from .trajetoria import casar_pulsos, trajetos_do_turno
-
-    if dia is not None and turno:
-        return [
-            trajeto.geom
-            for trajeto in trajetos_do_turno(dia, turno).values()
-            if trajeto.tipo == "basculante" and trajeto.geom is not None and not trajeto.geom.is_empty
-        ]
-    geoms = []
-    for item in BASCULANTES:
-        pontos = series.get(item["codigo"]) or []
-        if len(pontos) < 2:
-            continue
-        casado = casar_pulsos(pontos, None, dia, turno)
-        if casado.geom is not None and not casado.geom.is_empty:
-            geoms.append(casado.geom)
-    return geoms
 
 
 def anotar_cobertura(
     areas: list[dict[str, Any]],
     series: dict[str, list[tuple[str, float, float]]],
     malha: dict[str, dict[str, Any]] | None = None,
-    dia: date | None = None,
-    turno: str | None = None,
 ) -> None:
-    """Grava o percentual de cada área programada cruzando a linha casada com o polígono."""
-    from shapely.ops import unary_union
-
+    """Grava o percentual em cada área programada. Não mexe no anel nem na rota."""
     from .mapa_oficial import malha_areas_dificil
-    from .trajetoria import percentual_da_linha
 
     base = malha if malha is not None else malha_areas_dificil()
+    pacotes: list[dict[str, Any]] = []
     ultimo = ""
     total = 0
     for item in BASCULANTES:
-        for ts, _lat, _lon in series.get(item["codigo"]) or []:
-            total += 1
+        pontos = []
+        for ts, lat, lon in series.get(item["codigo"]) or []:
+            pontos.append({"latitude": lat, "longitude": lon, "timestamp": ts})
             if ts > ultimo:
                 ultimo = ts
-    try:
-        geoms = _geometrias_casadas(series, dia, turno)
-        uniao = unary_union(geoms) if geoms else None
-    except Exception as exc:
-        print(f"Linha casada de difícil acesso indisponível: {exc}", flush=True)
-        uniao = None
-        geoms = []
+        total += len(pontos)
+        pacotes.append({"placa": item["placa"], "veiculo": item["codigo"], "pontos": pontos})
     for area in areas:
         if not area.get("programada"):
             area["percentual"] = None
@@ -658,20 +615,16 @@ def anotar_cobertura(
         ident = str(area.get("id") or "")
         info = base.get(ident) or {}
         ruas = info.get("ruas") or []
-        chave = (ident, total, ultimo, len(ruas), len(geoms))
+        chave = (ident, total, ultimo, len(ruas))
         if chave in _COBERTURA_AREA:
             area["percentual"] = _COBERTURA_AREA[chave]
             continue
-        if not ruas or info.get("geom") is None:
-            valor = None
-        elif uniao is None:
-            valor = 0.0
-        else:
-            try:
-                valor = percentual_da_linha(uniao, ruas, info.get("geom"))
-            except Exception as exc:
-                print(f"Cobertura de difícil acesso {area.get('nome') or ident}: {exc}", flush=True)
-                valor = None
+        try:
+            cob = cobertura_dos_basculantes(ruas, info.get("geom"), pacotes)
+        except Exception as exc:
+            print(f"Cobertura de difícil acesso {area.get('nome') or ident}: {exc}", flush=True)
+            cob = {"calculado": False, "percentual": None}
+        valor = cob["percentual"] if cob.get("calculado") else None
         if len(_COBERTURA_AREA) > 400:
             _COBERTURA_AREA.clear()
         _COBERTURA_AREA[chave] = valor
@@ -690,58 +643,76 @@ def atividade_comprovada(
     geom,
     pontos: list[dict[str, Any]],
 ) -> bool:
-    """A linha casada cobre via interna do polígono.
+    """Progressão homologada na via oficial, dentro do polígono.
 
-    Um ponto, o GPS parado, o contorno e o cruzamento perpendicular não contam.
+    Um ponto, a proximidade, a passagem de contorno e o GPS parado não contam.
+    Não grava percentual e não altera o motor das rotas.
     """
     if not ruas or geom is None or len(pontos) < 2:
         return False
-    from .trajetoria import atividade_da_linha, casar_pulsos
+    from .cobertura import (
+        _associar_percurso,
+        _mascara_interna,
+        _perto_das_vias,
+        _qualidade_trechos,
+        _rumo_segmento,
+        _segmentos_oficiais,
+        recortar_pontos,
+    )
 
-    casado = casar_pulsos(pontos, ruas)
-    return atividade_da_linha(casado.geom, ruas, geom)
+    segmentos = _segmentos_oficiais(ruas)
+    if not segmentos:
+        return False
+    recorte = recortar_pontos(pontos, geom, 90)
+    perto = _perto_das_vias(recorte, segmentos)
+    if len(perto) < 2:
+        return False
+    percorridos, _ambiguo, passos, info = _associar_percurso(perto, segmentos)
+    if not percorridos:
+        return False
+    interna = _mascara_interna(segmentos, geom)
+    rumos = [_rumo_segmento(segmento) for segmento in segmentos]
+    internos = {indice for indice in percorridos if 0 <= indice < len(interna) and interna[indice]}
+    if any(interna):
+        if not internos:
+            return False
+        return _qualidade_trechos(internos, passos, segmentos, rumos, info) == "execucao"
+    return _qualidade_trechos(set(percorridos), passos, segmentos, rumos, info) == "execucao"
 
 
 def marcar_atividade(
     areas: list[dict[str, Any]],
     series: dict[str, list[tuple[str, float, float]]],
     malha: dict[str, dict[str, Any]] | None = None,
-    dia: date | None = None,
-    turno: str | None = None,
 ) -> None:
-    """Marca o polígono se a linha casada cobre via interna. Não casa de novo."""
+    """Marca o polígono com atividade real. O percentual oficial permanece intocado."""
     from .mapa_oficial import malha_areas_dificil
-    from .trajetoria import atividade_da_linha, trajetos_do_turno
 
     base = malha if malha is not None else malha_areas_dificil()
-    linhas: list[tuple[str, Any]] = []
-    if dia is not None and turno:
-        for trajeto in trajetos_do_turno(dia, turno).values():
-            if trajeto.tipo != "basculante":
-                continue
-            codigo = codigo_da_frota(trajeto.placa)
-            if codigo:
-                linhas.append((codigo, trajeto.geom, trajeto.n_pontos))
-    else:
-        from .trajetoria import casar_pulsos
-
-        for item in BASCULANTES:
-            casado = casar_pulsos(series.get(item["codigo"]) or [])
-            linhas.append((item["codigo"], casado.geom, casado.n_pontos))
+    preparados: dict[str, list[dict[str, Any]]] = {}
+    ultimo: dict[str, str] = {}
+    for item in BASCULANTES:
+        codigo = item["codigo"]
+        pontos = _pontos_da_serie(series.get(codigo) or [])
+        preparados[codigo] = pontos
+        marcas = [str(ponto.get("timestamp") or "") for ponto in pontos]
+        ultimo[codigo] = max(marcas) if marcas else ""
     for area in areas:
         ident = str(area.get("id") or "")
         info = base.get(ident) or {}
         ruas = info.get("ruas") or []
         geom = info.get("geom")
         comprovados: list[str] = []
-        for codigo, geom_linha, n_pontos in linhas:
-            chave = (ident, codigo, n_pontos, turno or "", len(ruas))
+        for item in BASCULANTES:
+            codigo = item["codigo"]
+            pontos = preparados[codigo]
+            chave = (ident, codigo, len(pontos), ultimo[codigo], len(ruas))
             if chave in _ATIVIDADE_AREA:
-                if _ATIVIDADE_AREA[chave] and codigo not in comprovados:
+                if _ATIVIDADE_AREA[chave]:
                     comprovados.append(codigo)
                 continue
             try:
-                ok = atividade_da_linha(geom_linha, ruas, geom)
+                ok = atividade_comprovada(ruas, geom, pontos)
             except Exception as exc:
                 print(f"Atividade de difícil acesso {area.get('nome') or ident}: {exc}", flush=True)
                 area["gps_indisponivel"] = True
@@ -749,7 +720,7 @@ def marcar_atividade(
             if len(_ATIVIDADE_AREA) > 800:
                 _ATIVIDADE_AREA.clear()
             _ATIVIDADE_AREA[chave] = ok
-            if ok and codigo not in comprovados:
+            if ok:
                 comprovados.append(codigo)
         area["atividade_veiculos"] = comprovados
         area["atividade"] = bool(comprovados)

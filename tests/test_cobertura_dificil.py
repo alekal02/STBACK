@@ -172,18 +172,11 @@ def test_api_isola_data_turno_e_nao_grava_a_rota(monkeypatch, tmp_path):
         "inlog_agent.mapa_oficial.malha_areas_dificil",
         lambda: {area["id"]: {"geom": geom, "ruas": [rua]}},
     )
-    monkeypatch.setattr("inlog_agent.trajetoria.rede_oficial", lambda rua=rua: [rua])
-    import inlog_agent.trajetoria as tr
-
-    tr._CACHE.clear()
-    tr._REDE = None
     pontos = _pontos(rua, datetime(2026, 10, 12, 8, 0))
-    noite = _pontos(rua, datetime(2026, 10, 12, 20, 0))
-    dia13 = _pontos(rua, datetime(2026, 10, 13, 8, 0))
     con = conectar()
     inserir_pontos(con, "2026-10-12", "diurno", "SCN-4B49", pontos)
-    inserir_pontos(con, "2026-10-12", "noturno", "SCN-4B49", noite)
-    inserir_pontos(con, "2026-10-13", "diurno", "SCN-4B49", dia13)
+    inserir_pontos(con, "2026-10-12", "noturno", "SCN-4B49", pontos)
+    inserir_pontos(con, "2026-10-13", "diurno", "SCN-4B49", pontos)
     con.execute(
         """
         INSERT INTO rota (data, turno, codigo, percentual, status, grupo)

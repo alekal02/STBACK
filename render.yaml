@@ -59,7 +59,5 @@ services:
         sync: false
       - key: INLOG_PASSWORD
         sync: false
-      - key: INLOG_API_KEY
-        sync: false
       - key: CORS_ORIGIN
         sync: false

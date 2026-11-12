@@ -659,7 +659,7 @@ def ler_estado_virada(
     dia = parse_data(str(estado.get("data") or data or "")) or date.today()
     anterior = {"data": "", "turno": "", "virada_em": "", "rotas": []}
     try:
-        con = conectar()
+        con = conectar(leitura=True)
     except RuntimeError:
         estado["turno_anterior"] = anterior
         estado["rotas_turno_anterior"] = []

@@ -2571,6 +2571,32 @@ def _garantir_bibliotecas_pdf() -> None:
         )
 
 
+def iniciar_casamento() -> subprocess.Popen[str] | None:
+    """O casamento não divide o processo com a API. A malha fica neste filho."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return None
+    if os.getenv("SAGTRACK_CASAMENTO_PROC") == "1":
+        return None
+    if (os.getenv("SAGTRACK_CASAMENTO") or "1").strip().lower() in {"0", "false", "nao", "não"}:
+        return None
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "inlog_agent.casamento_proc"],
+        cwd=str(ROOT),
+    )
+    print("Casamento: processo separado da API.", flush=True)
+    return proc
+
+
+def parar_casamento(proc: subprocess.Popen[str] | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def servir(porta: int | None = None, host: str | None = None) -> None:
     # O glibc do Linux abre várias arenas e estoura os 512 MB do Render.
     os.environ.setdefault("MALLOC_ARENA_MAX", "2")
@@ -2616,6 +2642,7 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
     import inlog_agent.live_mapa  # shapely não é seguro se duas abas importarem ao mesmo tempo
 
     iniciar_loop()
+    casamento = iniciar_casamento()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -2626,4 +2653,5 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         traceback.print_exc()
         print("\nO servidor parou.", flush=True)
     finally:
+        parar_casamento(casamento)
         httpd.server_close()

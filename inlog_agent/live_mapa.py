@@ -302,19 +302,21 @@ def _colar(grupos: list[list[list[float]]]) -> list[list[list[float]]]:
 def casar_trilha(
     brutos: list[tuple[str, float, float]],
     ruas_de: Any | None = None,
+    *,
+    rede: Any = None,
 ) -> list[list[list[float]]]:
     """Polilinhas na malha completa. Sem caminho único, o vão não vira reta.
 
     `ruas_de` só existe para o teste injetar uma malha pequena. Na gravação
-    real a malha é a cidade inteira.
+    real a malha é a cidade inteira, já carregada no processo de casamento.
     """
-    from .trajetoria import casar_pulsos
+    from .trajetoria import Rede, casar_pulsos
 
-    rede = None
-    if ruas_de is not None:
+    malha = rede
+    if malha is None and ruas_de is not None:
         ruas = ruas_de(brutos) if callable(ruas_de) else ruas_de
-        rede = list(ruas or [])
-    linhas = casar_pulsos(brutos, rede).linhas
+        malha = ruas if isinstance(ruas, Rede) else list(ruas or [])
+    linhas = casar_pulsos(brutos, malha).linhas
     return [item for item in (_enxugar(linha) for linha in linhas) if len(item) >= 2]
 
 
@@ -376,35 +378,62 @@ def atualizar_trilha(
     placa: str,
     *,
     completo: bool = False,
+    rede: Any = None,
 ) -> None:
-    """Casa a placa uma vez e grava o desenho. A leitura do mapa não refaz o HMM."""
+    """Casa só o pulso novo e grava o desenho. A leitura do mapa não abre a malha."""
     from datetime import date as dia_tipo
-
-    from .live_db import ler_trilhas_visuais
 
     if con.in_transaction:
         con.commit()
-    rows = con.execute(
-        "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
-        (data, turno, placa),
-    ).fetchall()
-    brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
-    if len(brutos) < 2:
-        _gravar_linha_curta(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
-        return
     chave = _norm_placa(placa)
-    guardada = None if completo else ler_trilhas_visuais(con, data, turno).get(chave)
+    guardada = None
+    if not completo:
+        from .live_db import ler_trilhas_placas
+
+        guardada = ler_trilhas_placas(con, data, turno, [placa]).get(chave)
     if guardada and guardada.get("ate") and guardada.get("linhas"):
         ate = str(guardada["ate"])
-        indice = 0
-        while indice < len(brutos) and brutos[indice][0] <= ate:
-            indice += 1
-        if indice >= len(brutos):
+        novos = con.execute(
+            """
+            SELECT ts, lat, lon FROM ponto
+            WHERE data = ? AND turno = ? AND placa = ? AND ts > ?
+            ORDER BY ts
+            """,
+            (data, turno, placa, ate),
+        ).fetchall()
+        if not novos:
             return
-        cauda = casar_trilha(brutos[max(0, indice - 3) :])
+        anteriores = con.execute(
+            """
+            SELECT ts, lat, lon FROM ponto
+            WHERE data = ? AND turno = ? AND placa = ? AND ts <= ?
+            ORDER BY ts DESC
+            LIMIT 3
+            """,
+            (data, turno, placa, ate),
+        ).fetchall()
+        brutos = [
+            (str(row["ts"] or ""), float(row["lat"]), float(row["lon"]))
+            for row in reversed(anteriores)
+            if row["ts"]
+        ]
+        brutos.extend(
+            (str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in novos if row["ts"]
+        )
+        if len(brutos) < 2:
+            return
+        cauda = casar_trilha(brutos) if rede is None else casar_trilha(brutos, rede=rede)
         linhas = [item for item in (_enxugar(linha) for linha in _colar(list(guardada["linhas"]) + cauda)) if len(item) >= 2]
     else:
-        linhas = casar_trilha(brutos)
+        rows = con.execute(
+            "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
+            (data, turno, placa),
+        ).fetchall()
+        brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
+        if len(brutos) < 2:
+            _gravar_linha_curta(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
+            return
+        linhas = casar_trilha(brutos) if rede is None else casar_trilha(brutos, rede=rede)
     try:
         dia = dia_tipo.fromisoformat(data)
         setores = _setores_do_turno(dia, turno)

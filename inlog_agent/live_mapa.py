@@ -303,15 +303,19 @@ def casar_trilha(
     brutos: list[tuple[str, float, float]],
     ruas_de: Any | None = None,
 ) -> list[list[list[float]]]:
-    """Polilinhas já na via. Vão sem caminho não entra como reta."""
-    buscar = _ruas_proximas if ruas_de is None else ruas_de
-    grupos: list[list[list[float]]] = []
-    for fatia in _fatias(brutos):
-        ruas = buscar(fatia) if buscar else None
-        for linha in _linhas_visuais(fatia, ruas):
-            if len(linha) >= 2:
-                grupos.append(linha)
-    return [item for item in (_enxugar(linha) for linha in _colar(grupos)) if len(item) >= 2]
+    """Polilinhas na malha completa. Sem caminho único, o vão não vira reta.
+
+    `ruas_de` só existe para o teste injetar uma malha pequena. Na gravação
+    real a malha é a cidade inteira.
+    """
+    from .trajetoria import casar_pulsos
+
+    rede = None
+    if ruas_de is not None:
+        ruas = ruas_de(brutos) if callable(ruas_de) else ruas_de
+        rede = list(ruas or [])
+    linhas = casar_pulsos(brutos, rede).linhas
+    return [item for item in (_enxugar(linha) for linha in linhas) if len(item) >= 2]
 
 
 def _partir_salvas(
@@ -1379,7 +1383,7 @@ def _copia_leitura(pacote: dict[str, Any]) -> dict[str, Any]:
 
 def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
     """GPS já gravado e o motor homologado. Não grava turno, rota nem ponto."""
-    from .dificil_acesso import eh_basculante
+    from .dificil_acesso import eh_coleta
     from .live_db import caminho_banco, ler_pontos_placa
 
     con = conectar(leitura=True)
@@ -1407,8 +1411,6 @@ def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
         ]
         caminhoes = []
         for nome in nomes:
-            if eh_basculante(nome):
-                continue
             pontos = ler_pontos_placa(con, data, turno, nome)
             if len(pontos) < 2:
                 continue
@@ -1440,7 +1442,10 @@ def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
         executores = []
         for item in cobertura.get("executores") or []:
             papel = str(item.get("papel") or "")
-            if papel not in {"principal", "apoio", "sobreposta"} or not item.get("placa"):
+            placa = str(item.get("placa") or "")
+            if papel == "apoio" and not eh_coleta(placa):
+                continue
+            if papel not in {"principal", "apoio", "sobreposta"} or not placa:
                 continue
             executores.append(
                 {
@@ -1548,7 +1553,7 @@ def _recorte_guardado(
 
 
 def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Traçado de exibição. A cobertura já está nos trechos oficiais gravados."""
+    """Traçado gravado. Sem trilha, casa uma vez na malha única. A cobertura não muda."""
     placas = [str(item.get("placa") or "").strip() for item in executores if str(item.get("placa") or "").strip()]
     if not placas:
         return []
@@ -1591,10 +1596,11 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         salvo = salvas.get(chave)
         if salvo and salvo.get("linhas"):
             copia["linhas"] = _recorte_guardado(codigo, chave, str(salvo.get("ate") or ""), salvo["linhas"], aneis, geoms)
-        elif aneis:
-            copia["linhas"] = _recortar_prontas(_linhas_visuais(brutos, None), aneis, geoms)
+        elif brutos:
+            prontas = casar_trilha(brutos)
+            copia["linhas"] = _recortar_prontas(prontas, aneis, geoms) if aneis else prontas
         else:
-            copia["linhas"] = [linha for linha in (_enxugar(item_linha) for item_linha in _linhas_visuais(brutos, None)) if len(linha) >= 2]
+            copia["linhas"] = []
         saida.append(copia)
     return saida
 
@@ -1702,6 +1708,17 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     if row is None:
         return vazio
     info = ler_executores_json(row["executores_json"] if "executores_json" in row.keys() else "")
+    from .dificil_acesso import eh_coleta
+
+    info["executores"] = [
+        item
+        for item in info["executores"]
+        if str(item.get("papel") or "") != "apoio" or eh_coleta(str(item.get("placa") or ""))
+    ]
+    info["placas_apoio"] = [placa for placa in info.get("placas_apoio") or [] if eh_coleta(str(placa))]
+    from .cobertura import SEM_APOIO
+
+    info["apoio"] = ", ".join(str(placa) for placa in info["placas_apoio"]) or SEM_APOIO
     tem_apoio = any(str(item.get("papel") or "") == "apoio" for item in info["executores"])
     if tem_apoio:
         leitura = _comparacao_vazia("O snapshot já registra o apoio efetivo.")

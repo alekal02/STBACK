@@ -1478,9 +1478,11 @@ def cobertura_compartilhada(
     passagens: list[str] = []
     nao_confirmados: list[str] = []
     auditoria: list[dict[str, Any]] = []
+    from .dificil_acesso import eh_coleta
+
     for veiculo in veiculos or []:
         placa = str(veiculo.get("placa") or "").strip()
-        if not placa:
+        if not placa or not eh_coleta(placa, str(veiculo.get("veiculo") or "")):
             continue
         pontos = list(veiculo.get("pontos") or [])
         if geom_setor is not None:

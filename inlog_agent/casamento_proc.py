@@ -46,6 +46,23 @@ def placas_pendentes(con: Any, data: str, turno: str) -> list[str]:
     return [str(row["placa"] or "") for row in rows if str(row["placa"] or "")]
 
 
+def _teto_cpu() -> float:
+    try:
+        return max(0.05, min(0.9, float(os.getenv("SAGTRACK_CASAMENTO_CPU") or "25") / 100.0))
+    except ValueError:
+        return 0.25
+
+
+def _frear(inicio_wall: float, inicio_cpu: float) -> None:
+    """Segura o filho para não passar do teto de CPU do serviço."""
+    teto = _teto_cpu()
+    wall = time.perf_counter() - inicio_wall
+    cpu = time.process_time() - inicio_cpu
+    if cpu <= 0 or wall <= 0 or cpu / wall <= teto:
+        return
+    time.sleep(min(cpu / teto - wall, 8.0))
+
+
 def passo(malha: Any) -> int:
     """Casa só a placa com pulso depois do trecho gravado. Devolve quantas andou."""
     from .live_db import conectar
@@ -56,8 +73,11 @@ def passo(malha: Any) -> int:
     try:
         for data, turno in turnos_abertos(con):
             for placa in placas_pendentes(con, data, turno):
+                inicio_wall = time.perf_counter()
+                inicio_cpu = time.process_time()
                 atualizar_trilha(con, data, turno, placa, completo=False, rede=malha)
                 feitas += 1
+                _frear(inicio_wall, inicio_cpu)
     finally:
         con.close()
     return feitas
@@ -65,8 +85,18 @@ def passo(malha: Any) -> int:
 
 def main() -> None:
     os.environ["SAGTRACK_CASAMENTO_PROC"] = "1"
+    if os.name != "nt":
+        try:
+            os.nice(19)
+        except OSError:
+            pass
+    from .live_db import caminho_banco
     from .trajetoria import rede_oficial
 
+    print(
+        f"Casamento: banco {caminho_banco()} nice 19 teto {int(_teto_cpu() * 100)}% CPU.",
+        flush=True,
+    )
     print("Casamento: carregando a malha uma vez.", flush=True)
     malha = rede_oficial()
     print(f"Casamento: malha com {len(malha.linhas)} peças.", flush=True)

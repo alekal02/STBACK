@@ -2571,8 +2571,16 @@ def _garantir_bibliotecas_pdf() -> None:
         )
 
 
+def _baixar_prioridade() -> None:
+    """nice 19: o filho cede a CPU para a API no mesmo serviço."""
+    try:
+        os.nice(19)
+    except (AttributeError, OSError):
+        return
+
+
 def iniciar_casamento() -> subprocess.Popen[str] | None:
-    """O casamento não divide o processo com a API. A malha fica neste filho."""
+    """Filho do mesmo serviço, no mesmo disco. Prioridade baixa e teto de CPU."""
     if os.getenv("PYTEST_CURRENT_TEST"):
         return None
     if os.getenv("SAGTRACK_CASAMENTO_PROC") == "1":
@@ -2582,8 +2590,9 @@ def iniciar_casamento() -> subprocess.Popen[str] | None:
     proc = subprocess.Popen(
         [sys.executable, "-m", "inlog_agent.casamento_proc"],
         cwd=str(ROOT),
+        preexec_fn=_baixar_prioridade if os.name != "nt" else None,
     )
-    print("Casamento: processo separado da API.", flush=True)
+    print("Casamento: processo separado da API, nice 19, mesmo banco.", flush=True)
     return proc
 
 

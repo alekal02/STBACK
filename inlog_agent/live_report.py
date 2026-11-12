@@ -238,12 +238,7 @@ def _marcar_deslocamento(estado: dict[str, Any], _rotas: list[dict[str, Any]]) -
 
     dia = parse_data(str(estado.get("data") or "")) or dia_tipo.today()
     turno = str(estado.get("turno") or "")
-    posicoes = [
-        pos
-        for pos in estado.get("posicoes") or []
-        if isinstance(pos, dict) and pos.get("lat") is not None and pos.get("lon") is not None
-    ]
-    setores = _setores_do_turno(dia, turno) if turno in {"diurno", "noturno"} and posicoes else []
+    setores = _setores_do_turno(dia, turno) if turno in {"diurno", "noturno"} else []
     for pos in estado.get("posicoes") or []:
         if not isinstance(pos, dict) or pos.get("lat") is None or pos.get("lon") is None:
             continue

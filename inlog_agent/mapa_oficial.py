@@ -25,7 +25,6 @@ TO_UTM = Transformer.from_crs(4326, 31982, always_xy=True)
 # rotas sofriam o mesmo efeito.
 FOLGA_RECORTE_M = 3.0
 _CODIGO = re.compile(r"\b(\d{2}[A-Z]{2,4})\b")
-_FREQS: dict[str, str] | None = None
 
 
 def caminho_gpkg() -> Path | None:
@@ -361,40 +360,6 @@ def carregar_setores(dia: date | None = None) -> list[dict[str, Any]]:
     con.close()
     _anexar_vias(setores)
     return setores
-
-
-def frequencias_oficiais() -> dict[str, str]:
-    """Código e frequência do GPKG, sem geometria. A leitura do painel não reabre o polígono."""
-    global _FREQS
-    if _FREQS is not None:
-        return _FREQS
-    arquivo = _sincronizar_gpkg()
-    saida: dict[str, str] = {}
-    if not arquivo:
-        _FREQS = saida
-        return saida
-    con = sqlite3.connect(str(arquivo))
-    try:
-        tabela = _tabela_setores(con)
-        if not tabela:
-            _FREQS = saida
-            return saida
-        cols = _colunas(con, tabela)
-        col_codigo = _achar_coluna(cols, "NOVO_CODIGO", "CODIGO")
-        col_freq = _achar_coluna(cols, "FREQUÊNCIA", "FREQUENCIA")
-        if not col_codigo:
-            _FREQS = saida
-            return saida
-        freq_sql = _quote(col_freq) if col_freq else "''"
-        for codigo, freq in con.execute(f"SELECT {_quote(col_codigo)}, {freq_sql} FROM {_quote(tabela)}"):
-            chave = str(codigo or "").strip().upper()
-            if not chave or eh_area_dificil(chave):
-                continue
-            saida[chave] = str(freq or "").strip()
-    finally:
-        con.close()
-    _FREQS = saida
-    return saida
 
 
 def _id_area(nome: str, aneis: list[list[list[float]]], usados: set[str]) -> str:

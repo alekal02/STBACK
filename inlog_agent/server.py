@@ -1270,12 +1270,11 @@ class Handler(BaseHTTPRequestHandler):
         body: bytes,
         content_type: str,
         extra: dict[str, str] | None = None,
-        compresslevel: int = 5,
     ) -> None:
         cabecalhos = dict(extra or {})
         aceita = (self.headers.get("Accept-Encoding") or "").lower()
         if body and "gzip" in aceita and "Content-Encoding" not in cabecalhos:
-            body = gzip.compress(body, compresslevel=compresslevel)
+            body = gzip.compress(body, compresslevel=5)
             cabecalhos["Content-Encoding"] = "gzip"
             vary = cabecalhos.get("Vary", "")
             cabecalhos["Vary"] = f"{vary}, Accept-Encoding" if vary else "Accept-Encoding"
@@ -1298,8 +1297,8 @@ class Handler(BaseHTTPRequestHandler):
             detalhe_rota,
             dificil_acesso,
             dificil_acesso_v2,
-            corpo_trilhas,
             geometria_bytes,
+            trilhas,
         )
 
         data = (qs.get("data") or [None])[0]
@@ -1320,17 +1319,15 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path.endswith("/tracks"):
-                self._corpo(
+                self._json(
                     200,
-                    corpo_trilhas(
+                    trilhas(
                         data,
                         turno,
                         (qs.get("placa") or [None])[0],
                         (qs.get("rota") or [None])[0],
                     ),
-                    "application/json; charset=utf-8",
                     sem_cache,
-                    compresslevel=1,
                 )
                 return
             # V2 antes do V1: endswith("/dificil-acesso") também casa com ".../v2".
@@ -2571,41 +2568,6 @@ def _garantir_bibliotecas_pdf() -> None:
         )
 
 
-def _baixar_prioridade() -> None:
-    """nice 19: o filho cede a CPU para a API no mesmo serviço."""
-    try:
-        os.nice(19)
-    except (AttributeError, OSError):
-        return
-
-
-def iniciar_casamento() -> subprocess.Popen[str] | None:
-    """Filho do mesmo serviço, no mesmo disco. Prioridade baixa e teto de CPU."""
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return None
-    if os.getenv("SAGTRACK_CASAMENTO_PROC") == "1":
-        return None
-    if (os.getenv("SAGTRACK_CASAMENTO") or "1").strip().lower() in {"0", "false", "nao", "não"}:
-        return None
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "inlog_agent.casamento_proc"],
-        cwd=str(ROOT),
-        preexec_fn=_baixar_prioridade if os.name != "nt" else None,
-    )
-    print("Casamento: processo separado da API, nice 19, mesmo banco.", flush=True)
-    return proc
-
-
-def parar_casamento(proc: subprocess.Popen[str] | None) -> None:
-    if proc is None or proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
 def servir(porta: int | None = None, host: str | None = None) -> None:
     # O glibc do Linux abre várias arenas e estoura os 512 MB do Render.
     os.environ.setdefault("MALLOC_ARENA_MAX", "2")
@@ -2651,7 +2613,6 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
     import inlog_agent.live_mapa  # shapely não é seguro se duas abas importarem ao mesmo tempo
 
     iniciar_loop()
-    casamento = iniciar_casamento()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -2662,5 +2623,4 @@ def servir(porta: int | None = None, host: str | None = None) -> None:
         traceback.print_exc()
         print("\nO servidor parou.", flush=True)
     finally:
-        parar_casamento(casamento)
         httpd.server_close()

@@ -1,28 +1,19 @@
 """Um motor de trajetória para compactador e basculante.
 
-Ordem: corte do turno, limpeza dos pulsos, caminho na malha completa.
-As ruas oficiais somam à malha OSM e só então as camadas se ligam:
-cruzamento entre camadas vira nó, e ponta a até 8 m cola na outra.
-Entre dois pulsos o desenho segue essa malha, não só a via da rota.
-Até 10 minutos o vão liga. O teto de 60 km/h usa a reta do GPS bruto.
-A folga de 1,5× a reta mais 30 m vale só no vão acima de 90 s e com
-velocidade baixa. Até 90 s, liga se o caminho couber no teto de 60 km/h:
-a ré e a rua sem saída entram.
-A malha ignora mão única: a aresta vale nos dois sentidos, e a ré entra.
-Com um caminho só, ele entra inteiro. Com dois ou mais, só os trechos
-comuns. O percentual credita a via oficial que essa linha percorreu.
+Ordem: corte do turno, limpeza dos pulsos, map-matching pulso a pulso.
+Entre dois pulsos o desenho segue a via oficial pelo caminho mais curto
+que ainda cabe no deslocamento. Vão de tempo, salto ou desvio grande
+quebra a linha e não inventa corda. O percentual só cruza essa linha
+com o polígono.
 """
 
 from __future__ import annotations
 
 import heapq
-import json
 import math
-import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 from shapely.geometry import LineString, MultiLineString, Point
@@ -35,19 +26,10 @@ SNAP_M = 45.0
 JUNTA_M = 480.0
 GAP_S = 600.0
 VEL_ABSURDA = 110.0
-VEL_BAIXA = 3.0
-VEL_MAX = 60.0
 FATOR_CAMINHO = 1.65
-FATOR_LENTO = 1.5
-FOLGA_LENTA_M = 30.0
-VAO_RETA_S = 90.0
 FOLGA_CAMINHO_M = 45.0
-JUNTA_PULSO_S = 5.0
-MARGEM_CAMINHO = 0.40
-AFASTAMENTO_M = 30.0
 JUNCAO_M = 12.0
 NO_M = 16.0
-FOLGA_CRUZAMENTO_M = 5.0
 
 Ponto = tuple[str, float, float]
 
@@ -213,17 +195,6 @@ def limpar_pulsos(pontos: list[Ponto]) -> list[Ponto]:
             dt = _segundos(ant[0], atual[0])
             if dt > 0 and dist > 200 and dist / dt * 3.6 > VEL_ABSURDA:
                 continue
-        saida.append(atual)
-    return _juntar_pulsos(saida)
-
-
-def _juntar_pulsos(pontos: list[Ponto], minimo_s: float = JUNTA_PULSO_S) -> list[Ponto]:
-    """Pulsos com menos de 5 s viram um só. Fica o último do grupo."""
-    saida: list[Ponto] = []
-    for atual in pontos or []:
-        if saida and 0 <= _segundos(saida[-1][0], atual[0]) < minimo_s:
-            saida[-1] = atual
-            continue
         saida.append(atual)
     return saida
 
@@ -427,7 +398,6 @@ def construir_rede(linhas: list[Any] | None) -> Rede:
         if n0 == n1:
             continue
         comp = float(pecas[i].length)
-        # Mão única não entra: a via vale nos dois sentidos, e a ré usa o mesmo arco.
         adj[n0].append((n1, i, comp))
         adj[n1].append((n0, i, comp))
     rede = Rede(linhas=pecas, peca_nos=peca_nos, adj=adj)
@@ -438,212 +408,13 @@ def construir_rede(linhas: list[Any] | None) -> Rede:
 _REDE: Rede | None = None
 
 
-def _arquivo_osm() -> Path | None:
-    raiz = Path(__file__).resolve().parents[1] / "output"
-    forçado = (os.getenv("SAGTRACK_OSM") or "").strip()
-    candidatos = [Path(forçado)] if forçado else []
-    if raiz.is_dir():
-        candidatos.extend(raiz.rglob("osm_wgs.json"))
-    validos = [caminho for caminho in candidatos if caminho.is_file() and caminho.stat().st_size > 1000]
-    if not validos:
-        return None
-    return max(validos, key=lambda caminho: caminho.stat().st_size)
-
-
-def _linhas_osm() -> list[LineString]:
-    """Vias do OSM já em UTM. Some o arquivo e a malha fica só com o GPKG."""
-    caminho = _arquivo_osm()
-    if caminho is None:
-        return []
-    try:
-        bruto = json.loads(caminho.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    saida: list[LineString] = []
-    for coords in bruto if isinstance(bruto, list) else []:
-        utm = []
-        for par in coords:
-            if not isinstance(par, (list, tuple)) or len(par) < 2:
-                continue
-            try:
-                x, y = TO_UTM.transform(float(par[1]), float(par[0]))
-            except (TypeError, ValueError):
-                continue
-            utm.append((float(x), float(y)))
-        if len(utm) < 2:
-            continue
-        linha = LineString(utm)
-        if linha.length >= 8:
-            saida.append(linha)
-    return saida
-
-
-def _dists_no_miolo(linha: LineString, geom) -> list[float]:
-    """Distâncias do cruzamento no meio da linha. Ponta encostada não corta."""
-    if geom is None or geom.is_empty:
-        return []
-    tipo = geom.geom_type
-    if tipo in {"MultiLineString", "GeometryCollection", "MultiPoint"}:
-        saida: list[float] = []
-        for parte in geom.geoms:
-            saida.extend(_dists_no_miolo(linha, parte))
-        return saida
-    if tipo == "LineString":
-        pontos = [Point(geom.coords[0]), Point(geom.coords[-1])]
-    elif tipo == "Point":
-        pontos = [geom]
-    else:
-        return []
-    comp = float(linha.length)
-    saida = []
-    for ponto in pontos:
-        dist = float(linha.project(ponto))
-        if 1.0 < dist < comp - 1.0:
-            saida.append(dist)
-    return saida
-
-
-def _unir_pontas(linhas: list[LineString], folga_m: float) -> list[LineString]:
-    """Pontas a até 5 m viram o mesmo ponto. As duas pontas da mesma linha não se unem."""
-    pontas: list[tuple[int, int, float, float]] = []
-    for i, linha in enumerate(linhas):
-        c0, c1 = linha.coords[0], linha.coords[-1]
-        pontas.append((i, 0, float(c0[0]), float(c0[1])))
-        pontas.append((i, 1, float(c1[0]), float(c1[1])))
-    pai = list(range(len(pontas)))
-
-    def achar(i: int) -> int:
-        while pai[i] != i:
-            pai[i] = pai[pai[i]]
-            i = pai[i]
-        return i
-
-    def unir(a: int, b: int) -> None:
-        ra, rb = achar(a), achar(b)
-        if ra != rb:
-            pai[rb] = ra
-
-    baldes: dict[tuple[int, int], list[int]] = defaultdict(list)
-    for k, (_i, _qual, x, y) in enumerate(pontas):
-        baldes[(int(math.floor(x / folga_m)), int(math.floor(y / folga_m)))].append(k)
-    for k, (i, _qual, x, y) in enumerate(pontas):
-        ix = int(math.floor(x / folga_m))
-        iy = int(math.floor(y / folga_m))
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                for j in baldes.get((ix + dx, iy + dy), ()):
-                    if j <= k or pontas[j][0] == i:
-                        continue
-                    if math.hypot(x - pontas[j][2], y - pontas[j][3]) <= folga_m:
-                        unir(k, j)
-    grupos: dict[int, list[int]] = defaultdict(list)
-    for k in range(len(pontas)):
-        grupos[achar(k)].append(k)
-    mover: dict[tuple[int, int], tuple[float, float]] = {}
-    for membros in grupos.values():
-        if len(membros) < 2:
-            continue
-        cx = sum(pontas[k][2] for k in membros) / len(membros)
-        cy = sum(pontas[k][3] for k in membros) / len(membros)
-        for k in membros:
-            mover[(pontas[k][0], pontas[k][1])] = (cx, cy)
-    saida: list[LineString] = []
-    for i, linha in enumerate(linhas):
-        coords = [(float(x), float(y)) for x, y, *_resto in linha.coords]
-        novo0 = mover.get((i, 0), coords[0])
-        novo1 = mover.get((i, 1), coords[-1])
-        if math.hypot(novo0[0] - novo1[0], novo0[1] - novo1[1]) >= 0.4:
-            coords[0] = novo0
-            coords[-1] = novo1
-        limpo = [coords[0]]
-        for ponto in coords[1:]:
-            if math.hypot(ponto[0] - limpo[-1][0], ponto[1] - limpo[-1][1]) >= 0.4:
-                limpo.append(ponto)
-        if len(limpo) >= 2:
-            saida.append(LineString(limpo))
-    return saida
-
-
-def _ligar_cruzamentos(linhas: list[Any], folga_m: float = FOLGA_CRUZAMENTO_M) -> list[LineString]:
-    """Quebra a linha onde ela cruza outra e une pontas a até 5 m."""
-    from shapely.strtree import STRtree
-
-    base = []
-    for linha in linhas or []:
-        base.extend(_linhas_de(linha))
-    if len(base) < 2:
-        return base
-    arvore = STRtree(base)
-    cortes: list[list[float]] = [[] for _ in base]
-    for i, linha in enumerate(base):
-        try:
-            hits = arvore.query(linha, predicate="intersects")
-        except TypeError:
-            hits = []
-        for bruto in hits:
-            j = int(bruto)
-            if j <= i:
-                continue
-            outra = base[j]
-            try:
-                cruz = linha.intersection(outra)
-            except Exception:
-                continue
-            cortes[i].extend(_dists_no_miolo(linha, cruz))
-            cortes[j].extend(_dists_no_miolo(outra, cruz))
-    partidos: list[LineString] = []
-    for linha, marcas in zip(base, cortes):
-        if not marcas:
-            partidos.append(linha)
-            continue
-        coords = [(float(x), float(y)) for x, y, *_resto in linha.coords]
-        for pedaco in _quebrar_no_cruzamento(coords, marcas):
-            partidos.append(LineString(pedaco))
-    return _unir_pontas(partidos, folga_m)
-
-
-def _quebrar_no_cruzamento(coords: list[tuple[float, float]], cortes: list[float]) -> list[list[tuple[float, float]]]:
-    """Corta no cruzamento, inclusive perto da ponta. O miolo de 5 m do _fatiar não serve aqui."""
-    acum = [0.0]
-    for (x0, y0), (x1, y1) in zip(coords, coords[1:]):
-        acum.append(acum[-1] + math.hypot(x1 - x0, y1 - y0))
-    comp = acum[-1]
-    if comp < 0.4:
-        return []
-    marcas = [0.0, comp]
-    for dist in cortes:
-        if 0.4 < dist < comp - 0.4:
-            marcas.append(dist)
-    ordenados = sorted({round(item, 2) for item in marcas})
-    if len(ordenados) == 2:
-        return [coords]
-    saida: list[list[tuple[float, float]]] = []
-    for a, b in zip(ordenados, ordenados[1:]):
-        if b - a < 0.4:
-            continue
-        pedaco = [_no_comprimento(coords, acum, a)]
-        for ponto, dist in zip(coords, acum):
-            if a + 0.2 < dist < b - 0.2:
-                pedaco.append(ponto)
-        pedaco.append(_no_comprimento(coords, acum, b))
-        limpo = [pedaco[0]]
-        for ponto in pedaco[1:]:
-            if math.hypot(ponto[0] - limpo[-1][0], ponto[1] - limpo[-1][1]) >= 0.2:
-                limpo.append(ponto)
-        if len(limpo) >= 2:
-            saida.append(limpo)
-    return saida or [coords]
-
-
 def rede_oficial() -> Rede:
     global _REDE
     if _REDE is not None:
         return _REDE
     from .mapa_oficial import carregar_vias
 
-    camadas = list(_linhas_osm())
-    camadas.extend(carregar_vias())
-    _REDE = construir_rede(_ligar_cruzamentos(camadas, folga_m=8.0))
+    _REDE = construir_rede(carregar_vias())
     return _REDE
 
 
@@ -686,97 +457,52 @@ def _projetar(rede: Rede, x: float, y: float, rumo: float | None, peca_atual: in
     return melhor
 
 
-def _afasta(base: LineString, outra: LineString) -> float:
-    maior = 0.0
-    dist = 0.0
-    while dist <= outra.length:
-        maior = max(maior, float(base.distance(outra.interpolate(dist))))
-        dist += 15.0
-    return maior
-
-
-def _parecido(primeiro: LineString, segundo: LineString) -> bool:
-    curto = min(float(primeiro.length), float(segundo.length))
-    longo = max(float(primeiro.length), float(segundo.length))
-    if curto < 1 or longo > curto * (1.0 + MARGEM_CAMINHO) + 8:
-        return False
-    return _afasta(primeiro, segundo) > AFASTAMENTO_M
-
-
-def _caminho(
-    rede: Rede,
-    origem: _Snap,
-    destino: _Snap,
-    limite: float,
-    proibir: set[int],
-    desvio: bool,
-) -> tuple[LineString, set[int]] | None:
+def _ligar(rede: Rede, origem: _Snap, destino: _Snap, limite: float) -> LineString | None:
     if limite < 0.4:
         return None
     linha_a = rede.linhas[origem.peca]
-    if origem.peca == destino.peca and not desvio and origem.peca not in proibir:
-        direto = _trecho(linha_a, origem.offset, destino.offset)
-        if direto is None or direto.length > limite + 1:
-            return None
-        return direto, {origem.peca}
+    if origem.peca == destino.peca:
+        return _trecho(linha_a, origem.offset, destino.offset)
     n0, n1 = rede.peca_nos[origem.peca]
     alvo0, alvo1 = rede.peca_nos[destino.peca]
     alvos = {alvo0, alvo1}
     entrada: dict[int, LineString | None] = {}
-    semente: dict[int, float] = {}
     melhor: dict[int, float] = {}
     prev: dict[int, tuple[int, int]] = {}
-    heap: list[tuple[float, int, int]] = []
+    heap: list[tuple[float, int]] = []
 
     def entrar(no: int, custo: float, geom: LineString | None) -> None:
-        if custo > limite or custo >= semente.get(no, 1e18):
+        if custo > limite or custo >= melhor.get(no, 1e18):
             return
         if geom is None and custo > 0.5:
             return
         entrada[no] = geom
-        semente[no] = custo
-        heapq.heappush(heap, (custo, no, 0))
-
-    def relaxar(no: int, viz: int, peca: int, custo: float) -> None:
-        if peca in proibir or custo > limite or custo >= melhor.get(viz, 1e18):
-            return
-        melhor[viz] = custo
-        prev[viz] = (no, peca)
-        heapq.heappush(heap, (custo, viz, 1))
+        melhor[no] = custo
+        heapq.heappush(heap, (custo, no))
 
     entrar(n0, origem.offset, _trecho(linha_a, origem.offset, 0.0))
     entrar(n1, max(0.0, linha_a.length - origem.offset), _trecho(linha_a, origem.offset, linha_a.length))
-    linha_b = rede.linhas[destino.peca]
-
-    def extra_de(no: int) -> float:
-        if no == alvo0:
-            return float(destino.offset)
-        return max(0.0, float(linha_b.length) - float(destino.offset))
-
-    achado: tuple[int, float, int] | None = None
-    melhor_total = 1e18
+    achado: tuple[int, float] | None = None
     passos = 0
     while heap and passos < 2500:
-        custo, no, flag = heapq.heappop(heap)
+        custo, no = heapq.heappop(heap)
         passos += 1
-        if custo >= melhor_total:
+        if custo > melhor.get(no, 1e18) + 0.1:
             continue
-        if flag == 0:
-            if custo > semente.get(no, 1e18) + 0.1:
-                continue
-        elif custo > melhor.get(no, 1e18) + 0.1:
-            continue
-        if no in alvos and (flag == 1 or not desvio):
-            total = custo + extra_de(no)
-            if total < melhor_total and total <= limite + 1:
-                achado = (no, custo, flag)
-                melhor_total = total
+        if no in alvos and (achado is None or custo < achado[1]):
+            achado = (no, custo)
             continue
         for viz, peca, comp in rede.adj[no]:
-            relaxar(no, viz, peca, custo + comp)
+            novo = custo + comp
+            if novo > limite or novo >= melhor.get(viz, 1e18):
+                continue
+            melhor[viz] = novo
+            prev[viz] = (no, peca)
+            heapq.heappush(heap, (novo, viz))
     if achado is None:
         return None
-    no_fim, custo_fim, flag_fim = achado
+    no_fim, custo_fim = achado
+    linha_b = rede.linhas[destino.peca]
     if no_fim == alvo0:
         extra = destino.offset
         saida = _trecho(linha_b, 0.0, destino.offset)
@@ -786,18 +512,15 @@ def _caminho(
     if custo_fim + extra > limite + 1:
         return None
     cadeia: list[tuple[int, int, int]] = []
-    usadas = {origem.peca, destino.peca}
     cursor = no_fim
-    if flag_fim == 1 and cursor in prev:
-        visto: set[int] = set()
-        while cursor in prev and cursor not in visto and len(cadeia) < 400:
-            visto.add(cursor)
-            anterior, peca = prev[cursor]
-            cadeia.append((anterior, cursor, peca))
-            usadas.add(peca)
-            cursor = anterior
-            if cursor in entrada:
-                break
+    guarda = 0
+    while cursor not in entrada and guarda < 400:
+        guarda += 1
+        if cursor not in prev:
+            return None
+        anterior, peca = prev[cursor]
+        cadeia.append((anterior, cursor, peca))
+        cursor = anterior
     if cursor not in entrada:
         return None
     coords: list[tuple[float, float]] = []
@@ -811,78 +534,19 @@ def _caminho(
             coords.append((float(x), float(y)))
 
     juntar(entrada.get(cursor))
-    for anterior, _atual, peca in reversed(cadeia):
+    for anterior, atual, peca in reversed(cadeia):
         na, nb = rede.peca_nos[peca]
         linha = rede.linhas[peca]
-        if anterior == na and _atual == nb:
+        if anterior == na and atual == nb:
             juntar(linha)
-        elif anterior == nb and _atual == na:
+        elif anterior == nb and atual == na:
             juntar(_inverter(linha))
     juntar(saida)
     if len(coords) < 2:
         if extra < 0.4 and cursor in entrada and entrada[cursor] is not None:
-            return entrada[cursor], usadas
+            return entrada[cursor]
         return None
-    return LineString(coords), usadas
-
-
-def _linhas_de_geom(geom: Any) -> list[LineString]:
-    if geom is None or getattr(geom, "is_empty", True):
-        return []
-    tipo = geom.geom_type
-    if tipo == "LineString":
-        return [geom] if geom.length >= 8 else []
-    if tipo == "MultiLineString":
-        return [parte for parte in geom.geoms if parte.length >= 8]
-    if tipo == "GeometryCollection":
-        saida: list[LineString] = []
-        for parte in geom.geoms:
-            saida.extend(_linhas_de_geom(parte))
-        return saida
-    return []
-
-
-def _usa_reta_lenta(dt: float, vel_gps: float) -> bool:
-    """1,5× a reta + 30 m só no vão longo e lento. Até 90 s vale o teto de 60 km/h."""
-    return dt > VAO_RETA_S and vel_gps < VEL_BAIXA
-
-
-def _limite_do_vao(dt: float, dist_gps: float, salto: float, teto_m: float, vel_gps: float) -> float:
-    if _usa_reta_lenta(dt, vel_gps):
-        return dist_gps * FATOR_LENTO + FOLGA_LENTA_M
-    if dt > 0:
-        return teto_m
-    return max(salto * FATOR_CAMINHO, salto + FOLGA_CAMINHO_M)
-
-
-def _ligar(rede: Rede, origem: _Snap, destino: _Snap, limite: float) -> tuple[LineString, list[LineString]] | None:
-    """Caminho na malha. Vários caminhos viáveis devolvem só o trecho comum."""
-    achado = _caminho(rede, origem, destino, limite, set(), False)
-    if achado is None:
-        return None
-    geom, pecas = achado
-    if origem.peca == destino.peca and destino.offset + 1 < origem.offset:
-        return geom, [geom] if geom.length >= 8 else []
-    if geom.length < 12 or not pecas:
-        return geom, [geom] if geom.length >= 8 else []
-    proibir = set(pecas)
-    outros: list[LineString] = []
-    for _ in range(3):
-        outro = _caminho(rede, origem, destino, limite, proibir, True)
-        if outro is None or _afasta(geom, outro[0]) <= AFASTAMENTO_M:
-            break
-        outros.append(outro[0])
-        proibir |= set(outro[1])
-    if not outros:
-        return geom, [geom]
-    try:
-        faixa = outros[0].buffer(6.0)
-        for extra in outros[1:]:
-            faixa = faixa.intersection(extra.buffer(6.0))
-        comum = geom.intersection(faixa)
-    except Exception:
-        return geom, [geom]
-    return geom, _linhas_de_geom(comum)
+    return LineString(coords)
 
 
 def _utm(lat: float, lon: float) -> tuple[float, float]:
@@ -905,7 +569,7 @@ def casar_pulsos(
     dia: date | None = None,
     turno: str | None = None,
 ) -> Trajeto:
-    """Corte, limpeza e casamento. `rede` None usa a malha completa da cidade."""
+    """Corte, limpeza e casamento. `rede` None usa a malha oficial."""
     malha = _rede_de(rede)
     brutos = cortar_turno(normalizar_pulsos(pontos), dia, turno)
     limpos = limpar_pulsos(brutos)
@@ -916,34 +580,6 @@ def casar_pulsos(
     anterior: _Snap | None = None
     ts_anterior = ""
     xy_anterior: tuple[float, float] | None = None
-
-    def _gravar_trecho(parte: LineString, inicio: str, fim: str) -> None:
-        if parte is None or parte.is_empty or parte.length < 8:
-            return
-        linhas_utm.append(parte)
-        pulsos: list[Ponto] = []
-        total = float(parte.length) or 1.0
-        base = _hora(inicio)
-        duracao = max(0.0, _segundos(inicio, fim))
-        percorrido = 0.0
-        anterior_xy: tuple[float, float] | None = None
-        for x, y in parte.coords:
-            if anterior_xy is not None:
-                percorrido += math.hypot(x - anterior_xy[0], y - anterior_xy[1])
-            anterior_xy = (float(x), float(y))
-            if base is None or duracao <= 0:
-                marca = fim
-            else:
-                from datetime import timedelta
-
-                marca = (base + timedelta(seconds=duracao * percorrido / total)).isoformat(timespec="seconds")
-            lat, lon = _wgs(float(x), float(y))
-            if pulsos and pulsos[-1][1] == lat and pulsos[-1][2] == lon:
-                continue
-            pulsos.append((marca, lat, lon))
-        if len(pulsos) >= 2:
-            pulsos[-1] = (fim, pulsos[-1][1], pulsos[-1][2])
-            pecas.append(pulsos)
 
     def fechar() -> None:
         nonlocal coords, marcas
@@ -963,12 +599,10 @@ def casar_pulsos(
     for ts, lat, lon in limpos:
         x, y = _utm(lat, lon)
         rumo = None
-        dist_gps = 0.0
         if xy_anterior is not None:
             dx = x - xy_anterior[0]
             dy = y - xy_anterior[1]
-            dist_gps = math.hypot(dx, dy)
-            if dist_gps >= 8:
+            if math.hypot(dx, dy) >= 8:
                 rumo = math.atan2(dy, dx)
         snap = _projetar(malha, x, y, rumo, anterior.peca if anterior else None)
         xy_anterior = (x, y)
@@ -985,68 +619,20 @@ def casar_pulsos(
             ts_anterior = ts
             continue
         salto = math.hypot(snap.x - anterior.x, snap.y - anterior.y)
-        dt = _segundos(ts_anterior, ts)
-        if dt > GAP_S or (dt <= 0 and salto > FOLGA_CAMINHO_M):
+        if _segundos(ts_anterior, ts) > GAP_S or salto > JUNTA_M:
             fechar()
             coords = [(snap.x, snap.y)]
             marcas = [ts]
             anterior = snap
             ts_anterior = ts
             continue
-        teto_m = (VEL_MAX / 3.6 * dt) if dt > 0 else 0.0
-        vel_gps = dist_gps / dt * 3.6 if dt > 0 else VEL_MAX
-        if dt > 0 and dist_gps > teto_m:
-            fechar()
-            coords = [(snap.x, snap.y)]
-            marcas = [ts]
-            anterior = snap
-            ts_anterior = ts
-            continue
-        limite = _limite_do_vao(dt, dist_gps, salto, teto_m, vel_gps)
-        ligado = _ligar(malha, anterior, snap, limite)
-        if ligado is None:
+        limite = min(JUNTA_M, max(salto * FATOR_CAMINHO, salto + FOLGA_CAMINHO_M))
+        geom = _ligar(malha, anterior, snap, limite)
+        if geom is None or geom.length > limite + 1:
             if salto < 2:
                 anterior = snap
                 ts_anterior = ts
                 continue
-            fechar()
-            coords = [(snap.x, snap.y)]
-            marcas = [ts]
-            anterior = snap
-            ts_anterior = ts
-            continue
-        cheio, partes = ligado
-        if _usa_reta_lenta(dt, vel_gps):
-            if cheio.length > dist_gps * FATOR_LENTO + FOLGA_LENTA_M + 1:
-                fechar()
-                coords = [(snap.x, snap.y)]
-                marcas = [ts]
-                anterior = snap
-                ts_anterior = ts
-                continue
-            partes = [cheio] if cheio.length >= 8 else partes
-        elif dt > 0 and vel_gps < VEL_BAIXA:
-            partes = [cheio] if cheio.length >= 8 else partes
-        elif dt > 0 and cheio.length > teto_m + 1:
-            fechar()
-            coords = [(snap.x, snap.y)]
-            marcas = [ts]
-            anterior = snap
-            ts_anterior = ts
-            continue
-        if not partes:
-            fechar()
-            coords = [(snap.x, snap.y)]
-            marcas = [ts]
-            anterior = snap
-            ts_anterior = ts
-            continue
-        if len(partes) == 1:
-            geom = partes[0]
-        else:
-            for parte in partes:
-                fechar()
-                _gravar_trecho(parte, ts_anterior, ts)
             fechar()
             coords = [(snap.x, snap.y)]
             marcas = [ts]
@@ -1286,9 +872,8 @@ def _creditar_pista_dupla(segmentos: list[LineString], nomes: list[str], coberto
 
 
 def percentual_da_linha(geom, ruas: list[Any], setor, nomes: list[str] | None = None) -> float | None:
-    """Metros da via oficial que o caminho já casado percorreu, dentro do polígono.
+    """Metros da via oficial cobertos pela linha já casada, dentro do polígono.
 
-    A linha vem da malha completa. Só conta o trecho oficial que coincide com ela.
     Sem vias não há percentual. A via de contorno só entra se a linha passou por ela.
     """
     if not ruas or setor is None or geom is None or getattr(geom, "is_empty", True):
@@ -1305,7 +890,7 @@ def percentual_da_linha(geom, ruas: list[Any], setor, nomes: list[str] | None = 
     if not segmentos:
         return None
     try:
-        faixa = recorte.buffer(5.0)
+        faixa = recorte.buffer(8.0)
     except Exception:
         return 0.0
     cobertos: set[int] = set()

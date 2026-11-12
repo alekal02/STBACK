@@ -297,13 +297,15 @@ def ler_painel(
     from .unificado import ajustar_rotas_turno_flexivel, filtrar_rotas_frequencia_atual
 
     try:
-        con = conectar(leitura=True)
+        con = conectar()
     except RuntimeError as exc:
         _avisar_disco(exc)
         return _painel_sem_persistencia(dia, pedido, str(exc))
     try:
+        _importar_json_se_vazio(con, output_dir, dia, pedido)
         view = ler_view(con, dia.isoformat(), pedido)
         pct_outro = percentuais_outro_turno(con, dia.isoformat(), pedido) if view else {}
+        con.commit()
     finally:
         con.close()
     pasta, _diario, _meta, _falha = _ler_pasta(Path(output_dir), dia, pedido)
@@ -517,8 +519,13 @@ def reconciliar_rotas_previstas(con, dia: date, turno: str) -> dict[str, Any]:
 
 
 def _desenho_da_placa(con: Any, data: str, turno: str, placa: str, *, completo: bool) -> None:
-    """A API não casa. O processo separado lê o pulso novo e grava a trilha."""
-    return
+    """Grava a polilinha casada junto com o ponto. A consulta do mapa só lê."""
+    try:
+        from .live_mapa import atualizar_trilha
+
+        atualizar_trilha(con, data, turno, placa, completo=completo)
+    except Exception as exc:
+        print(f"Trajetória de {placa} não gravada: {exc}", flush=True)
 
 
 def ciclo_gps(
@@ -1458,8 +1465,19 @@ def _recalcular_oficial(
 
 
 def _aplicar_linha_nas_rotas(dia: date, turno: str, rotas: list[dict[str, Any]]) -> None:
-    """A API não recasa a frota. O percentual exibido é o que já está gravado na rota."""
-    return
+    """O percentual da rota é a linha casada de todos os veículos, basculante incluso."""
+    from .trajetoria import percentual_das_rotas
+
+    codigos = [str(rota.get("codigo") or "") for rota in rotas if str(rota.get("codigo") or "").strip()]
+    try:
+        valores = percentual_das_rotas(dia, turno, codigos)
+    except Exception as exc:
+        print(f"Linha casada das rotas indisponível: {exc}", flush=True)
+        return
+    for rota in rotas:
+        codigo = str(rota.get("codigo") or "").strip().upper()
+        if codigo in valores and valores[codigo] is not None:
+            rota["percentual"] = valores[codigo]
 
 
 _EXIBICAO_OFICIAL: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}

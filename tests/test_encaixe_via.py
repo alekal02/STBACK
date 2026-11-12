@@ -1,6 +1,5 @@
 """Pulso de um minuto segue a via. Vão ambíguo ou longo não vira trecho executado."""
 
-import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -194,7 +193,3 @@ def test_leitura_usa_a_trilha_gravada(tmp_path, monkeypatch):
     assert pacote["veiculos"][0]["placa"] == "SCH-9B28"
     assert pacote["veiculos"][0]["tipo"] == "compactador"
     assert pacote["veiculos"][0]["linhas"] == [curva]
-    rapido = json.loads(live_mapa.corpo_trilhas("2026-11-10", "diurno").decode("utf-8"))
-    assert rapido["veiculos"] == pacote["veiculos"]
-    assert rapido["cursor"] == pacote["cursor"]
-    assert rapido["pontos_visuais"] == pacote["pontos_visuais"]

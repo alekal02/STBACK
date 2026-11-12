@@ -1270,12 +1270,11 @@ class Handler(BaseHTTPRequestHandler):
         body: bytes,
         content_type: str,
         extra: dict[str, str] | None = None,
-        compresslevel: int = 5,
     ) -> None:
         cabecalhos = dict(extra or {})
         aceita = (self.headers.get("Accept-Encoding") or "").lower()
         if body and "gzip" in aceita and "Content-Encoding" not in cabecalhos:
-            body = gzip.compress(body, compresslevel=compresslevel)
+            body = gzip.compress(body, compresslevel=5)
             cabecalhos["Content-Encoding"] = "gzip"
             vary = cabecalhos.get("Vary", "")
             cabecalhos["Vary"] = f"{vary}, Accept-Encoding" if vary else "Accept-Encoding"
@@ -1298,8 +1297,8 @@ class Handler(BaseHTTPRequestHandler):
             detalhe_rota,
             dificil_acesso,
             dificil_acesso_v2,
-            corpo_trilhas,
             geometria_bytes,
+            trilhas,
         )
 
         data = (qs.get("data") or [None])[0]
@@ -1320,17 +1319,15 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if path.endswith("/tracks"):
-                self._corpo(
+                self._json(
                     200,
-                    corpo_trilhas(
+                    trilhas(
                         data,
                         turno,
                         (qs.get("placa") or [None])[0],
                         (qs.get("rota") or [None])[0],
                     ),
-                    "application/json; charset=utf-8",
                     sem_cache,
-                    compresslevel=1,
                 )
                 return
             # V2 antes do V1: endswith("/dificil-acesso") também casa com ".../v2".

@@ -24,6 +24,10 @@ PLACAS_COLETA = {
     "SDJ6C47",
     "SDN9G76",
     "SDO5B17",
+    "VCK0D86",
+    "CMP4041",
+    "CMP6672",
+    "CMP7369",
 }
 
 

@@ -18,6 +18,11 @@ from inlog_agent.server import Handler, SalaHTTPServer
 
 
 SENHA_ADMIN = "Admin-Rota-Vivo-1"
+
+
+@pytest.fixture(autouse=True)
+def _placa_de_teste_entra_na_coleta(monkeypatch):
+    monkeypatch.setattr("inlog_agent.dificil_acesso.eh_coleta", lambda *_args, **_kwargs: True)
 SENHA_OP = "Operador-Rota-2"
 DIA = "2026-10-19"
 

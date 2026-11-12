@@ -5,6 +5,8 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from shapely.geometry import LineString
 
 from inlog_agent.cobertura import (
@@ -17,6 +19,12 @@ from inlog_agent.cobertura import (
 from inlog_agent.mapa_oficial import caminho_gpkg, carregar_setores
 
 _X, _Y = TO_UTM.transform(-49.25, -16.82)
+
+
+@pytest.fixture(autouse=True)
+def _placa_de_teste_entra_na_coleta(monkeypatch):
+    """Placa fictícia não está no cadastro. O teste olha a geometria, não o tipo."""
+    monkeypatch.setattr("inlog_agent.dificil_acesso.eh_coleta", lambda *_args, **_kwargs: True)
 
 
 def _rua(dx0, dy0, dx1, dy1) -> LineString:

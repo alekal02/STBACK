@@ -1,13 +1,20 @@
 """Pulso de um minuto segue a via. Vão ambíguo ou longo não vira trecho executado."""
 
+import json
 from datetime import datetime, timedelta
 
+import pytest
 from shapely.geometry import LineString, Point
 
 from inlog_agent.cobertura import TO_UTM, TO_WGS, cobertura_compartilhada
 from inlog_agent.live_mapa import _linhas_visuais
 
 _X, _Y = TO_UTM.transform(-49.25, -16.82)
+
+
+@pytest.fixture(autouse=True)
+def _placa_de_teste_entra_na_coleta(monkeypatch):
+    monkeypatch.setattr("inlog_agent.dificil_acesso.eh_coleta", lambda *_args, **_kwargs: True)
 
 
 def _rua(dx0, dy0, dx1, dy1) -> LineString:
@@ -181,8 +188,13 @@ def test_leitura_usa_a_trilha_gravada(tmp_path, monkeypatch):
 
     monkeypatch.setattr(live_mapa, "casar_trilha", recusou)
     monkeypatch.setattr(live_mapa, "_linhas_visuais", recusou)
+    monkeypatch.setattr("inlog_agent.trajetoria.casar_pulsos", recusou)
     pacote = live_mapa.trilhas("2026-11-10", "diurno")
     assert pacote["veiculos"]
     assert pacote["veiculos"][0]["placa"] == "SCH-9B28"
     assert pacote["veiculos"][0]["tipo"] == "compactador"
     assert pacote["veiculos"][0]["linhas"] == [curva]
+    rapido = json.loads(live_mapa.corpo_trilhas("2026-11-10", "diurno").decode("utf-8"))
+    assert rapido["veiculos"] == pacote["veiculos"]
+    assert rapido["cursor"] == pacote["cursor"]
+    assert rapido["pontos_visuais"] == pacote["pontos_visuais"]

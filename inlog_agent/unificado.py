@@ -26,7 +26,7 @@ from .cobertura import (
 from .config import dias_do_ciclo, rotulo_dia_periodo, rotulo_periodo
 from .export import write_json, write_mapa_html
 from .gps import extremos_por_hora, filtrar_pontos_periodo, periodo_gps
-from .mapa_oficial import _freq_do_dia, carregar_setores, listar_rotas_oficiais
+from .mapa_oficial import _freq_do_dia, carregar_setores, frequencias_oficiais, listar_rotas_oficiais
 from .pdf_mapa import cor_da_placa
 from .relatorio_diario import _esc, css_relatorio_web, mapa_frota_inlog
 from .traco_agente import montar_traco_continuo, recortar_trechos_ao_setor
@@ -1075,11 +1075,7 @@ def filtrar_rotas_frequencia_atual(
     A frequência gravada no SQLite é atualizada pela do GPKG.
     """
     pedido = (turno or "").strip().lower()
-    freq_por_codigo: dict[str, str] = {}
-    for setor in carregar_setores(None):
-        codigo = str(setor.get("codigo") or "").upper()
-        if codigo:
-            freq_por_codigo[codigo] = str(setor.get("frequencia") or "")
+    freq_por_codigo = frequencias_oficiais()
     programadas = {
         str(rota.get("codigo") or "").upper()
         for rota in obter_rotas_previstas(dia, pedido)

@@ -48,6 +48,12 @@ def _poligonos() -> list[dict[str, Any]]:
     with _LOCK:
         if _POLIGONOS is not None:
             return _POLIGONOS
+        _POLIGONOS = _ler_poligonos()
+        print(f"GPKG polígonos: 1 leitura, {len(_POLIGONOS)} setores.", flush=True)
+        return _POLIGONOS
+
+
+def _ler_poligonos() -> list[dict[str, Any]]:
     from .mapa_oficial import (
         _achar_coluna,
         _colunas,
@@ -94,11 +100,7 @@ def _poligonos() -> list[dict[str, Any]]:
         finally:
             con.close()
     saida.sort(key=lambda row: row["codigo"])
-    with _LOCK:
-        if _POLIGONOS is None:
-            _POLIGONOS = saida
-            print(f"GPKG polígonos: 1 leitura, {len(saida)} setores.", flush=True)
-        return _POLIGONOS
+    return saida
 
 
 def areas_dificil() -> list[dict[str, Any]]:
@@ -302,16 +304,22 @@ def _colar(grupos: list[list[list[float]]]) -> list[list[list[float]]]:
 def casar_trilha(
     brutos: list[tuple[str, float, float]],
     ruas_de: Any | None = None,
+    *,
+    rede: Any = None,
 ) -> list[list[list[float]]]:
-    """Polilinhas já na via. Vão sem caminho não entra como reta."""
-    buscar = _ruas_proximas if ruas_de is None else ruas_de
-    grupos: list[list[list[float]]] = []
-    for fatia in _fatias(brutos):
-        ruas = buscar(fatia) if buscar else None
-        for linha in _linhas_visuais(fatia, ruas):
-            if len(linha) >= 2:
-                grupos.append(linha)
-    return [item for item in (_enxugar(linha) for linha in _colar(grupos)) if len(item) >= 2]
+    """Polilinhas na malha completa. Sem caminho único, o vão não vira reta.
+
+    `ruas_de` só existe para o teste injetar uma malha pequena. Na gravação
+    real a malha é a cidade inteira, já carregada no processo de casamento.
+    """
+    from .trajetoria import Rede, casar_pulsos
+
+    malha = rede
+    if malha is None and ruas_de is not None:
+        ruas = ruas_de(brutos) if callable(ruas_de) else ruas_de
+        malha = ruas if isinstance(ruas, Rede) else list(ruas or [])
+    linhas = casar_pulsos(brutos, malha).linhas
+    return [item for item in (_enxugar(linha) for linha in linhas) if len(item) >= 2]
 
 
 def _partir_salvas(
@@ -372,35 +380,62 @@ def atualizar_trilha(
     placa: str,
     *,
     completo: bool = False,
+    rede: Any = None,
 ) -> None:
-    """Casa a placa uma vez e grava o desenho. A leitura do mapa não refaz o HMM."""
+    """Casa só o pulso novo e grava o desenho. A leitura do mapa não abre a malha."""
     from datetime import date as dia_tipo
-
-    from .live_db import ler_trilhas_visuais
 
     if con.in_transaction:
         con.commit()
-    rows = con.execute(
-        "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
-        (data, turno, placa),
-    ).fetchall()
-    brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
-    if len(brutos) < 2:
-        _gravar_linha_curta(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
-        return
     chave = _norm_placa(placa)
-    guardada = None if completo else ler_trilhas_visuais(con, data, turno).get(chave)
+    guardada = None
+    if not completo:
+        from .live_db import ler_trilhas_placas
+
+        guardada = ler_trilhas_placas(con, data, turno, [placa]).get(chave)
     if guardada and guardada.get("ate") and guardada.get("linhas"):
         ate = str(guardada["ate"])
-        indice = 0
-        while indice < len(brutos) and brutos[indice][0] <= ate:
-            indice += 1
-        if indice >= len(brutos):
+        novos = con.execute(
+            """
+            SELECT ts, lat, lon FROM ponto
+            WHERE data = ? AND turno = ? AND placa = ? AND ts > ?
+            ORDER BY ts
+            """,
+            (data, turno, placa, ate),
+        ).fetchall()
+        if not novos:
             return
-        cauda = casar_trilha(brutos[max(0, indice - 3) :])
+        anteriores = con.execute(
+            """
+            SELECT ts, lat, lon FROM ponto
+            WHERE data = ? AND turno = ? AND placa = ? AND ts <= ?
+            ORDER BY ts DESC
+            LIMIT 3
+            """,
+            (data, turno, placa, ate),
+        ).fetchall()
+        brutos = [
+            (str(row["ts"] or ""), float(row["lat"]), float(row["lon"]))
+            for row in reversed(anteriores)
+            if row["ts"]
+        ]
+        brutos.extend(
+            (str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in novos if row["ts"]
+        )
+        if len(brutos) < 2:
+            return
+        cauda = casar_trilha(brutos) if rede is None else casar_trilha(brutos, rede=rede)
         linhas = [item for item in (_enxugar(linha) for linha in _colar(list(guardada["linhas"]) + cauda)) if len(item) >= 2]
     else:
-        linhas = casar_trilha(brutos)
+        rows = con.execute(
+            "SELECT ts, lat, lon FROM ponto WHERE data = ? AND turno = ? AND placa = ? ORDER BY ts",
+            (data, turno, placa),
+        ).fetchall()
+        brutos = [(str(row["ts"] or ""), float(row["lat"]), float(row["lon"])) for row in rows if row["ts"]]
+        if len(brutos) < 2:
+            _gravar_linha_curta(con, data, turno, placa, [], [], [], brutos[-1][0] if brutos else "")
+            return
+        linhas = casar_trilha(brutos) if rede is None else casar_trilha(brutos, rede=rede)
     try:
         dia = dia_tipo.fromisoformat(data)
         setores = _setores_do_turno(dia, turno)
@@ -853,6 +888,124 @@ def trilhas(
         "pontos_visuais": visuais,
         "veiculos": veiculos,
     }
+
+
+def _json_array(texto: str) -> str:
+    bruto = str(texto or "").strip()
+    if len(bruto) >= 2 and bruto[0] == "[" and bruto[-1] == "]":
+        return bruto
+    return "[]"
+
+
+def _array_cheio(texto: str) -> bool:
+    return _json_array(texto) not in {"[]"}
+
+
+def _pontos_no_array(texto: str) -> int:
+    """Conta pares [lat, lon] sem montar a lista."""
+    n = 0
+    i = 0
+    tamanho = len(texto)
+    while i < tamanho:
+        if texto[i] != "[":
+            i += 1
+            continue
+        fim = texto.find("]", i + 1)
+        if fim < 0:
+            return n
+        miolo = texto[i + 1 : fim]
+        if "," in miolo and "[" not in miolo:
+            n += 1
+            i = fim + 1
+            continue
+        i += 1
+    return n
+
+
+def corpo_trilhas(
+    data: str | None,
+    turno: str | None,
+    placa: str | None = None,
+    rota: str | None = None,
+) -> bytes:
+    """O mesmo pacote de `trilhas`, montado em cima do JSON já gravado."""
+    dia, pedido = _dia_turno(data, turno)
+    filtro_placa = str(placa or "").strip().upper()
+    filtro_rota = str(rota or "").strip().upper()
+    from .trajetoria import tipo_da_placa
+
+    con = conectar(leitura=True)
+    try:
+        resumo = con.execute(
+            """
+            SELECT COUNT(*) AS n, MAX(ts) AS mx
+            FROM ponto
+            WHERE data = ? AND turno = ?
+            """,
+            (dia.isoformat(), pedido),
+        ).fetchone()
+        pontos_originais = int(resumo["n"] or 0) if resumo else 0
+        cursor = str(resumo["mx"] or "") if resumo else ""
+        try:
+            rows = con.execute(
+                "SELECT placa, linhas, dentro, fora FROM trilha WHERE data = ? AND turno = ?",
+                (dia.isoformat(), pedido),
+            ).fetchall()
+        except Exception:
+            rows = []
+    finally:
+        con.close()
+
+    permitidas = _placas_executoras(dia.isoformat(), pedido, filtro_rota) if filtro_rota else None
+    visuais = 0
+    partes: list[str] = []
+    for row in rows:
+        marca = str(row["placa"] or "")
+        tipo = tipo_da_placa(marca)
+        if tipo not in {"compactador", "basculante"}:
+            continue
+        if filtro_placa and marca.upper() != filtro_placa:
+            continue
+        if permitidas is not None and _norm_placa(marca) not in permitidas:
+            continue
+        if tipo == "basculante":
+            linhas = row["linhas"] if _array_cheio(str(row["linhas"] or "")) else str(row["dentro"] or "")
+            fora = "[]"
+        else:
+            linhas = row["dentro"] if _array_cheio(str(row["dentro"] or "")) else str(row["linhas"] or "")
+            fora = str(row["fora"] or "")
+        linhas = _json_array(linhas)
+        fora = _json_array(fora)
+        if linhas == "[]" and fora == "[]":
+            continue
+        visuais += _pontos_no_array(linhas) + _pontos_no_array(fora)
+        partes.append(
+            '{"placa":'
+            + json.dumps(marca, ensure_ascii=False)
+            + ',"tipo":'
+            + json.dumps(tipo)
+            + ',"linhas":'
+            + linhas
+            + ',"deslocamento":'
+            + fora
+            + "}"
+        )
+    texto = (
+        '{"data":'
+        + json.dumps(dia.isoformat())
+        + ',"turno":'
+        + json.dumps(pedido)
+        + ',"cursor":'
+        + json.dumps(cursor)
+        + ',"pontos_originais":'
+        + str(pontos_originais)
+        + ',"pontos_visuais":'
+        + str(visuais)
+        + ',"veiculos":['
+        + ",".join(partes)
+        + "]}"
+    )
+    return texto.encode("utf-8")
 
 
 def _trechos_por_area(
@@ -1379,7 +1532,7 @@ def _copia_leitura(pacote: dict[str, Any]) -> dict[str, Any]:
 
 def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
     """GPS já gravado e o motor homologado. Não grava turno, rota nem ponto."""
-    from .dificil_acesso import eh_basculante
+    from .dificil_acesso import eh_coleta
     from .live_db import caminho_banco, ler_pontos_placa
 
     con = conectar(leitura=True)
@@ -1407,8 +1560,6 @@ def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
         ]
         caminhoes = []
         for nome in nomes:
-            if eh_basculante(nome):
-                continue
             pontos = ler_pontos_placa(con, data, turno, nome)
             if len(pontos) < 2:
                 continue
@@ -1440,7 +1591,10 @@ def _leitura_cobertura(data: str, turno: str, codigo: str) -> dict[str, Any]:
         executores = []
         for item in cobertura.get("executores") or []:
             papel = str(item.get("papel") or "")
-            if papel not in {"principal", "apoio", "sobreposta"} or not item.get("placa"):
+            placa = str(item.get("placa") or "")
+            if papel == "apoio" and not eh_coleta(placa):
+                continue
+            if papel not in {"principal", "apoio", "sobreposta"} or not placa:
                 continue
             executores.append(
                 {
@@ -1548,7 +1702,7 @@ def _recorte_guardado(
 
 
 def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Traçado de exibição. A cobertura já está nos trechos oficiais gravados."""
+    """Traçado gravado. Sem trilha, casa uma vez na malha única. A cobertura não muda."""
     placas = [str(item.get("placa") or "").strip() for item in executores if str(item.get("placa") or "").strip()]
     if not placas:
         return []
@@ -1591,10 +1745,11 @@ def _trajetorias(data: str, turno: str, codigo: str, executores: list[dict[str, 
         salvo = salvas.get(chave)
         if salvo and salvo.get("linhas"):
             copia["linhas"] = _recorte_guardado(codigo, chave, str(salvo.get("ate") or ""), salvo["linhas"], aneis, geoms)
-        elif aneis:
-            copia["linhas"] = _recortar_prontas(_linhas_visuais(brutos, None), aneis, geoms)
+        elif brutos:
+            prontas = casar_trilha(brutos)
+            copia["linhas"] = _recortar_prontas(prontas, aneis, geoms) if aneis else prontas
         else:
-            copia["linhas"] = [linha for linha in (_enxugar(item_linha) for item_linha in _linhas_visuais(brutos, None)) if len(linha) >= 2]
+            copia["linhas"] = []
         saida.append(copia)
     return saida
 
@@ -1702,6 +1857,17 @@ def detalhe_rota(data: str | None, turno: str | None, rota: str | None) -> dict[
     if row is None:
         return vazio
     info = ler_executores_json(row["executores_json"] if "executores_json" in row.keys() else "")
+    from .dificil_acesso import eh_coleta
+
+    info["executores"] = [
+        item
+        for item in info["executores"]
+        if str(item.get("papel") or "") != "apoio" or eh_coleta(str(item.get("placa") or ""))
+    ]
+    info["placas_apoio"] = [placa for placa in info.get("placas_apoio") or [] if eh_coleta(str(placa))]
+    from .cobertura import SEM_APOIO
+
+    info["apoio"] = ", ".join(str(placa) for placa in info["placas_apoio"]) or SEM_APOIO
     tem_apoio = any(str(item.get("papel") or "") == "apoio" for item in info["executores"])
     if tem_apoio:
         leitura = _comparacao_vazia("O snapshot já registra o apoio efetivo.")

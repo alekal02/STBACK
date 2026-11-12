@@ -139,3 +139,53 @@ def test_linha_casada_grava_em_transacao_curta(tmp_path, monkeypatch):
         leitor.close()
     escritor.close()
     assert salva is not None
+
+
+def test_api_nao_casa_no_proprio_processo():
+    from inlog_agent.live_sync import _desenho_da_placa
+
+    assert _desenho_da_placa.__doc__
+    _desenho_da_placa(None, "2026-11-11", "noturno", "SCH-9B28", completo=True)
+
+
+def test_so_o_pulso_novo_entra_no_casamento(tmp_path, monkeypatch):
+    banco = tmp_path / "sagtrack.db"
+    monkeypatch.setenv("SAGTRACK_LIVE_DB", str(banco))
+    from inlog_agent.live_db import conectar, gravar_trilha_visual
+    from inlog_agent.live_mapa import atualizar_trilha
+
+    escritor = conectar(banco)
+    marcas = [
+        ("2026-11-11T20:00:00", -49.250),
+        ("2026-11-11T20:00:10", -49.251),
+        ("2026-11-11T20:00:20", -49.252),
+        ("2026-11-11T20:00:30", -49.253),
+        ("2026-11-11T20:00:40", -49.254),
+        ("2026-11-11T20:00:50", -49.255),
+    ]
+    for ts, lon in marcas:
+        escritor.execute(
+            "INSERT INTO ponto (data, turno, placa, ts, lat, lon) VALUES (?, ?, ?, ?, ?, ?)",
+            ("2026-11-11", "noturno", "SCH-9B28", ts, -16.82, lon),
+        )
+    gravar_trilha_visual(
+        escritor,
+        "2026-11-11",
+        "noturno",
+        "SCH-9B28",
+        [[[-16.82, -49.25], [-16.82, -49.254]]],
+        [],
+        [],
+        "2026-11-11T20:00:40",
+    )
+    escritor.commit()
+    vistos: list[list[str]] = []
+
+    def casar(brutos, ruas_de=None, **_kwargs):
+        vistos.append([item[0] for item in brutos])
+        return [[[-16.82, -49.254], [-16.82, -49.255]]]
+
+    monkeypatch.setattr("inlog_agent.live_mapa.casar_trilha", casar)
+    atualizar_trilha(escritor, "2026-11-11", "noturno", "SCH-9B28", completo=False)
+    escritor.close()
+    assert vistos == [["2026-11-11T20:00:20", "2026-11-11T20:00:30", "2026-11-11T20:00:40", "2026-11-11T20:00:50"]]

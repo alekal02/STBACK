@@ -11,6 +11,11 @@ import pytest
 from tests.test_cobertura_compartilhada import _pontos, _setor
 
 
+@pytest.fixture(autouse=True)
+def _placa_de_teste_entra_na_coleta(monkeypatch):
+    monkeypatch.setattr("inlog_agent.dificil_acesso.eh_coleta", lambda *_args, **_kwargs: True)
+
+
 @pytest.fixture
 def ambiente(tmp_path, monkeypatch):
     monkeypatch.delenv("RENDER", raising=False)
